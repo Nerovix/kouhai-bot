@@ -1,0 +1,32 @@
+[project]
+name = "kouhai-bot"
+version = "0.1.0"
+description = "Kouhai Bot — QQ 群算法竞赛助手"
+requires-python = ">=3.11"
+dependencies = [
+    "websockets>=12.0",
+    "cloudscraper>=1.2",
+    "Pillow>=10.0",
+    "aiohttp>=3.9",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0",
+    "pytest-asyncio>=1.0",
+]
+
+[project.scripts]
+kouhai-bot = "kouhai_bot.main:main"
+start = "kouhai_bot.main:start"
+restart = "kouhai_bot.main:restart"
+stop = "kouhai_bot.main:stop"
+status = "kouhai_bot.main:status"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kouhai_bot"]

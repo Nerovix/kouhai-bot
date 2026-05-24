@@ -1,0 +1,85 @@
+# Kouhai Bot — Example Configuration
+# Copy this to config.yaml and fill in your values.
+# config.yaml is .gitignored — never commit real credentials.
+
+# ── QQ Bot ──
+bot_qq: 0  # your bot QQ number
+
+# ── NapCat WebSocket (bot listens here, NapCat connects to this) ──
+napcat_ws_host: "0.0.0.0"   # MUST be 0.0.0.0 when NapCat runs in Docker
+napcat_ws_port: 8097
+napcat_http_host: "127.0.0.1"
+napcat_http_port: 3000
+
+# ── LLM Fallback ──
+# Providers are tried in list order.  First success wins.
+# Each provider is retried up to max_retries times internally before
+# moving to the next one.
+llm:
+  max_retries: 3               # per-provider retries
+  retry_base_delay_sec: 1.0
+  retry_max_delay_sec: 8.0
+
+  # Per-task timeouts (apply to all providers)
+  judge_timeout_sec: 1200
+  clarify_timeout_sec: 600
+  review_timeout_sec: 600
+  summary_timeout_sec: 120
+
+  # Fallback provider list — order matters!
+  providers:
+    # ── Primary: OpenAI-compatible ──
+    - name: openai
+      api_key: "..."
+      base_url: "..."
+      model: "gpt-5.5"
+      reasoning_effort: "high"  # minimal/low/medium/high/xhigh
+      model_tag: "『֎AI』"        # appended to LLM output; empty to disable
+
+    # ── Fallback: Qwen (supports OpenAI-compatible format) ──
+    - name: qwen
+      api_key: "..."
+      base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      model: "qwen3.7-max"
+      model_tag: "『Qwen』"
+
+    # ── Fallback: DeepSeek (supports OpenAI-compatible format) ──
+    - name: deepseek
+      api_key: "..."
+      base_url: "https://api.deepseek.com"
+      model: "deepseek-v4-pro"
+      model_tag: "『🐳』"
+
+# ── Qwen-VL (formula image recognition) ──
+qwen:
+  api_key: "..."
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen-vl-max"
+
+# ── Group ──
+current_group: 0  # your QQ group number
+
+# ── User Groups (optional) ──
+# Users not listed here are in the default group.
+# Example: a "starred" group displayed as "打星" with delayed /submit.
+# user_groups:
+#   - name: starred
+#     display_name: 打星
+#     user_ids: [123456, 234567]
+#     submit_delay_sec: 1800
+#     submit_delay_message: "将机会多留给年轻人吧～{wait}"
+
+# ── Problem Selection ──
+problem:
+  min_rating: 2600
+  max_rating: 2800
+  newproblem_cooldown: 60    # /newproblem cooldown in seconds
+  submit_ac_backdoor: "..."  # optional: if non-empty, matching /submit skips judge
+  daily_post_cron: "0 12 * * *"
+
+# ── Curfew (宵禁) ──
+# Block /submit during quiet hours (Beijing time).
+# start=0, duration=0 disables curfew.
+curfew:
+  start_hour: 4
+  duration_hours: 1

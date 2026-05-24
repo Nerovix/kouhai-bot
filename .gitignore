@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Environment
+config.yaml
+config.json
+
+# Data (runtime, not tracked)
+.xcpc-runtime/
+storage/
+tutorials/
+statements/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests
+.pytest_cache/
+
+# Scripts
+scripts
+
+# Logs
+*.out
+*.log

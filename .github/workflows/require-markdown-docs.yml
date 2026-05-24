@@ -1,0 +1,40 @@
+name: require-markdown-docs
+
+on:
+  pull_request:
+    branches:
+      - master
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+
+permissions:
+  contents: read
+
+jobs:
+  require-markdown-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require at least one Markdown document change
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "Comparing ${BASE_SHA}..${HEAD_SHA}"
+          git diff --name-status "${BASE_SHA}" "${HEAD_SHA}" | tee /tmp/changed_files.txt
+
+          if awk '$1 != "D" && tolower($NF) ~ /\.md$/ {found=1} END{exit found ? 0 : 1}' /tmp/changed_files.txt; then
+            echo "Markdown document change detected."
+            exit 0
+          fi
+
+          echo "::error::This pull request must add or modify at least one Markdown document (*.md) before it can be merged."
+          exit 1

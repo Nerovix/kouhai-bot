@@ -69,5 +69,5 @@ uv run python -c "from kouhai_bot.config import get_config; print(get_config().b
 uv run python -m pytest tests/ -v
 
 # 启动 bot
-uv run python -m kouhai_bot.main
+uv run start
 ```

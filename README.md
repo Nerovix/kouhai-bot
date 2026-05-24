@@ -15,7 +15,7 @@ QQ 群算法竞赛助手 —— CF 题目供应服务、AI judge 评审、群聊
 首先，clone这个仓库。
 
 ```bash
-git clone git@github.com:Nerovix/kouhai-bot.git
+git clone https://github.com/Nerovix/kouhai-bot.git
 cd kouhai-bot
 ```
 
@@ -31,7 +31,7 @@ uv sync
 
 ### 2. 配置
 
-配置写在 `config.yaml` 中。这个文件会别 gitignore 忽略，以防你的群号等隐私泄露。复制仓库中的 example 以填写你自己的配置：
+配置写在 `config.yaml` 中。这个文件会被 gitignore 忽略，以防你的群号等隐私泄露。复制仓库中的 example 以填写你自己的配置：
 
 ```bash
 cp config.example.yaml config.yaml
@@ -55,7 +55,7 @@ cp config.example.yaml config.yaml
 
 配置你的 LLM API。bot 需要 API 作为口粮才能思考！
 
-目前接口仅兼容 OpenAI 格式，不过大部分厂商都提供此格式。bot 在回答问题时会按照 llm 下的配置从上到下按顺序尝试连接。如果你不清楚如何填写配置，向 AI 提供你的厂商、模型需求和 apikey 并寻求帮助。
+目前接口仅兼容 OpenAI 格式，不过大部分厂商都提供此格式。bot 在回答问题时会按照 llm 下的配置从上到下按顺序尝试连接。如果你不清楚如何填写配置，向 AI 提供你的厂商、模型需求和 apikey 以寻求帮助。
 
 > 配置中的 model_tag 是一个标记，会附在 bot 的每个需要 llm 接入的请求尾部，以便用户知晓自己的请求是由哪个模型处理的，~~以便开骂~~
 

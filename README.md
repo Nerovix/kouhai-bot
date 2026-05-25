@@ -145,7 +145,7 @@ bot 能看到原题面他与你在此题的所有对话历史（包括所有clar
 
 ## 开销
 
-此 bot 是纯 chatbot，token 开销很少。根据我们的测试，每天的消耗不超过 1-2M tokens。若使用Deepseek V4 Pro，大约开销是每日2-3r。
+此 bot 是纯 chatbot，token 开销很少。根据我们的测试，每天的消耗不超过 1-2M tokens。若使用 Deepseek V4 Pro，大约开销是每日2-3r。
 
 ## License
 

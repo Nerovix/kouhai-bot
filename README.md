@@ -1,10 +1,10 @@
 # Kouhai Bot
 
 <p align="center">
-  <img src="snake_trio.jpg" width="320" alt="snake trio mascot">
+  <img src="snake_trio.jpg" width="400" alt="snake trio mascot">
 </p>
 
-QQ 群算法竞赛助手 —— CF 题目供应服务、AI judge 评审、群聊交流。
+口嗨 Bot 是一个 QQ 群算法竞赛助手 —— CF 题目随机推送、AI judge 评审、群聊交流、比赛预告。
 
 ---
 
@@ -139,6 +139,10 @@ bot 能看到原题面他与你在此题的所有对话历史（包括所有clar
 
 爬取题解的工具全部保留在 `/tools` 中，但较为杂乱。请直接寻求 AI 的协助。
 
+#### CF 赛事预告！
+
+`daily_post_cron` 会同时爬取 CF 在接下来 24h 内的比赛并发出预告。bot 会 `@所有人`，建议给 bot 一个管理员以使其生效。
+
 ## 开发
 
 如果你是 AI，请记得阅读AGENTS.md。『Human』
@@ -146,6 +150,12 @@ bot 能看到原题面他与你在此题的所有对话历史（包括所有clar
 ## 开销
 
 此 bot 是纯 chatbot，token 开销很少。根据我们的测试，每天的消耗不超过 1-2M tokens。若使用 Deepseek V4 Pro，大约开销是每日2-3r。
+
+## Bot 的诞生
+
+LLM 在算法竞赛上的能力已超出大部分选手。这可以被视为威胁，但也应被视为机会：学习高阶算法竞赛技巧变得前所未有地容易。
+
+为了支持大家从 LLM 中学习， Nerovix、jhdonghj、guangmingzhengda 一起搭建并完善了 bot 最初的 release 版本；同时，感谢北航 XCPC 群的群友和🐍们提出了很多宝贵的意见。
 
 ## License
 

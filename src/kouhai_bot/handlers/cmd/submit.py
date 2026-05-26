@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 import os
 import random
 import re
@@ -26,6 +27,7 @@ from ..shared import (
     clear_user_problem_submissions,
     fetch_group_member_nickname_map,
     format_points,
+    get_problem_posted_at,
     get_today_problem,
     judge_submission_result,
     load_known_problem_ratings,
@@ -41,10 +43,10 @@ from ..shared import (
 from ...config import get_config
 from ...context import get_display_name, load_group_ctx
 from ...user_groups import (
-    format_group_submit_message,
+    effective_submit_delay_sec_for_scoreboard,
     get_user_group,
     is_default_group,
-    is_group_submit_blocked,
+    settle_dynamic_submit_wait_for_problem,
 )
 from ...curfew import is_curfew_active, format_curfew_message
 from ...eventlog import EVENT_META_KEY, log_command_finished
@@ -354,10 +356,32 @@ def _is_problem_solved_in_scoreboard(group_id: int, pid: str) -> bool:
     if not pid:
         return False
     sb = load_scoreboard(group_id)
+    return _scoreboard_has_problem_solve(sb, pid)
+
+
+def _scoreboard_has_problem_solve(sb: dict, pid: str) -> bool:
+    if not pid:
+        return False
     for solve in sb.get("solves", []):
         if str(solve.get("problem", "") or "") == str(pid):
             return True
     return False
+
+
+def _format_submit_wait_seconds(remaining: int) -> str:
+    if remaining >= 60:
+        minutes = (remaining + 59) // 60
+        return f"请等待 {minutes} 分钟后再提交"
+    return f"请等待 {remaining} 秒后再提交"
+
+
+def _format_group_submit_message_for_remaining(user_id: int, remaining: int) -> str:
+    user_group = get_user_group(user_id)
+    template = (
+        user_group.submit_delay_message
+        or f"{user_group.display_name}用户{{wait}}"
+    )
+    return template.replace("{wait}", _format_submit_wait_seconds(remaining))
 
 
 def _cumulative_solves(sb: dict, user_id: int) -> int:
@@ -403,6 +427,10 @@ def _update_scoreboard_for_pid(
         "order": len(sb["solves"]) + 1,
     }
     sb["solves"].append(entry)
+    current = get_today_problem(group_id)
+    current_pid = str(current.get("today", "") or "") if current else ""
+    if current_pid != pid:
+        settle_dynamic_submit_wait_for_problem(sb, pid)
     save_scoreboard(group_id, sb)
     solved = _cumulative_solves(sb, user_id)
     return is_first_blood, solved, _top5_entries(group_id, sb, user_id), sb
@@ -439,28 +467,31 @@ class GroupCoordinator:
         self.scoring_pids: set[str] = set()
         self.next_seq = 1
 
+    def _enqueue_locked(self, req: PendingRequest) -> None:
+        req.seq = self.next_seq
+        self.next_seq += 1
+        self.active[req.seq] = req
+        if req.kind in _USER_CONTEXT_WRITERS and req.target_pid:
+            self.pending_context.setdefault(
+                (req.group_id, req.user_id, req.target_pid),
+                [],
+            ).append(PendingContext(
+                seq=req.seq,
+                kind=req.kind,
+                content=req.payload,
+                problem=req.target_pid,
+                timestamp=req.admitted_wall.isoformat(),
+            ))
+        if req.submit_score_candidate and req.submit_pid:
+            self.submit_candidates.setdefault(req.submit_pid, []).append(req)
+        asyncio.create_task(
+            self._run_request(req),
+            name=f"stateful_{req.command}_{req.group_id}_{req.seq}",
+        )
+
     async def enqueue(self, req: PendingRequest) -> None:
         async with self.lock:
-            req.seq = self.next_seq
-            self.next_seq += 1
-            self.active[req.seq] = req
-            if req.kind in _USER_CONTEXT_WRITERS and req.target_pid:
-                self.pending_context.setdefault(
-                    (req.group_id, req.user_id, req.target_pid),
-                    [],
-                ).append(PendingContext(
-                    seq=req.seq,
-                    kind=req.kind,
-                    content=req.payload,
-                    problem=req.target_pid,
-                    timestamp=req.admitted_wall.isoformat(),
-                ))
-            if req.submit_score_candidate and req.submit_pid:
-                self.submit_candidates.setdefault(req.submit_pid, []).append(req)
-            asyncio.create_task(
-                self._run_request(req),
-                name=f"stateful_{req.command}_{req.group_id}_{req.seq}",
-            )
+            self._enqueue_locked(req)
         await req.done_event.wait()
 
     def status(self) -> dict | None:
@@ -1237,29 +1268,42 @@ async def enqueue_submit_request(
     message_id: str,
     submission: str,
     event_log: dict | None = None,
-) -> None:
+) -> str:
     coord = _get_coordinator(group_id)
-    problem = get_today_problem(group_id)
-    submit_pid = problem.get("today", "") if problem else ""
-    already_solved = bool(submit_pid and _is_problem_solved_in_scoreboard(group_id, submit_pid))
-    req = PendingRequest(
-        kind="submit",
-        group_id=group_id,
-        user_id=user_id,
-        sender=sender,
-        message_id=message_id,
-        command="submit",
-        nickname=get_display_name(sender),
-        payload=submission,
-        submit_pid=submit_pid,
-        submit_problem=problem,
-        target_pid=submit_pid,
-        submit_already_solved_at_enqueue=already_solved,
-        submit_score_candidate=bool(submit_pid and not already_solved),
-        event_log=event_log,
-    )
-    await coord.enqueue(req)
+    req: PendingRequest | None = None
+    async with coord.lock:
+        sb = load_scoreboard(group_id)
+        wait_window = effective_submit_delay_sec_for_scoreboard(user_id, sb)
+        posted_at = get_problem_posted_at(group_id)
+        if wait_window > 0 and posted_at is not None:
+            remaining = wait_window - (time.time() - posted_at)
+            if remaining > 0:
+                return _format_group_submit_message_for_remaining(
+                    user_id,
+                    int(math.ceil(remaining)),
+                )
+        problem = get_today_problem(group_id)
+        submit_pid = problem.get("today", "") if problem else ""
+        already_solved = bool(submit_pid and _scoreboard_has_problem_solve(sb, submit_pid))
+        req = PendingRequest(
+            kind="submit",
+            group_id=group_id,
+            user_id=user_id,
+            sender=sender,
+            message_id=message_id,
+            command="submit",
+            nickname=get_display_name(sender),
+            payload=submission,
+            submit_pid=submit_pid,
+            submit_problem=problem,
+            target_pid=submit_pid,
+            submit_already_solved_at_enqueue=already_solved,
+            submit_score_candidate=bool(submit_pid and not already_solved),
+            event_log=event_log,
+        )
+        coord._enqueue_locked(req)
     await req.done_event.wait()
+    return ""
 
 
 async def enqueue_clarify_request(
@@ -1370,14 +1414,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
         ))
         return
 
-    if is_group_submit_blocked(user_id, group_id):
-        await send_group_msg(group_id, [
-            build_at(user_id),
-            build_text(f" {format_group_submit_message(user_id, group_id)}"),
-        ])
-        return
-
-    await enqueue_submit_request(
+    blocked_message = await enqueue_submit_request(
         group_id,
         user_id,
         sender,
@@ -1385,6 +1422,12 @@ async def handle(group_id: int, user_id: int, sender: dict,
         submission,
         event_log=event.get(EVENT_META_KEY),
     )
+    if blocked_message:
+        await send_group_msg(group_id, [
+            build_at(user_id),
+            build_text(f" {blocked_message}"),
+        ])
+        return
 
 
 def register() -> None:

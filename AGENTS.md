@@ -26,7 +26,11 @@ NapCat (QQ) ──WS──> worker.py
 - **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection, dispatches commands, and owns the scheduler in one process. There is no SQLite event queue, ingress supervisor, worker hot-swap, or auto-update loop.
 - **User groups**: `user_groups.py` — all users default to `default`; `USER_GROUPS` configures
   non-default groups such as `starred`/`打星`, their members, submit delay, and rejection
-  message. `do_daily_post` writes `state.json` `posted_at`; if missing, cooldown falls back
+  message. `submit_delay_sec > 0` enables dynamic per-user submit waits for that group:
+  the configured value is the floor, the first solver's next wait doubles, and other
+  configured users' waits halve down to the floor. Runtime wait state lives in
+  `scoreboard.json.user_group_waits`; real QQ IDs belong only in local config/runtime data.
+  `do_daily_post` writes `state.json` `posted_at`; if missing, cooldown falls back
   to matching `daily_msg.json` mtime.
 - **Curfew (宵禁)**: `curfew.py` — `/submit` is blocked during a daily quiet window defined
   by `CURFEW_START_HOUR` and `CURFEW_DURATION_HOURS`. Other commands (clarify, review,
@@ -136,7 +140,7 @@ Each group entry:
 | `name` | — | Group name (`[A-Za-z0-9_-]+`) (**required**) |
 | `display_name` | `name` | Display name (e.g. `打星`) |
 | `user_ids` | `[]` | List of QQ user IDs |
-| `submit_delay_sec` | 0 | Post-new-problem submit delay |
+| `submit_delay_sec` | 0 | Minimum post-new-problem submit delay; `>0` enables dynamic per-user waits |
 | `submit_delay_message` | — | Rejection message; `{wait}` → formatted delay |
 
 ### ⚠️ NAPCAT_WS_HOST — Docker gotcha
@@ -344,11 +348,12 @@ achievement reports.
 1. Extract submission text after `/submit`
 2. If curfew is active (`curfew_start_hour` → `curfew_start_hour + curfew_duration_hours`),
    reply with a friendly rest message; do not enqueue
-3. If user is in a configured non-default group and still inside that group's
-   `SUBMIT_DELAY_SEC` after the current problem was posted, reply with that group's
-   delay message plus remaining wait time; do not enqueue
-4. Enter the group's state scheduler, get a sequence number, and snapshot today's pid
-   and solved state
+3. Enter the group's state scheduler long enough to atomically check dynamic user-group
+   submit wait, snapshot today's pid, and snapshot solved state. If the user is still
+   inside the effective wait window (`max(submit_delay_sec, saved wait_sec)` after
+   `posted_at`), reply with that group's delay message plus remaining wait time; do not
+   enqueue
+4. If not blocked, get a sequence number and enqueue the snapshotted pid/solved state
 5. Background compute starts immediately; it loads completed user history plus earlier
    pending user inputs for the same `(group, user, pid)`
 6. If `SUBMIT_AC_BACKDOOR` is non-empty and the submission contains that string, return a correct verdict before calling the judge LLM
@@ -568,6 +573,35 @@ Local HTML labeling UI:
 }
 ```
 
+### scoreboard.json dynamic submit wait state
+```json
+{
+  "user_group_waits": {
+    "groups": {
+      "starred": {
+        "users": {
+          "<user_id>": {
+            "wait_sec": 1800
+          }
+        }
+      }
+    },
+    "settled_problems": {
+      "542D": 0
+    }
+  }
+}
+```
+
+`settled_problems` maps problem id to an integer Unix timestamp and makes wait
+settlement idempotent. On successful new-problem
+delivery, settle the previous problem before writing the new `state.json`: if the
+previous problem has a first solve, double that solver's wait and halve other configured
+dynamic-wait users down to their `submit_delay_sec` floor. If no one solved it, do
+nothing. If an old in-flight submit is accepted after a newer problem has already been
+posted, settle that old pid immediately after writing its first solve. `post_solve_correct`
+records do not settle waits.
+
 ### submission record format
 ```json
 {
@@ -580,8 +614,8 @@ Local HTML labeling UI:
 }
 ```
 
-These formats MUST match the old bridge's format exactly for backward compatibility
-with existing `~/.daily-problem` data.
+Existing `solves` and submission record fields MUST match the old bridge's format
+exactly for backward compatibility with existing `~/.daily-problem` data.
 
 ## Pitfalls & Lessons Learned
 

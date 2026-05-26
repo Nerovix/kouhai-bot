@@ -303,9 +303,9 @@ def _setup_problem_for(group_id: int, pid: str):
 
 def _config_dict():
     return {
-        "bot_qq": 1234567890,
+        "bot_qq": 1,
         "napcat_ws_port": 8095, "napcat_http_host": "127.0.0.1", "napcat_http_port": 3000,
-        "deepseek_api_key": "sk-test", "deepseek_base_url": "https://api.deepseek.com",
+        "deepseek_api_key": "test-key", "deepseek_base_url": "https://api.deepseek.com",
         "deepseek_model": "deepseek-reasoner",
         "llm_provider": "deepseek",
         "llm_openai_api_key": "",
@@ -1041,7 +1041,7 @@ def test_review_mentioned_users_are_deduped_and_filtered():
                 {"type": "at", "data": {"qq": str(OTHER_UID)}},
                 {"type": "at", "data": {"qq": f"0{OTHER_UID}"}},
                 {"type": "at", "data": {"qq": str(UID)}},
-                {"type": "at", "data": {"qq": "1234567890"}},
+                {"type": "at", "data": {"qq": "1"}},
                 {"type": "at", "data": {"qq": "all"}},
                 {"type": "at", "data": {"qq": str(UID2)}},
                 {"type": "text", "data": {"text": " 多人上下文"}},
@@ -1054,7 +1054,7 @@ def test_review_mentioned_users_are_deduped_and_filtered():
     assert user_content.count(f"用户 {OTHER_UID}：") == 1
     assert user_content.count(f"用户 {UID2}：") == 1
     assert f"用户 {UID}：" not in user_content
-    assert "用户 1234567890：" not in user_content
+    assert "用户 1：" not in user_content
     assert "用户 all：" not in user_content
     assert user_content.index(f"用户 {OTHER_UID}：") < user_content.index(f"用户 {UID2}：")
     assert "bob only once" in user_content
@@ -2118,6 +2118,118 @@ def test_newproblem_solved_posts():
     print("✅ newproblem: solved posts")
 
 
+def test_newproblem_commit_settles_dynamic_wait_for_previous_problem():
+    _reset_state()
+    _setup_problem()
+    _write_scoreboard(GID, {
+        "solves": [{"user_id": UID, "nickname": "Alice", "date": "2026-05-14",
+                    "problem": PID, "order": 1}],
+        "user_submissions": {},
+    })
+    lazy = _LazyConfig()
+    lazy._config = {
+        **_config_dict(),
+        "user_groups": [
+            UserGroupConfig(
+                name="starred",
+                display_name="打星",
+                user_ids=[UID, OTHER_UID],
+                submit_delay_sec=300,
+            )
+        ],
+    }
+
+    with _all_patches(), patch("kouhai_bot.config._config", lazy):
+        from kouhai_bot.handlers.cmd.newproblem import _commit_problem_state
+        asyncio.run(_commit_problem_state(GID, {
+            "today": PID2,
+            "contestId": 100,
+            "index": "A",
+            "name": "Next",
+            "rating": 2000,
+        }))
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        sb = json.load(f)
+    users = sb["user_group_waits"]["groups"]["starred"]["users"]
+    assert users[str(UID)]["wait_sec"] == 600
+    assert users[str(OTHER_UID)]["wait_sec"] == 300
+    assert sb["user_group_waits"]["settled_problems"][PID]
+    _cleanup()
+    print("✅ newproblem: commit settles dynamic wait for previous solve")
+
+
+def test_newproblem_commit_does_not_settle_unsolved_previous_problem():
+    _reset_state()
+    _setup_problem()
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    lazy = _LazyConfig()
+    lazy._config = {
+        **_config_dict(),
+        "user_groups": [
+            UserGroupConfig(
+                name="starred",
+                display_name="打星",
+                user_ids=[UID],
+                submit_delay_sec=300,
+            )
+        ],
+    }
+
+    with _all_patches(), patch("kouhai_bot.config._config", lazy):
+        from kouhai_bot.handlers.cmd.newproblem import _commit_problem_state
+        asyncio.run(_commit_problem_state(GID, {
+            "today": PID2,
+            "contestId": 100,
+            "index": "A",
+            "name": "Next",
+            "rating": 2000,
+        }))
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        sb = json.load(f)
+    assert "user_group_waits" not in sb or not sb["user_group_waits"].get("settled_problems")
+    _cleanup()
+    print("✅ newproblem: unsolved previous problem does not change dynamic wait")
+
+
+def test_submit_scoreboard_update_settles_late_old_problem():
+    _reset_state()
+    _setup_problem_for(GID, PID2)
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    lazy = _LazyConfig()
+    lazy._config = {
+        **_config_dict(),
+        "user_groups": [
+            UserGroupConfig(
+                name="starred",
+                display_name="打星",
+                user_ids=[UID, OTHER_UID],
+                submit_delay_sec=300,
+            )
+        ],
+    }
+
+    with _all_patches(), patch("kouhai_bot.config._config", lazy):
+        from kouhai_bot.handlers.cmd.submit import _update_scoreboard_for_pid
+        _update_scoreboard_for_pid(
+            GID,
+            UID,
+            "Alice",
+            PID,
+            {"today": PID, "rating": 2600},
+        )
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        sb = json.load(f)
+    users = sb["user_group_waits"]["groups"]["starred"]["users"]
+    assert users[str(UID)]["wait_sec"] == 600
+    assert users[str(OTHER_UID)]["wait_sec"] == 300
+    assert sb["user_group_waits"]["settled_problems"][PID]
+    _cleanup()
+    print("✅ submit: late old-problem AC settles dynamic wait")
+
+
 def test_newproblem_picker_args_follow_env_rating_range():
     _reset_state()
     with _all_patches(), patch.dict(_LazyConfig._config, {"min_rating": 2100, "max_rating": 2900}):
@@ -2546,6 +2658,64 @@ def test_submit_user_group_blocked_within_window():
     assert not _deepseek_calls, f"Judge should not run for blocked submit: {_deepseek_calls}"
     _cleanup()
     print("✅ submit: user group blocked within window")
+
+
+def test_submit_user_group_blocked_uses_dynamic_wait():
+    """Dynamic wait stored in scoreboard extends the configured floor."""
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_state(GID, {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+        "date": "2026-05-14",
+        "posted_at": int(time.time()) - 400,
+    })
+    _write_scoreboard(GID, {
+        "solves": [],
+        "user_submissions": {},
+        "user_group_waits": {
+            "groups": {
+                "starred": {
+                    "users": {
+                        str(UID): {"wait_sec": 900},
+                    },
+                },
+            },
+        },
+    })
+
+    lazy = _LazyConfig()
+    lazy._config = {
+        **_config_dict(),
+        "user_groups": [
+            UserGroupConfig(
+                name="starred",
+                display_name="打星",
+                user_ids=[UID],
+                submit_delay_sec=300,
+                submit_delay_message="将机会多留给年轻人吧～{wait}",
+            )
+        ],
+    }
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("kouhai_bot.config._config", lazy))
+        stack.enter_context(patch("kouhai_bot.napcat.client.send_group_msg", _mock_send_group))
+        stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.send_group_msg", _mock_send_group))
+        stack.enter_context(patch("kouhai_bot.handlers.shared.judge_submission_result", _mock_judge_result))
+        from kouhai_bot.handlers.cmd.submit import handle
+        asyncio.run(handle(**_kwargs(_make_event("/submit my solution text here"))))
+
+    text = _last_text()
+    assert "将机会多留给年轻人吧～" in text, f"Expected dynamic wait reminder, got: {text}"
+    assert "请等待 9 分钟后再提交" in text, f"Expected extended dynamic wait, got: {text}"
+    assert not _deepseek_calls, f"Judge should not run for blocked submit: {_deepseek_calls}"
+    _cleanup()
+    print("✅ submit: user group blocked by dynamic wait")
 
 
 if __name__ == "__main__":

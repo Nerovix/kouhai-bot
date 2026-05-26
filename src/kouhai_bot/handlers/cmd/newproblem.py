@@ -17,8 +17,10 @@ from ..registry import CommandDef
 from ..shared import (
     get_today_problem,
     is_already_solved,
+    load_scoreboard,
     save_problem_card_ref,
     save_problem_summary,
+    save_scoreboard,
     snake_replace,
     summarize_problem,
     translate_sample_notes,
@@ -26,6 +28,7 @@ from ..shared import (
 from ...config import get_config
 from ...context import append_group_ctx
 from ...editorial_followup import schedule_prefetch_editorial
+from ...user_groups import settle_dynamic_submit_wait_for_problem
 from ...napcat.client import (
     build_plain_message,
     react_emoji,
@@ -142,6 +145,12 @@ async def _commit_problem_state(group_id: int, state: dict) -> None:
 
     def _write() -> None:
         try:
+            previous = get_today_problem(group_id)
+            previous_pid = str(previous.get("today", "") or "") if previous else ""
+            if previous_pid:
+                sb = load_scoreboard(group_id)
+                if settle_dynamic_submit_wait_for_problem(sb, previous_pid):
+                    save_scoreboard(group_id, sb)
             with open(os.path.join(state_dir, "state.json"), "w", encoding="utf-8") as f:
                 json.dump(committed, f, ensure_ascii=False, indent=2)
         except OSError as e:

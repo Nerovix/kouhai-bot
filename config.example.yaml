@@ -65,8 +65,8 @@ current_group: 0  # your QQ group number
 # user_groups:
 #   - name: starred
 #     display_name: 打星
-#     user_ids: [123456, 234567]
-#     submit_delay_sec: 1800
+#     user_ids: [<user_id_1>, <user_id_2>]
+#     submit_delay_sec: 1800  # minimum wait; non-zero enables dynamic per-user waits
 #     submit_delay_message: "将机会多留给年轻人吧～{wait}"
 
 # ── Problem Selection ──

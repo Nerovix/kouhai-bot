@@ -11,16 +11,19 @@ from kouhai_bot.handlers.shared import get_problem_posted_at, mark_problem_poste
 from kouhai_bot.user_groups import (
     DEFAULT_GROUP,
     configured_user_groups,
+    effective_submit_delay_sec_for_scoreboard,
     format_group_submit_message,
     format_submit_wait,
     get_user_group,
     is_group_submit_blocked,
+    settle_dynamic_submit_wait_for_problem,
     submit_remaining_sec,
 )
 
 
 def _make_yaml(**overrides) -> str:
     data = {
+        "bot_qq": 1,
         "current_group": 123,
         "llm": {
             "providers": [
@@ -145,3 +148,121 @@ def test_mark_problem_posted_updates_state(tmp_path, monkeypatch):
     mark_problem_posted(group_id, posted_at=4242)
 
     assert get_problem_posted_at(group_id) == 4242
+
+
+def test_dynamic_submit_wait_uses_config_floor(monkeypatch):
+    cfg = BotConfig(
+        user_groups=[
+            UserGroupConfig(
+                name="starred",
+                display_name="打星",
+                user_ids=[42],
+                submit_delay_sec=300,
+            )
+        ],
+    )
+    monkeypatch.setattr("kouhai_bot.user_groups.get_config", lambda: cfg)
+
+    assert effective_submit_delay_sec_for_scoreboard(42, {}) == 300
+    assert effective_submit_delay_sec_for_scoreboard(7, {}) == 0
+    assert effective_submit_delay_sec_for_scoreboard(42, {
+        "user_group_waits": {
+            "groups": {
+                "starred": {
+                    "users": {
+                        "42": {"wait_sec": 120},
+                    },
+                },
+            },
+        },
+    }) == 300
+
+
+def test_dynamic_submit_wait_disabled_when_floor_is_zero(monkeypatch):
+    cfg = BotConfig(
+        user_groups=[
+            UserGroupConfig(
+                name="starred",
+                display_name="打星",
+                user_ids=[42],
+                submit_delay_sec=0,
+            )
+        ],
+    )
+    monkeypatch.setattr("kouhai_bot.user_groups.get_config", lambda: cfg)
+
+    assert effective_submit_delay_sec_for_scoreboard(42, {
+        "user_group_waits": {
+            "groups": {
+                "starred": {
+                    "users": {
+                        "42": {"wait_sec": 900},
+                    },
+                },
+            },
+        },
+    }) == 0
+
+
+def test_settle_dynamic_submit_wait_for_problem(monkeypatch):
+    cfg = BotConfig(
+        user_groups=[
+            UserGroupConfig(
+                name="starred",
+                display_name="打星",
+                user_ids=[42, 43],
+                submit_delay_sec=300,
+            )
+        ],
+    )
+    monkeypatch.setattr("kouhai_bot.user_groups.get_config", lambda: cfg)
+    sb = {
+        "solves": [
+            {"user_id": 42, "nickname": "A", "problem": "1A", "order": 1},
+        ],
+        "user_submissions": {},
+    }
+
+    assert settle_dynamic_submit_wait_for_problem(sb, "1A")
+    users = sb["user_group_waits"]["groups"]["starred"]["users"]
+    assert users["42"]["wait_sec"] == 600
+    assert users["43"]["wait_sec"] == 300
+
+    assert not settle_dynamic_submit_wait_for_problem(sb, "1A")
+    assert users["42"]["wait_sec"] == 600
+    assert users["43"]["wait_sec"] == 300
+
+
+def test_settle_dynamic_submit_wait_halves_existing_wait(monkeypatch):
+    cfg = BotConfig(
+        user_groups=[
+            UserGroupConfig(
+                name="starred",
+                display_name="打星",
+                user_ids=[42, 43],
+                submit_delay_sec=300,
+            )
+        ],
+    )
+    monkeypatch.setattr("kouhai_bot.user_groups.get_config", lambda: cfg)
+    sb = {
+        "solves": [
+            {"user_id": 7, "nickname": "Default", "problem": "1A", "order": 1},
+        ],
+        "user_submissions": {},
+        "user_group_waits": {
+            "groups": {
+                "starred": {
+                    "users": {
+                        "42": {"wait_sec": 1200},
+                        "43": {"wait_sec": 450},
+                    },
+                },
+            },
+        },
+    }
+
+    assert settle_dynamic_submit_wait_for_problem(sb, "1A")
+    users = sb["user_group_waits"]["groups"]["starred"]["users"]
+    assert users["42"]["wait_sec"] == 600
+    assert users["43"]["wait_sec"] == 300

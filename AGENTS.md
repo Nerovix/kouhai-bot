@@ -348,11 +348,12 @@ achievement reports.
 1. Extract submission text after `/submit`
 2. If curfew is active (`curfew_start_hour` → `curfew_start_hour + curfew_duration_hours`),
    reply with a friendly rest message; do not enqueue
-3. If user is in a configured non-default group and still inside that group's
-   `SUBMIT_DELAY_SEC` after the current problem was posted, reply with that group's
-   delay message plus remaining wait time; do not enqueue
-4. Enter the group's state scheduler, get a sequence number, and snapshot today's pid
-   and solved state
+3. Enter the group's state scheduler long enough to atomically check dynamic user-group
+   submit wait, snapshot today's pid, and snapshot solved state. If the user is still
+   inside the effective wait window (`max(submit_delay_sec, saved wait_sec)` after
+   `posted_at`), reply with that group's delay message plus remaining wait time; do not
+   enqueue
+4. If not blocked, get a sequence number and enqueue the snapshotted pid/solved state
 5. Background compute starts immediately; it loads completed user history plus earlier
    pending user inputs for the same `(group, user, pid)`
 6. If `SUBMIT_AC_BACKDOOR` is non-empty and the submission contains that string, return a correct verdict before calling the judge LLM
@@ -586,13 +587,14 @@ Local HTML labeling UI:
       }
     },
     "settled_problems": {
-      "542D": "<unix_timestamp>"
+      "542D": 0
     }
   }
 }
 ```
 
-`settled_problems` makes wait settlement idempotent. On successful new-problem
+`settled_problems` maps problem id to an integer Unix timestamp and makes wait
+settlement idempotent. On successful new-problem
 delivery, settle the previous problem before writing the new `state.json`: if the
 previous problem has a first solve, double that solver's wait and halve other configured
 dynamic-wait users down to their `submit_delay_sec` floor. If no one solved it, do

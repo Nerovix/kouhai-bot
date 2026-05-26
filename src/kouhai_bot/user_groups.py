@@ -110,6 +110,9 @@ def effective_submit_delay_sec_for_scoreboard(
 def effective_submit_delay_sec(user_id: int, group_id: int) -> int:
     from .handlers.shared import load_scoreboard
 
+    user_group = get_user_group(user_id)
+    if not is_dynamic_submit_delay_enabled(user_group):
+        return 0
     return effective_submit_delay_sec_for_scoreboard(
         user_id,
         load_scoreboard(group_id),

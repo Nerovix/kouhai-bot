@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 import os
 import random
 import re
@@ -26,6 +27,7 @@ from ..shared import (
     clear_user_problem_submissions,
     fetch_group_member_nickname_map,
     format_points,
+    get_problem_posted_at,
     get_today_problem,
     judge_submission_result,
     load_known_problem_ratings,
@@ -41,10 +43,9 @@ from ..shared import (
 from ...config import get_config
 from ...context import get_display_name, load_group_ctx
 from ...user_groups import (
-    format_group_submit_message,
+    effective_submit_delay_sec_for_scoreboard,
     get_user_group,
     is_default_group,
-    is_group_submit_blocked,
     settle_dynamic_submit_wait_for_problem,
 )
 from ...curfew import is_curfew_active, format_curfew_message
@@ -355,10 +356,32 @@ def _is_problem_solved_in_scoreboard(group_id: int, pid: str) -> bool:
     if not pid:
         return False
     sb = load_scoreboard(group_id)
+    return _scoreboard_has_problem_solve(sb, pid)
+
+
+def _scoreboard_has_problem_solve(sb: dict, pid: str) -> bool:
+    if not pid:
+        return False
     for solve in sb.get("solves", []):
         if str(solve.get("problem", "") or "") == str(pid):
             return True
     return False
+
+
+def _format_submit_wait_seconds(remaining: int) -> str:
+    if remaining >= 60:
+        minutes = (remaining + 59) // 60
+        return f"请等待 {minutes} 分钟后再提交"
+    return f"请等待 {remaining} 秒后再提交"
+
+
+def _format_group_submit_message_for_remaining(user_id: int, remaining: int) -> str:
+    user_group = get_user_group(user_id)
+    template = (
+        user_group.submit_delay_message
+        or f"{user_group.display_name}用户{{wait}}"
+    )
+    return template.replace("{wait}", _format_submit_wait_seconds(remaining))
 
 
 def _cumulative_solves(sb: dict, user_id: int) -> int:
@@ -1249,11 +1272,19 @@ async def enqueue_submit_request(
     coord = _get_coordinator(group_id)
     req: PendingRequest | None = None
     async with coord.lock:
-        if is_group_submit_blocked(user_id, group_id):
-            return format_group_submit_message(user_id, group_id)
+        sb = load_scoreboard(group_id)
+        wait_window = effective_submit_delay_sec_for_scoreboard(user_id, sb)
+        posted_at = get_problem_posted_at(group_id)
+        if wait_window > 0 and posted_at is not None:
+            remaining = wait_window - (time.time() - posted_at)
+            if remaining > 0:
+                return _format_group_submit_message_for_remaining(
+                    user_id,
+                    int(math.ceil(remaining)),
+                )
         problem = get_today_problem(group_id)
         submit_pid = problem.get("today", "") if problem else ""
-        already_solved = bool(submit_pid and _is_problem_solved_in_scoreboard(group_id, submit_pid))
+        already_solved = bool(submit_pid and _scoreboard_has_problem_solve(sb, submit_pid))
         req = PendingRequest(
             kind="submit",
             group_id=group_id,

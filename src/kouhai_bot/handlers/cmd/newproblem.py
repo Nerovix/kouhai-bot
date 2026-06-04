@@ -128,6 +128,23 @@ def _picker_args(command: str, group_id: int, *extra: str) -> list[str]:
     return args
 
 
+def _classify_pick_error(stderr_text: str) -> str:
+    """Classify picker stderr into a user-friendly Chinese message."""
+    lower = stderr_text.lower()
+    # CF-specific connectivity issues
+    if any(kw in stderr_text for kw in (
+        "codeforces.com", "SSL", "SSLEOFError", "SSLError",
+        "ConnectionError", "Max retries exceeded", "RemoteDisconnected",
+    )):
+        return "Codeforces 连接失败"
+    if any(kw in lower for kw in ("timeout", "timed out")):
+        return "Codeforces 请求超时"
+    if any(kw in lower for kw in ("permission", "access denied", "ioerror", "filenotfound")):
+        return "本地数据读取异常"
+    # fallback — still log the raw text above
+    return "题目选取失败，稍后再试"
+
+
 def _newproblem_lock(group_id: int) -> asyncio.Lock:
     lock = _newproblem_locks.get(group_id)
     if lock is None:
@@ -327,7 +344,7 @@ async def _do_daily_post_locked(
                 logger.error(
                     f"Pick failed (group {group_id}, attempt {attempt}/3): {err_text}"
                 )
-                pick_error_msg = f"Codeforces API 暂时不可用"
+                pick_error_msg = _classify_pick_error(err_text)
             else:
                 picked_state = json.loads(stdout.decode())
                 if not isinstance(picked_state, dict):

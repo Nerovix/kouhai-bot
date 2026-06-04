@@ -1974,7 +1974,7 @@ def test_newproblem_cooldown():
         _cooldowns.clear()
         ran: list[int] = []
 
-        async def _mock_post(gid, prefix=None):
+        async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
 
         with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
@@ -1997,7 +1997,7 @@ def test_newproblem_cooldown_serializes_concurrent_force():
         _newproblem_locks.clear()
         ran: list[int] = []
 
-        async def _mock_post(gid, prefix=None):
+        async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
             await asyncio.sleep(0.05)
 
@@ -2022,7 +2022,7 @@ def test_newproblem_unsolved_rejects():
         _cooldowns.clear()
         ran: list[int] = []
 
-        async def _mock_post(gid, prefix=None):
+        async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
 
         with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
@@ -2043,7 +2043,7 @@ def test_newproblem_force_posts_when_unsolved():
         _cooldowns.clear()
         ran: list[int] = []
 
-        async def _mock_post(gid, prefix=None):
+        async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
 
         with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
@@ -2065,7 +2065,7 @@ def test_newproblem_alias_force_posts_when_unsolved():
         discover_commands()
         ran: list[int] = []
 
-        async def _mock_post(gid, prefix=None):
+        async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
 
         with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
@@ -2084,7 +2084,7 @@ def test_newproblem_force_requires_space():
         _cooldowns.clear()
         ran: list[int] = []
 
-        async def _mock_post(gid, prefix=None):
+        async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
 
         with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
@@ -2108,7 +2108,7 @@ def test_newproblem_solved_posts():
         _cooldowns.clear()
         ran: list[int] = []
 
-        async def _mock_post(gid, prefix=None):
+        async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
 
         with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):

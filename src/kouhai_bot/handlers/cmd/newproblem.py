@@ -80,7 +80,7 @@ async def enqueue_force_new_problem(
         _cooldowns[group_id] = now
         logger.info(f"[group_{group_id}] {command} triggered")
 
-        await _do_daily_post_locked(group_id, prefix="刷新了一道新题🌟")
+        await _do_daily_post_locked(group_id, prefix="刷新了一道新题🌟", notify_group=True)
 
 # ── Picker path ─────────────────────────────────────────────────────────
 
@@ -291,7 +291,9 @@ async def do_daily_post(group_id: int, prefix: str | None = None) -> None:
         await _do_daily_post_locked(group_id, prefix)
 
 
-async def _do_daily_post_locked(group_id: int, prefix: str | None = None) -> None:
+async def _do_daily_post_locked(
+    group_id: int, prefix: str | None = None, *, notify_group: bool = False,
+) -> None:
     cfg = get_config()
     python = sys.executable
     state_dir = os.path.join(cfg.data_dir, "groups", str(group_id))
@@ -310,23 +312,47 @@ async def _do_daily_post_locked(group_id: int, prefix: str | None = None) -> Non
     except Exception as e:
         logger.error(f"Reveal error (group {group_id}): {e}")
 
-    # Step 2: Pick today's problem
+    # Step 2: Pick today's problem (w/ retry)
     picked_state: dict = {}
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            python, *_picker_args("pick-json", group_id, "--with-statement"),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-        if proc.returncode != 0:
-            logger.error(f"Pick failed (group {group_id}): {stderr.decode()[:200]}")
-            return
-        picked_state = json.loads(stdout.decode())
-        if not isinstance(picked_state, dict):
-            logger.error(f"Pick failed (group {group_id}): invalid picker payload")
-            return
-    except Exception as e:
-        logger.error(f"Pick error (group {group_id}): {e}")
+    pick_error_msg = ""
+    for attempt in range(1, 4):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                python, *_picker_args("pick-json", group_id, "--with-statement"),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            if proc.returncode != 0:
+                err_text = stderr.decode()[:200]
+                logger.error(
+                    f"Pick failed (group {group_id}, attempt {attempt}/3): {err_text}"
+                )
+                pick_error_msg = f"Codeforces API 暂时不可用"
+            else:
+                picked_state = json.loads(stdout.decode())
+                if not isinstance(picked_state, dict):
+                    logger.error(
+                        f"Pick failed (group {group_id}, attempt {attempt}/3): "
+                        f"invalid picker payload"
+                    )
+                    pick_error_msg = "题目选取结果异常"
+                else:
+                    break  # success
+        except Exception as e:
+            logger.error(
+                f"Pick error (group {group_id}, attempt {attempt}/3): {e}"
+            )
+            pick_error_msg = f"Codeforces 连接失败"
+        if attempt < 3:
+            delay = 2 * attempt
+            logger.info(f"Retrying pick in {delay}s...")
+            await asyncio.sleep(delay)
+
+    if not picked_state:
+        if notify_group:
+            await send_group_msg(group_id, build_plain_message(
+                f"刷题失败了…{pick_error_msg}，连试 3 次都没成功，等一会儿再试试吧😢"
+            ))
         return
 
     # Step 3: Generate Chinese summary

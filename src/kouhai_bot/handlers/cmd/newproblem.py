@@ -336,6 +336,7 @@ async def _do_daily_post_locked(
                         f"invalid picker payload"
                     )
                     pick_error_msg = "题目选取结果异常"
+                    picked_state = {}  # reset to ensure truthiness check catches it
                 else:
                     break  # success
         except Exception as e:

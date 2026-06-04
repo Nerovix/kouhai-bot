@@ -2193,6 +2193,49 @@ def test_newproblem_commit_does_not_settle_unsolved_previous_problem():
     print("✅ newproblem: unsolved previous problem does not change dynamic wait")
 
 
+def test_newproblem_notify_group_on_pick_failure():
+    """After 3 failed pick attempts, notify_group=True sends error msg."""
+    _reset_state()
+    _setup_problem()
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+
+    async def _mock_pick_fail(*args, **kwargs):
+        """Fail the pick-json subprocess, succeed reveal."""
+        cmd_args = args[1:]  # skip 'python' executable
+        if any("reveal" in str(a) for a in cmd_args):
+            proc = AsyncMock()
+            proc.returncode = 0
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+            return proc
+        if any("pick-json" in str(a) for a in cmd_args):
+            proc = AsyncMock()
+            proc.returncode = 1
+            proc.communicate = AsyncMock(return_value=(b"", b"SSL EOF"))
+            return proc
+        raise RuntimeError(f"unexpected subprocess: {cmd_args}")
+
+    with _all_patches(), patch(
+        "asyncio.create_subprocess_exec", _mock_pick_fail
+    ), patch(
+        "asyncio.sleep", AsyncMock()
+    ):
+        from kouhai_bot.handlers.cmd.newproblem import _do_daily_post_locked
+
+        # Test 1: notify_group=True → should send error message
+        _sent.clear()
+        asyncio.run(_do_daily_post_locked(GID, notify_group=True))
+        assert _has_sent("刷题失败了"), f"No error msg: {_last_text()}"
+        assert _has_sent("3 次"), f"No retry mention: {_last_text()}"
+
+        # Test 2: notify_group=False → should NOT send error message
+        _sent.clear()
+        asyncio.run(_do_daily_post_locked(GID, notify_group=False))
+        assert not _sent, f"Unexpected msg with notify_group=False: {_last_text()}"
+
+    _cleanup()
+    print("✅ newproblem: pick failure notifies group when notify_group=True")
+
+
 def test_submit_scoreboard_update_settles_late_old_problem():
     _reset_state()
     _setup_problem_for(GID, PID2)

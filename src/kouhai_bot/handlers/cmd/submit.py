@@ -200,6 +200,7 @@ class PendingContext:
     content: str
     problem: str
     timestamp: str
+    result: str = "pending"
 
 
 def _refresh_runtime() -> None:
@@ -348,7 +349,7 @@ def _pending_context_record(item: PendingContext) -> dict:
         "timestamp": item.timestamp,
         "type": item.kind,
         "content": item.content,
-        "result": "pending",
+        "result": item.result,
         "reason": "",
         "reply": "",
         "problem": item.problem,
@@ -536,9 +537,28 @@ class GroupCoordinator:
         else:
             self.pending_context.pop(key, None)
 
-    def _finish_request_locked(self, req: PendingRequest) -> str:
+    def _mark_pending_context_result_locked(
+        self,
+        req: PendingRequest,
+        result: str,
+    ) -> None:
+        if req.kind not in _USER_CONTEXT_WRITERS or not req.target_pid:
+            return
+        key = (req.group_id, req.user_id, req.target_pid)
+        for item in self.pending_context.get(key, []):
+            if item.seq == req.seq:
+                item.result = result
+                return
+
+    def _finish_request_locked(
+        self,
+        req: PendingRequest,
+        *,
+        keep_pending_context: bool = False,
+    ) -> str:
         self.active.pop(req.seq, None)
-        self._remove_pending_context_locked(req)
+        if not keep_pending_context:
+            self._remove_pending_context_locked(req)
         pid = (req.compute_result or {}).get("pid", "") or req.submit_pid
         if pid:
             candidates = self.submit_candidates.get(pid)
@@ -568,8 +588,9 @@ class GroupCoordinator:
 
             old.discarded = True
             old.compute_result = {"kind": "discarded", "pid": old.submit_pid}
+            self._mark_pending_context_result_locked(old, "superseded")
             self._log_finished(old, "stale", problem=old.submit_pid)
-            resolved_pids.add(self._finish_request_locked(old))
+            resolved_pids.add(self._finish_request_locked(old, keep_pending_context=True))
             if old.task and not old.task.done():
                 old.task.cancel()
         return {pid for pid in resolved_pids if pid}

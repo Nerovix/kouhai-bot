@@ -2517,7 +2517,7 @@ def test_submit_same_user_includes_previous_submit_history():
 
 
 def test_submit_same_user_later_submit_drops_unanswered_previous_submit():
-    """A same-user same-problem submit replaces an earlier unanswered submit."""
+    """A same-user same-problem submit drops judging but keeps prior text as context."""
     _reset_state()
     _setup_problem()
     _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
@@ -2537,8 +2537,12 @@ def test_submit_same_user_later_submit_drops_unanswered_previous_submit():
             finally:
                 first_cancelled.set()
         if submission == "second solution":
-            assert not any(item.get("content") == "first solution" for item in history), \
-                f"Dropped submit leaked into second history: {history}"
+            assert any(
+                item.get("content") == "first solution"
+                and item.get("result") == "superseded"
+                and item.get("problem") == PID
+                for item in history
+            ), f"Dropped submit should remain visible as superseded context: {history}"
             return json.dumps({"correct": False, "reason": "R2", "reply": "SECOND"})
         return json.dumps({"correct": False, "reason": "RX", "reply": "OTHER"})
 

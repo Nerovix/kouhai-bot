@@ -234,7 +234,7 @@ No repository-local runtime queue is used.
 | `/scoreboard` | stubs.py | `handle_scoreboard` | ❌ | — | Cumulative weighted leaderboard; shows the formula at the top, then refreshes latest group nicknames at display time |
 | `/help` | help.py | `handle` | ❌ | — | Auto-generated help (forward card) |
 | `/review` (`/rv`) | review.py | `handle` | ✅ state scheduler | per-provider `review_model` | Discuss the latest solved problem by default; quoted problem cards can target older problems |
-| `/status` | stubs.py | `handle_status` | ❌ | — | Check whether this group has active stateful work |
+| `/status` | stubs.py | `handle_status` | ❌ | — | Check whether this group has active `/newproblem`/daily post or stateful work |
 
 ### Stateful Command Runtime
 
@@ -280,10 +280,16 @@ Key rules:
   without changing `state.json`. Until the new card is successfully delivered, all
   commands still see the old problem. Failed delivery leaves the old current problem
   intact.
+- **New problem serialization/status**: `/newproblem`, `/newproblem --force`, and
+  scheduler `daily_post` share a per-group post lock. User-triggered new-problem
+  commands are rejected immediately with a busy reminder while another new problem is
+  being prepared. `/status` reports this post work as busy while the lock holder is
+  building/sending the card.
 
-`submit.py` exports status helpers used by `/status`:
+Status helpers used by `/status`:
 
 - `get_group_lock_status(group_id)` — earliest active stateful request for that group, if any
+- `get_newproblem_status(group_id)` — active `/newproblem`/daily post for that group, if any
 
 ### `/clear` — Clear current-problem user context
 
@@ -444,10 +450,13 @@ newer AC can silently retarget an older review request.
 - Plain `/problem` (or `/pb`) still resends the current problem card.
 
 `/newproblem` and scheduler `daily_post` share the same locked post implementation.
-The command path takes the per-group post lock before checking/updating cooldown, so
-concurrent force requests cannot pass cooldown admission and then post one after
-another. The scheduler path enters via `do_daily_post(group_id, prefix)`, which wraps
-the same locked implementation:
+The command path first checks the per-group post lock. If another `/newproblem` or
+`daily_post` is already preparing a card, the user gets a short "新的题目正在准备中，别急～"
+reply and the request is not queued. Otherwise the command holds the lock while checking
+cooldown, checking whether plain `/newproblem` is allowed, and building/sending the card.
+Cooldown starts only after a new problem card is successfully delivered and committed.
+The scheduler path enters via `do_daily_post(group_id, prefix)`, which waits on the same
+lock and wraps the same locked implementation:
 1. Reveal yesterday's problem via `picker.py reveal`
 2. Pick a candidate problem via `picker.py pick-json --with-statement`; this marks used
    problems and caches statements but does **not** write `state.json`

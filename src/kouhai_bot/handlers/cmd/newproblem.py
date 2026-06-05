@@ -45,6 +45,7 @@ logger = logging.getLogger("kouhai-bot.cmd.newproblem")
 
 _cooldowns: dict[int, float] = {}
 _newproblem_locks: dict[int, asyncio.Lock] = {}
+_newproblem_active: dict[int, dict] = {}
 
 
 def _has_unsolved_problem(group_id: int) -> bool:
@@ -63,11 +64,20 @@ async def enqueue_force_new_problem(
     message_id: str,
     *,
     command: str,
+    force: bool = True,
 ) -> None:
     """Pick and post a new problem (shared by /newproblem and /newproblem --force)."""
     cfg = get_config()
     nickname = _nickname(sender)
-    async with _newproblem_lock(group_id):
+    lock = _newproblem_lock(group_id)
+    if lock.locked():
+        await send_group_msg(group_id, build_plain_message(
+            f"@{nickname} 新的题目正在准备中，别急～"
+        ))
+        return
+
+    await lock.acquire()
+    try:
         now = time.monotonic()
         last = _cooldowns.get(group_id, 0)
         if now - last < cfg.newproblem_cooldown:
@@ -77,10 +87,35 @@ async def enqueue_force_new_problem(
             ))
             return
 
-        _cooldowns[group_id] = now
+        if not force and _has_unsolved_problem(group_id):
+            await send_group_msg(group_id, build_plain_message(
+                f"@{nickname} 当前题目还没有人解出来呢～不能直接刷题哦。\n"
+                f"可使用 /problem 查看当前题目。\n"
+                f"如果确定要换题，请发 /newproblem --force"
+            ))
+            return
+
         logger.info(f"[group_{group_id}] {command} triggered")
 
-        await _do_daily_post_locked(group_id, prefix="刷新了一道新题🌟", notify_group=True)
+        _newproblem_active[group_id] = {
+            "group_id": group_id,
+            "user_id": user_id,
+            "message_id": message_id,
+            "command": command,
+            "admitted_at": now,
+        }
+        try:
+            posted = await _do_daily_post_locked(
+                group_id,
+                prefix="刷新了一道新题🌟",
+                notify_group=True,
+            )
+        finally:
+            _newproblem_active.pop(group_id, None)
+        if posted:
+            _cooldowns[group_id] = time.monotonic()
+    finally:
+        lock.release()
 
 # ── Picker path ─────────────────────────────────────────────────────────
 
@@ -151,6 +186,10 @@ def _newproblem_lock(group_id: int) -> asyncio.Lock:
         lock = asyncio.Lock()
         _newproblem_locks[group_id] = lock
     return lock
+
+
+def get_newproblem_status(group_id: int) -> dict | None:
+    return _newproblem_active.get(group_id)
 
 
 async def _commit_problem_state(group_id: int, state: dict) -> None:
@@ -305,12 +344,22 @@ async def do_daily_post(group_id: int, prefix: str | None = None) -> None:
     This is the core logic shared between /newproblem and the daily cron.
     """
     async with _newproblem_lock(group_id):
-        await _do_daily_post_locked(group_id, prefix)
+        _newproblem_active[group_id] = {
+            "group_id": group_id,
+            "user_id": 0,
+            "message_id": "",
+            "command": "daily_post",
+            "admitted_at": time.monotonic(),
+        }
+        try:
+            await _do_daily_post_locked(group_id, prefix)
+        finally:
+            _newproblem_active.pop(group_id, None)
 
 
 async def _do_daily_post_locked(
     group_id: int, prefix: str | None = None, *, notify_group: bool = False,
-) -> None:
+) -> bool:
     cfg = get_config()
     python = sys.executable
     state_dir = os.path.join(cfg.data_dir, "groups", str(group_id))
@@ -371,7 +420,7 @@ async def _do_daily_post_locked(
             await send_group_msg(group_id, build_plain_message(
                 f"刷题失败了…{pick_error_msg}，连试 3 次都没成功，等一会儿再试试吧😢"
             ))
-        return
+        return False
 
     # Step 3: Generate Chinese summary
     desc = ""
@@ -435,9 +484,10 @@ async def _do_daily_post_locked(
             await _commit_problem_state(group_id, picked_state)
             append_group_ctx(group_id, {"role": "assistant", "content": post_msg})
             logger.info(f"[group_{group_id}] Daily post sent (fallback) ✓")
+            return True
         else:
             logger.error(f"[group_{group_id}] Daily post send failed")
-        return
+        return False
     append_group_ctx(group_id, {"role": "assistant", "content": post_msg})
     logger.info(
         f"[group_{group_id}] Daily post forwarded ✓ "
@@ -462,6 +512,7 @@ async def _do_daily_post_locked(
             json.dump(daily_msg, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.warning(f"[group_{group_id}] Failed to save daily_msg.json: {e}")
+    return True
 
 
 # ── Command handler ─────────────────────────────────────────────────────
@@ -485,16 +536,8 @@ async def handle(group_id: int, user_id: int, sender: dict,
         return
 
     if text == _CMD_NEWPROBLEM:
-        if _has_unsolved_problem(group_id):
-            nickname = _nickname(sender)
-            await send_group_msg(group_id, build_plain_message(
-                f"@{nickname} 当前题目还没有人解出来呢～不能直接刷题哦。\n"
-                f"可使用 /problem 查看当前题目。\n"
-                f"如果确定要换题，请发 /newproblem --force"
-            ))
-            return
         await enqueue_force_new_problem(
-            group_id, user_id, sender, message_id, command="newproblem",
+            group_id, user_id, sender, message_id, command="newproblem", force=False,
         )
         return
 
@@ -519,5 +562,5 @@ def register() -> None:
         description="刷一道新题（未解须 --force；冷却见配置）",
         usage="[--force]",
         handler=handle,
-        cooldown=300,
+        cooldown=0,
     ))

@@ -211,10 +211,11 @@ async def handle_status(group_id: int, user_id: int, sender: dict,
                         message_id: str, raw_text: str, segments: list,
                         event: dict) -> None:
     """Show bot's current busy/idle status."""
+    from .newproblem import get_newproblem_status
     from .submit import get_group_lock_status
     from ...napcat.client import build_plain_message, build_reply, send_group_msg
 
-    status = get_group_lock_status(group_id)
+    status = get_newproblem_status(group_id) or get_group_lock_status(group_id)
     if status is None:
         await send_group_msg(group_id, build_plain_message("🟢 bot 当前空闲，没有在处理请求～"))
         return

@@ -1976,6 +1976,7 @@ def test_newproblem_cooldown():
 
         async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
+            return True
 
         with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
             ev = _kwargs(_make_event("/newproblem"))
@@ -1987,19 +1988,26 @@ def test_newproblem_cooldown():
     print("✅ newproblem: cooldown")
 
 
-def test_newproblem_cooldown_serializes_concurrent_force():
+def test_newproblem_busy_rejects_concurrent_force():
     _reset_state()
     _setup_problem()
     _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
     with _all_patches():
-        from kouhai_bot.handlers.cmd.newproblem import handle, _cooldowns, _newproblem_locks
+        from kouhai_bot.handlers.cmd.newproblem import (
+            handle,
+            _cooldowns,
+            _newproblem_active,
+            _newproblem_locks,
+        )
         _cooldowns.clear()
+        _newproblem_active.clear()
         _newproblem_locks.clear()
         ran: list[int] = []
 
         async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
             await asyncio.sleep(0.05)
+            return True
 
         async def _run():
             ev = _kwargs(_make_event("/newproblem --force"))
@@ -2008,9 +2016,9 @@ def test_newproblem_cooldown_serializes_concurrent_force():
         with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
             asyncio.run(_run())
     assert ran == [GID], f"Concurrent force should post once: {ran}"
-    assert "太频繁" in _last_text(), f"No cooldown rejection: {_last_text()}"
+    assert "正在准备中" in _last_text(), f"No busy rejection: {_last_text()}"
     _cleanup()
-    print("✅ newproblem --force: concurrent cooldown")
+    print("✅ newproblem --force: concurrent busy rejection")
 
 
 def test_newproblem_unsolved_rejects():
@@ -2024,6 +2032,7 @@ def test_newproblem_unsolved_rejects():
 
         async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
+            return True
 
         with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
             asyncio.run(handle(**_kwargs(_make_event("/newproblem"))))
@@ -2045,6 +2054,7 @@ def test_newproblem_force_posts_when_unsolved():
 
         async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
+            return True
 
         with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
             asyncio.run(handle(**_kwargs(_make_event("/newproblem --force"))))
@@ -2067,6 +2077,7 @@ def test_newproblem_alias_force_posts_when_unsolved():
 
         async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
+            return True
 
         with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
             asyncio.run(process_event(_make_event("/np --force"), spawn_handlers=False))
@@ -2086,6 +2097,7 @@ def test_newproblem_force_requires_space():
 
         async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
+            return True
 
         with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
             asyncio.run(handle(**_kwargs(_make_event("/newproblem--force"))))
@@ -2110,6 +2122,7 @@ def test_newproblem_solved_posts():
 
         async def _mock_post(gid, prefix=None, **_):
             ran.append(gid)
+            return True
 
         with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
             asyncio.run(handle(**_kwargs(_make_event("/newproblem"))))
@@ -2313,6 +2326,60 @@ def test_status_ignores_other_groups_and_reports_idle():
     assert "当前空闲" in _last_text(), f"Expected idle status, got: {_last_text()}"
     _cleanup()
     print("✅ status: only considers current group")
+
+
+def test_status_reports_newproblem_busy():
+    _reset_state()
+    _setup_problem()
+    _write_scoreboard(GID, {
+        "solves": [{"user_id": UID, "nickname": "Alice", "date": "2026-05-14",
+                    "problem": PID, "order": 1}],
+        "user_submissions": {},
+    })
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _mock_post(gid, prefix=None, **_):
+        started.set()
+        await release.wait()
+        return True
+
+    async def _run():
+        with _all_patches(), \
+                patch("kouhai_bot.handlers.cmd.submit.get_group_lock_status", return_value=None), \
+                patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
+            from kouhai_bot.handlers.cmd.newproblem import (
+                handle as newproblem_handle,
+                _cooldowns,
+                _newproblem_active,
+                _newproblem_locks,
+            )
+            from kouhai_bot.handlers.cmd.stubs import handle_status
+            _cooldowns.clear()
+            _newproblem_active.clear()
+            _newproblem_locks.clear()
+            task = asyncio.create_task(newproblem_handle(**_kwargs(_make_event(
+                "/newproblem", message_id="np_busy"
+            ))))
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            await handle_status(**_kwargs(_make_event("/status", message_id="status_busy")))
+            release.set()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(_run())
+
+    assert any(
+        "newproblem" in (
+            " ".join(
+                seg.get("data", {}).get("text", "")
+                for seg in item.get("message", [])
+                if seg.get("type") == "text"
+            )
+        )
+        for item in _sent
+    ), f"Expected status to report newproblem busy: {_sent}"
+    _cleanup()
+    print("✅ status: reports newproblem busy")
 
 
 def test_submit_parallel_replies_follow_completion_order():
@@ -2992,7 +3059,7 @@ if __name__ == "__main__":
     test_scoreboard_splits_default_and_starred_groups()
     test_help_shows_short_aliases_and_configured_newproblem_cooldown()
     test_newproblem_cooldown()
-    test_newproblem_cooldown_serializes_concurrent_force()
+    test_newproblem_busy_rejects_concurrent_force()
     test_newproblem_unsolved_rejects()
     test_newproblem_force_posts_when_unsolved()
     test_newproblem_alias_force_posts_when_unsolved()
@@ -3000,6 +3067,7 @@ if __name__ == "__main__":
     test_newproblem_solved_posts()
     test_do_daily_post_does_not_switch_state_when_send_fails()
     test_status_ignores_other_groups_and_reports_idle()
+    test_status_reports_newproblem_busy()
     test_submit_parallel_replies_follow_completion_order()
     test_submit_parallel_late_wrong_results_are_reused_after_first_solve()
     test_submit_parallel_late_correct_result_does_not_update_scoreboard_twice()

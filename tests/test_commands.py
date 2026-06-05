@@ -2516,6 +2516,202 @@ def test_submit_same_user_includes_previous_submit_history():
     print("✅ submit: same-user submit history is chained")
 
 
+def test_submit_same_user_later_submit_drops_unanswered_previous_submit():
+    """A same-user same-problem submit replaces an earlier unanswered submit."""
+    _reset_state()
+    _setup_problem()
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+
+    first_started = asyncio.Event()
+    first_cancelled = asyncio.Event()
+
+    async def _drop_deepseek(messages, model="", task="", temperature=0.7, timeout=120,
+                             response_format=None, thinking=None):
+        payload = json.loads(messages[-1]["content"])
+        submission = payload["submission"]
+        history = payload["history"] or []
+        if submission == "first solution":
+            first_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                first_cancelled.set()
+        if submission == "second solution":
+            assert not any(item.get("content") == "first solution" for item in history), \
+                f"Dropped submit leaked into second history: {history}"
+            return json.dumps({"correct": False, "reason": "R2", "reply": "SECOND"})
+        return json.dumps({"correct": False, "reason": "RX", "reply": "OTHER"})
+
+    async def _run():
+        with _all_patches():
+            from kouhai_bot.eventlog import EVENT_META_KEY, log_command_received, load_events
+            from kouhai_bot.handlers.cmd.submit import handle
+
+            ev1_raw = _make_event("/submit first solution", group_id=GID, user_id=UID, message_id="drop_1")
+            ev2_raw = _make_event("/submit second solution", group_id=GID, user_id=UID, message_id="drop_2")
+            ev1_raw[EVENT_META_KEY] = log_command_received(
+                group_id=GID,
+                user_id=UID,
+                sender=ev1_raw["sender"],
+                command="submit",
+                message_id=ev1_raw["message_id"],
+                raw_text=ev1_raw["raw_message"],
+            )
+            stale_request_id = ev1_raw[EVENT_META_KEY]["request_id"]
+            event_date = ev1_raw[EVENT_META_KEY]["date"]
+
+            with patch("kouhai_bot.handlers.cmd.submit.judge_submission_result", _wrap_deepseek_as_judge_result(_drop_deepseek)):
+                t1 = asyncio.create_task(handle(**_kwargs(ev1_raw)))
+                await asyncio.wait_for(first_started.wait(), timeout=1.0)
+                t2 = asyncio.create_task(handle(**_kwargs(ev2_raw)))
+                await asyncio.wait_for(asyncio.gather(t1, t2), timeout=1.0)
+                await asyncio.sleep(0)
+
+            return [
+                item for item in load_events(GID, event_date)
+                if item.get("request_id") == stale_request_id
+                and item.get("type") == "finished"
+            ]
+
+    stale_events = asyncio.run(_run())
+
+    texts = []
+    for item in _sent:
+        msg = item.get("message", [])
+        text = " ".join(seg.get("data", {}).get("text", "") for seg in msg if seg.get("type") == "text")
+        if "FIRST" in text or "SECOND" in text:
+            texts.append(text)
+    assert texts == [" SECOND"], f"Only the second submit should reply, got: {texts}"
+    assert first_cancelled.is_set(), "First submit task should be cancelled locally"
+    assert stale_events and stale_events[-1]["status"] == "stale", stale_events
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    records = saved["user_submissions"].get(str(UID), [])
+    assert [item["content"] for item in records] == ["second solution"], records
+
+    _cleanup()
+    print("✅ submit: later same-user submit drops unanswered previous submit")
+
+
+def test_clear_drops_unanswered_same_user_submit():
+    """A same-user /clear drops an earlier unanswered submit for the current problem."""
+    _reset_state()
+    _setup_problem()
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+
+    first_started = asyncio.Event()
+
+    async def _slow_deepseek(messages, model="", task="", temperature=0.7, timeout=120,
+                             response_format=None, thinking=None):
+        payload = json.loads(messages[-1]["content"])
+        if payload["submission"] == "first solution":
+            first_started.set()
+            await asyncio.Event().wait()
+        return json.dumps({"correct": False, "reason": "RX", "reply": "OTHER"})
+
+    async def _run():
+        with _all_patches():
+            from kouhai_bot.eventlog import EVENT_META_KEY, log_command_received, load_events
+            from kouhai_bot.handlers.cmd.clear import handle as clear_handle
+            from kouhai_bot.handlers.cmd.submit import handle as submit_handle
+
+            ev1_raw = _make_event("/submit first solution", group_id=GID, user_id=UID, message_id="clear_drop_1")
+            ev1_raw[EVENT_META_KEY] = log_command_received(
+                group_id=GID,
+                user_id=UID,
+                sender=ev1_raw["sender"],
+                command="submit",
+                message_id=ev1_raw["message_id"],
+                raw_text=ev1_raw["raw_message"],
+            )
+            stale_request_id = ev1_raw[EVENT_META_KEY]["request_id"]
+            event_date = ev1_raw[EVENT_META_KEY]["date"]
+            ev2 = _kwargs(_make_event("/clear", group_id=GID, user_id=UID, message_id="clear_drop_2"))
+
+            with patch("kouhai_bot.handlers.cmd.submit.judge_submission_result", _wrap_deepseek_as_judge_result(_slow_deepseek)):
+                t1 = asyncio.create_task(submit_handle(**_kwargs(ev1_raw)))
+                await asyncio.wait_for(first_started.wait(), timeout=1.0)
+                t2 = asyncio.create_task(clear_handle(**ev2))
+                await asyncio.wait_for(asyncio.gather(t1, t2), timeout=1.0)
+                await asyncio.sleep(0)
+
+            return [
+                item for item in load_events(GID, event_date)
+                if item.get("request_id") == stale_request_id
+                and item.get("type") == "finished"
+            ]
+
+    stale_events = asyncio.run(_run())
+
+    assert not _sent, f"Discarded submit should not send a verdict: {_sent}"
+    assert ("clear_drop_2", "128076") in _reacted, f"Clear should still react OK: {_reacted}"
+    assert stale_events and stale_events[-1]["status"] == "stale", stale_events
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    assert saved["user_submissions"].get(str(UID), []) == []
+
+    _cleanup()
+    print("✅ clear: drops unanswered same-user submit")
+
+
+def test_dropping_unanswered_submit_unblocks_score_resolution():
+    """Discarding an earlier unresolved candidate should let later correct submits score."""
+    _reset_state()
+    _setup_problem()
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+
+    first_started = asyncio.Event()
+
+    async def _mixed_deepseek(messages, model="", task="", temperature=0.7, timeout=120,
+                              response_format=None, thinking=None):
+        payload = json.loads(messages[-1]["content"])
+        submission = payload["submission"]
+        if submission == "first maybe correct":
+            first_started.set()
+            await asyncio.Event().wait()
+        if submission == "second correct":
+            return json.dumps({"correct": True, "reason": "second ok", "reply": ""})
+        return json.dumps({"correct": False, "reason": "RX", "reply": "OTHER"})
+
+    async def _run():
+        with _all_patches(), \
+                patch("kouhai_bot.handlers.cmd.submit.judge_submission_result", _wrap_deepseek_as_judge_result(_mixed_deepseek)), \
+                patch("kouhai_bot.handlers.cmd.submit._reveal_problem_source", AsyncMock(return_value="")):
+            from kouhai_bot.handlers.cmd.clear import handle as clear_handle
+            from kouhai_bot.handlers.cmd.submit import handle as submit_handle
+
+            t1 = asyncio.create_task(submit_handle(**_kwargs(_make_event(
+                "/submit first maybe correct", group_id=GID, user_id=UID, message_id="unblock_1"
+            ))))
+            await asyncio.wait_for(first_started.wait(), timeout=1.0)
+            t2 = asyncio.create_task(submit_handle(**_kwargs(_make_event(
+                "/submit second correct", group_id=GID, user_id=OTHER_UID, message_id="unblock_2"
+            ))))
+            for _ in range(20):
+                if _has_sent("更早发出的提交正在判题"):
+                    break
+                await asyncio.sleep(0.01)
+            assert _has_sent("更早发出的提交正在判题"), f"Later correct submit should wait first: {_sent}"
+            t3 = asyncio.create_task(clear_handle(**_kwargs(_make_event(
+                "/clear", group_id=GID, user_id=UID, message_id="unblock_3"
+            ))))
+            await asyncio.wait_for(asyncio.gather(t1, t2, t3), timeout=1.0)
+
+    asyncio.run(_run())
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    assert len(saved["solves"]) == 1, saved
+    assert str(saved["solves"][0]["user_id"]) == str(OTHER_UID), saved
+    assert saved["user_submissions"].get(str(UID), []) == []
+    assert saved["user_submissions"][str(OTHER_UID)][-1]["result"] == "correct"
+
+    _cleanup()
+    print("✅ submit: dropping unanswered candidate unblocks scoring")
+
+
 def test_review_history_formats_types_and_submit_numbers():
     """Review context should separate interaction numbers from submit numbers."""
     from kouhai_bot.handlers.cmd.submit import _build_review_history
@@ -2804,6 +3000,9 @@ if __name__ == "__main__":
     test_submit_parallel_late_wrong_results_are_reused_after_first_solve()
     test_submit_parallel_late_correct_result_does_not_update_scoreboard_twice()
     test_submit_same_user_includes_previous_submit_history()
+    test_submit_same_user_later_submit_drops_unanswered_previous_submit()
+    test_clear_drops_unanswered_same_user_submit()
+    test_dropping_unanswered_submit_unblocks_score_resolution()
     test_clarify_prompt_hides_original_problem_identity()
     test_submit_same_user_includes_previous_clarify_history()
     test_submit_parallel_different_groups_do_not_block()

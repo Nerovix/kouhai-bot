@@ -173,7 +173,10 @@ class PendingRequest:
     admitted_at: float = field(default_factory=time.monotonic)
     admitted_wall: datetime = field(default_factory=lambda: datetime.now(timezone(timedelta(hours=8))))
     done_event: asyncio.Event = field(default_factory=asyncio.Event)
+    task: asyncio.Task | None = None
     compute_result: Any = None
+    discarded: bool = False
+    submit_terminal_started: bool = False
     submit_judge_done: bool = False
     submit_correct: bool = False
     submit_score_candidate: bool = False
@@ -471,6 +474,7 @@ class GroupCoordinator:
         req.seq = self.next_seq
         self.next_seq += 1
         self.active[req.seq] = req
+        resolve_pids = self._discard_superseded_submits_locked(req)
         if req.kind in _USER_CONTEXT_WRITERS and req.target_pid:
             self.pending_context.setdefault(
                 (req.group_id, req.user_id, req.target_pid),
@@ -484,10 +488,15 @@ class GroupCoordinator:
             ))
         if req.submit_score_candidate and req.submit_pid:
             self.submit_candidates.setdefault(req.submit_pid, []).append(req)
-        asyncio.create_task(
+        req.task = asyncio.create_task(
             self._run_request(req),
             name=f"stateful_{req.command}_{req.group_id}_{req.seq}",
         )
+        for pid in resolve_pids:
+            asyncio.create_task(
+                self._resolve_submit_scores(pid),
+                name=f"resolve_submit_scores_{req.group_id}_{pid}",
+            )
 
     async def enqueue(self, req: PendingRequest) -> None:
         async with self.lock:
@@ -527,18 +536,47 @@ class GroupCoordinator:
         else:
             self.pending_context.pop(key, None)
 
+    def _finish_request_locked(self, req: PendingRequest) -> str:
+        self.active.pop(req.seq, None)
+        self._remove_pending_context_locked(req)
+        pid = (req.compute_result or {}).get("pid", "") or req.submit_pid
+        if pid:
+            candidates = self.submit_candidates.get(pid)
+            if candidates:
+                candidates[:] = [c for c in candidates if c.seq != req.seq]
+                if not candidates:
+                    self.submit_candidates.pop(pid, None)
+        req.done_event.set()
+        return pid
+
+    def _discard_superseded_submits_locked(self, req: PendingRequest) -> set[str]:
+        if req.kind not in {"submit", "clear"} or not req.target_pid:
+            return set()
+
+        resolved_pids: set[str] = set()
+        for old in list(self.active.values()):
+            if old is req:
+                continue
+            if old.kind != "submit":
+                continue
+            if old.user_id != req.user_id or old.target_pid != req.target_pid:
+                continue
+            if old.seq >= req.seq or old.done_event.is_set():
+                continue
+            if old.discarded or old.submit_terminal_started:
+                continue
+
+            old.discarded = True
+            old.compute_result = {"kind": "discarded", "pid": old.submit_pid}
+            self._log_finished(old, "stale", problem=old.submit_pid)
+            resolved_pids.add(self._finish_request_locked(old))
+            if old.task and not old.task.done():
+                old.task.cancel()
+        return {pid for pid in resolved_pids if pid}
+
     async def _finish_request(self, req: PendingRequest) -> None:
         async with self.lock:
-            self.active.pop(req.seq, None)
-            self._remove_pending_context_locked(req)
-            pid = (req.compute_result or {}).get("pid", "")
-            if pid:
-                candidates = self.submit_candidates.get(pid)
-                if candidates:
-                    candidates[:] = [c for c in candidates if c.seq != req.seq]
-                    if not candidates:
-                        self.submit_candidates.pop(pid, None)
-        req.done_event.set()
+            self._finish_request_locked(req)
 
     async def _load_user_problem_history_for_request(
         self,
@@ -570,6 +608,8 @@ class GroupCoordinator:
 
     async def _run_request(self, req: PendingRequest) -> None:
         try:
+            if req.discarded:
+                return
             if req.kind == "submit":
                 req.compute_result = await self._compute_submit(req)
             elif req.kind == "clarify":
@@ -587,6 +627,8 @@ class GroupCoordinator:
             )
             req.compute_result = {"kind": "error", "error": str(e)}
         try:
+            if req.discarded:
+                return
             if req.kind == "submit":
                 await self._finalize_submit(req)
             elif req.kind == "clarify":
@@ -889,6 +931,9 @@ class GroupCoordinator:
                     self.scoring_pids.discard(pid)
 
     async def _finalize_submit(self, req: PendingRequest) -> None:
+        if req.discarded:
+            return
+        req.submit_terminal_started = True
         result = req.compute_result or {}
         kind = result.get("kind")
         if kind == "no_problem":

@@ -256,7 +256,9 @@ Key rules:
 - **Pending context**: when a request is admitted, its user input is registered in
   in-memory pending context keyed by `(group, user, pid)`. Later same-user requests
   include earlier pending user inputs plus completed `user_submissions`; pending records
-  are not persisted and have no fabricated bot reply.
+  are not persisted and have no fabricated bot reply. Exception: a later same-user
+  `/submit` or `/clear` for the same current problem discards older unanswered
+  `/submit` requests for that user/problem before they can be used as pending context.
 - **Short state critical sections**: JSON read/modify/write endpoints are protected by
   the per-group scheduler async lock. LLM calls never hold this lock.
 - **Submit first-blood serialization only**: incorrect/off-topic/failure replies are
@@ -266,6 +268,12 @@ Key rules:
   settle updates `scoreboard.json`, sends rank/top5/reveal, and schedules the official
   tutorial. Later correct candidates log `post_solve_correct` and are saved but do not
   send an extra not-counted message.
+- **Same-user submit replacement**: if a user sends another `/submit` or `/clear` for
+  the same problem before an earlier `/submit` has reached terminal reply handling, the
+  older submit is silently dropped, its local compute task is cancelled, and its command
+  event logs `status="stale"`. The 👀/[睁眼] ack does not count as a terminal reply.
+  This optimization applies only to older `/submit` requests in that exact same-user,
+  same-problem scenario.
 - **New problem visibility**: `/newproblem` / `daily_post` pick and summarize a candidate
   without changing `state.json`. Until the new card is successfully delivered, all
   commands still see the old problem. Failed delivery leaves the old current problem
@@ -355,7 +363,8 @@ achievement reports.
    enqueue
 4. If not blocked, get a sequence number and enqueue the snapshotted pid/solved state
 5. Background compute starts immediately; it loads completed user history plus earlier
-   pending user inputs for the same `(group, user, pid)`
+   pending user inputs for the same `(group, user, pid)`, excluding same-user same-problem
+   `/submit` requests that were superseded by a later `/submit` or `/clear`
 6. If `SUBMIT_AC_BACKDOOR` is non-empty and the submission contains that string, return a correct verdict before calling the judge LLM
 7. Otherwise load user history, react with 👀/[睁眼] ack, and call `judge_submission()`
    `[睁眼]` is a QQ special emoji reaction (emoji id), not plain message text.

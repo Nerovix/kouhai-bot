@@ -215,6 +215,32 @@ async def _commit_problem_state(group_id: int, state: dict) -> None:
     await run_group_state_update(group_id, _write)
 
 
+def _save_daily_msg(
+    state_dir: str,
+    *,
+    pid: str,
+    post_msg: str,
+    sample_messages: list[str],
+    notes_message: str,
+    snake_enabled: bool,
+    node_payload: dict | None = None,
+    fwd_message_id: int | None = None,
+) -> None:
+    daily_msg = {
+        **(node_payload or {}),
+        "pid": pid,
+        "post_msg": post_msg,
+        "sample_messages": sample_messages,
+        "notes_message": notes_message,
+        "snake_enabled": snake_enabled,
+    }
+    if fwd_message_id is not None:
+        daily_msg["fwd_message_id"] = fwd_message_id
+    daily_msg_path = os.path.join(state_dir, "daily_msg.json")
+    with open(daily_msg_path, "w", encoding="utf-8") as f:
+        json.dump(daily_msg, f, ensure_ascii=False, indent=2)
+
+
 def _load_statement_json(cfg, group_id: int, pid: str) -> dict:
     """Load statement JSON from runtime dir, then fallback dir."""
     candidate_paths = [
@@ -478,10 +504,22 @@ async def _do_daily_post_locked(
         snake_enabled=True,
     )
     if not fwd_resp:
-        logger.error(f"[group_{group_id}] Self-send failed, falling back to direct")
+        logger.error(f"[group_{group_id}] Problem forward-card send failed, falling back to direct")
         ok = await send_group_msg(group_id, build_plain_message(post_msg))
         if ok:
             await _commit_problem_state(group_id, picked_state)
+            try:
+                _save_daily_msg(
+                    state_dir,
+                    pid=pid,
+                    post_msg=post_msg,
+                    sample_messages=sample_messages,
+                    notes_message=notes_message,
+                    snake_enabled=True,
+                    node_payload=node_payload,
+                )
+            except Exception as e:
+                logger.warning(f"[group_{group_id}] Failed to save fallback daily_msg.json: {e}")
             append_group_ctx(group_id, {"role": "assistant", "content": post_msg})
             logger.info(f"[group_{group_id}] Daily post sent (fallback) ✓")
             return True
@@ -498,18 +536,16 @@ async def _do_daily_post_locked(
         save_problem_card_ref(group_id, fwd_resp, pid, "daily_post" if prefix is None else "newproblem")
 
     try:
-        daily_msg_path = os.path.join(state_dir, "daily_msg.json")
-        daily_msg = {
-            **node_payload,
-            "fwd_message_id": fwd_resp,
-            "pid": pid,
-            "post_msg": post_msg,
-            "sample_messages": sample_messages,
-            "notes_message": notes_message,
-            "snake_enabled": True,
-        }
-        with open(daily_msg_path, "w") as f:
-            json.dump(daily_msg, f, ensure_ascii=False, indent=2)
+        _save_daily_msg(
+            state_dir,
+            pid=pid,
+            post_msg=post_msg,
+            sample_messages=sample_messages,
+            notes_message=notes_message,
+            snake_enabled=True,
+            node_payload=node_payload,
+            fwd_message_id=fwd_resp,
+        )
     except Exception as e:
         logger.warning(f"[group_{group_id}] Failed to save daily_msg.json: {e}")
     return True

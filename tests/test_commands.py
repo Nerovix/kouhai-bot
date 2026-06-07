@@ -1785,6 +1785,27 @@ def test_problem_rebuilds_forward_card_when_node_ids_are_stale():
     print("✅ problem: rebuilds stale forward card")
 
 
+def test_problem_ignores_stale_daily_msg_pid():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_group_file(GID, "daily_msg.json", {
+        "msg_id": 1111,
+        "pid": PID2,
+        "post_msg": "旧题正文",
+        "sample_messages": ["旧样例"],
+        "snake_enabled": True,
+    })
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.stubs import handle_problem
+        asyncio.run(handle_problem(**_kwargs(_make_event("/problem"))))
+
+    assert not _forwarded, f"Should not resend stale problem card: {_forwarded}"
+    assert "暂时无法重新发送" in _last_text(), f"Expected fallback: {_last_text()}"
+    _cleanup()
+    print("✅ problem: ignores stale daily_msg pid")
+
+
 def test_problem_solved_resend_shows_next_problem_hint():
     _reset_state()
     _setup_problem()
@@ -2288,6 +2309,67 @@ def test_newproblem_notify_group_on_pick_failure():
 
     _cleanup()
     print("✅ newproblem: pick failure notifies group when notify_group=True")
+
+
+def test_newproblem_fallback_direct_saves_daily_msg_for_current_pid():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _setup_problem_for(GID, PID2)
+    _write_state(GID, {"today": PID, "contestId": 542, "index": "D"})
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    _write_group_file(GID, "daily_msg.json", {
+        "msg_id": 1111,
+        "pid": PID,
+        "post_msg": "旧题正文",
+        "sample_messages": ["旧样例"],
+        "snake_enabled": True,
+    })
+
+    picked = {
+        "today": PID2,
+        "contestId": 100,
+        "index": "A",
+        "name": "Next",
+        "rating": 2000,
+        "tags": ["dp"],
+    }
+
+    async def _mock_subprocess(*args, **kwargs):
+        cmd_args = args[1:]
+        proc = AsyncMock()
+        if any("reveal" in str(a) for a in cmd_args):
+            proc.returncode = 0
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+            return proc
+        if any("pick-json" in str(a) for a in cmd_args):
+            proc.returncode = 0
+            proc.communicate = AsyncMock(return_value=(json.dumps(picked).encode(), b""))
+            return proc
+        raise RuntimeError(f"unexpected subprocess: {cmd_args}")
+
+    async def _fail_forward(group_id, messages):
+        return None
+
+    with _all_patches(), \
+            patch("asyncio.create_subprocess_exec", _mock_subprocess), \
+            patch("kouhai_bot.handlers.cmd.newproblem.send_group_forward_msg", _fail_forward), \
+            patch("kouhai_bot.handlers.cmd.newproblem.asyncio.sleep", AsyncMock()):
+        from kouhai_bot.handlers.cmd.newproblem import _do_daily_post_locked
+        posted = asyncio.run(_do_daily_post_locked(GID, prefix="刷新了一道新题🌟", notify_group=True))
+
+    assert posted is True
+    assert _has_sent("刷新了一道新题"), _sent
+    with open(os.path.join(_data_dir(), "groups", str(GID), "state.json")) as f:
+        state = json.load(f)
+    assert state["today"] == PID2
+    with open(os.path.join(_data_dir(), "groups", str(GID), "daily_msg.json")) as f:
+        daily = json.load(f)
+    assert daily["pid"] == PID2, daily
+    assert daily["post_msg"].startswith("刷新了一道新题"), daily
+    assert "sample_messages" in daily
+    assert "fwd_message_id" not in daily
+    _cleanup()
+    print("✅ newproblem: fallback direct saves daily_msg for current pid")
 
 
 def test_submit_scoreboard_update_settles_late_old_problem():
@@ -3136,6 +3218,7 @@ if __name__ == "__main__":
     test_clarify_alias_dispatches_to_clarify_handler()
     test_problem_with_data()
     test_problem_rebuilds_forward_card_when_node_ids_are_stale()
+    test_problem_ignores_stale_daily_msg_pid()
     test_problem_solved_resend_shows_next_problem_hint()
     test_problem_unsolved_resend_does_not_show_next_problem_hint()
     test_problem_alias_dispatches_to_problem_handler()
@@ -3150,6 +3233,7 @@ if __name__ == "__main__":
     test_newproblem_alias_force_posts_when_unsolved()
     test_newproblem_force_requires_space()
     test_newproblem_solved_posts()
+    test_newproblem_fallback_direct_saves_daily_msg_for_current_pid()
     test_do_daily_post_does_not_switch_state_when_send_fails()
     test_status_ignores_other_groups_and_reports_idle()
     test_status_reports_newproblem_busy()

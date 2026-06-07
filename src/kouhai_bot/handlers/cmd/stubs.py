@@ -57,7 +57,9 @@ async def handle_problem(group_id: int, user_id: int, sender: dict,
     daily_msg_path = os.path.join(state_dir, "daily_msg.json")
     nickname = _nick(sender)
 
-    if not get_today_problem(group_id):
+    current_problem = get_today_problem(group_id)
+    current_pid = str(current_problem.get("today", "") or "") if current_problem else ""
+    if not current_problem:
         await send_group_msg(group_id, build_plain_message(
             f"@{nickname} 暂时不能查看当前题目，可能是暂时还不存在当前题目，试试 /newproblem？"
         ))
@@ -69,6 +71,8 @@ async def handle_problem(group_id: int, user_id: int, sender: dict,
             with open(daily_msg_path) as f:
                 daily_msg = json.load(f)
             pid = str(daily_msg.get("pid", "") or "")
+            if pid != current_pid:
+                raise ValueError(f"stale daily_msg pid={pid}, current={current_pid}")
             msg_id = daily_msg.get("msg_id")
             if msg_id:
                 fwd_nodes = [{"type": "node", "data": {"id": str(msg_id)}}]

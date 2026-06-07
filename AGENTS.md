@@ -228,8 +228,8 @@ No repository-local runtime queue is used.
 | `/submit` (`/sbm`) | submit.py | `handle` | ✅ state scheduler | per-provider `judge_model` | Judge solution, save history, serialize only first-blood/scoreboard; configured user-group delay checked before enqueue |
 | `/clarify` (`/clrf`) | clarify.py | `handle` | ✅ state scheduler | per-provider `clarify_model` | Clarify problem details (JSON output, anti-spoiler, no original problem identity), using admission-time pid |
 | `/clear` | clear.py | `handle` | ✅ state scheduler | — | Clear the current user's stored submit/clarify/review history for the admission-time current problem |
-| `/newproblem` (`/np`) | newproblem.py | `handle` | ✅ post lock | per-provider `summary_model` | Force new problem when solved (or none); unsolved needs exact `/newproblem --force`; samples are forwarded as separate nodes; if statement has `notes`, translate+symbol-normalize and append as a dedicated notes node; commits state only after card delivery succeeds |
-| `/problem` (`/pb`) | stubs.py | `handle_problem` | ❌ | — | Resend via forward card (falls back to text); if solved, add a friendly `/newproblem` hint |
+| `/newproblem` (`/np`) | newproblem.py | `handle` | ✅ post lock | per-provider `summary_model` | Force new problem when solved (or none); unsolved needs exact `/newproblem --force`; samples are forwarded as separate nodes; if statement has `notes`, translate+symbol-normalize and append as a dedicated notes node; commits state only after card delivery succeeds and keeps `daily_msg.json` in sync even on direct-text fallback |
+| `/problem` (`/pb`) | stubs.py | `handle_problem` | ❌ | — | Resend current problem via forward card only when `daily_msg.json.pid` matches `state.json.today`; if solved, add a friendly `/newproblem` hint |
 | `/tag` | stubs.py | `handle_tag` | ❌ | — | Show CF tags |
 | `/scoreboard` | stubs.py | `handle_scoreboard` | ❌ | — | Cumulative weighted leaderboard; shows the formula at the top, then refreshes latest group nicknames at display time |
 | `/help` | help.py | `handle` | ❌ | — | Auto-generated help (forward card) |
@@ -472,7 +472,10 @@ lock and wraps the same locked implementation:
    artifacts normalized to readable symbols such as `→`, `≤`, `<`, `>`); then append snake
    image and forward all nodes as one merged card to group
 5. If delivery succeeds, commit `state.json` with `posted_at` and save `daily_msg.json`
-   for `/problem` to resend. If delivery fails, keep the old current problem.
+   for `/problem` to resend. A direct-text fallback after forward-card failure still
+   counts as successful delivery and must save `daily_msg.json` with `pid`, `post_msg`,
+   `sample_messages`, `notes_message`, and `snake_enabled` so `/problem` can rebuild a
+   card later. If delivery fails completely, keep the old current problem.
 6. Save the Chinese summary to `problem_summaries.json` keyed by pid for later reuse
 7. `schedule_prefetch_editorial(pid)` — background editorial translation (not sent yet)
 
@@ -690,7 +693,10 @@ translation. Do not force synchronous translation on detail-page clicks.
 `do_daily_post()` self-sends summary text, sample nodes, optional translated notes node,
 and snake image, then forwards them as one merged card. `daily_msg.json` must persist
 all node references (`msg_id`, `sample_msg_ids`, optional `note_msg_id`, `snake_msg_id`)
-so `/problem` can resend the same card.
+so `/problem` can resend the same card. If merged-forward fails but direct group text
+succeeds, `daily_msg.json` must still persist the current `pid` and rebuild inputs.
+`/problem` must ignore stale `daily_msg.json` whose `pid` does not match
+`state.json.today`.
 Complicated but essential for good UX.
 
 ### 12. Dispatch uses create_task
@@ -904,7 +910,9 @@ selected by the `--group` flag.
   started after 12:00 with no problem. This was intentionally REMOVED — it makes
   workflow unpredictable. Missed is missed; don't auto-recover.
 - **Daily post delivery**: Must use merged-forward (self-send text + snake image →
-  forward card + daily_msg.json). The plain-text simplification was rejected.
+  forward card + daily_msg.json). Plain-text direct send is fallback-only; if it
+  succeeds, it still needs current-problem `daily_msg.json` so `/problem` never resends
+  stale cached cards.
 - **Old bridge.py behavior is the ground truth**: All behavior, message text, data
   formats, and edge cases must match the legacy bridge implementation. When in doubt,
   compare against the old code if it is available in your local environment.

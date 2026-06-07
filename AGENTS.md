@@ -253,12 +253,14 @@ Key rules:
 - **Parallel compute**: expensive LLM work for `/submit`, `/clarify`, and `/review`
   starts immediately and shares a **global concurrency limit of 8**. Same-user requests
   do not wait for earlier LLM calls to finish.
-- **Pending context**: when a request is admitted, its user input is registered in
-  in-memory pending context keyed by `(group, user, pid)`. Later same-user requests
-  include earlier pending user inputs plus completed `user_submissions`; pending records
-  are not persisted and have no fabricated bot reply. Superseded unanswered `/submit`
-  requests remain visible here with `result="superseded"`, even though their judge work
-  is dropped.
+- **Pending archive context**: when a `/submit`, `/clarify`, or `/review` request is
+  admitted for a target problem, its user input is saved immediately to
+  `scoreboard.json.user_submissions` with `result="pending"` and a `request_id`. Later
+  same-user requests load these pending records plus completed history; the current
+  request's own pending record is excluded by `request_id`. Final handling updates that
+  same record in place. Superseded unanswered `/submit`, timeout, and service-failure
+  records therefore remain historical context across restarts with empty
+  `reason`/`reply`.
 - **Short state critical sections**: JSON read/modify/write endpoints are protected by
   the per-group scheduler async lock. LLM calls never hold this lock.
 - **Submit first-blood serialization only**: incorrect/off-topic/failure replies are
@@ -273,9 +275,11 @@ Key rules:
   older submit is silently dropped, its local compute task is cancelled, and its command
   event logs `status="stale"`. The 👀/[睁眼] ack does not count as a terminal reply.
   This optimization applies only to older `/submit` requests in that exact same-user,
-  same-problem scenario. The older submit's text remains as `result="superseded"`
-  context so a quick correction or addendum can refer to it, and the received `/submit`
-  still counts as a submit attempt in daily achievements.
+  same-problem scenario. When superseded by another `/submit`, the older submit's
+  persisted pending record is updated to `result="superseded"` so a quick correction or
+  addendum can refer to it after a restart, and the received `/submit` still counts as a
+  submit attempt in daily achievements. When superseded by `/clear`, it is removed with
+  the rest of that user's current-problem context.
 - **New problem visibility**: `/newproblem` / `daily_post` pick and summarize a candidate
   without changing `state.json`. Until the new card is successfully delivered, all
   commands still see the old problem. Failed delivery leaves the old current problem
@@ -296,7 +300,7 @@ Status helpers used by `/status`:
 - Targets the caller's stored `user_submissions` records for the **current problem only**
 - Removes that user's saved `/submit`, `/clarify`, and `/review` history for today's pid
 - Runs through the state scheduler and records a clear watermark so earlier in-flight
-  pending context for that user/problem is discarded instead of being written after clear
+  requests for that user/problem cannot write history after clear
 - On success it reacts to the triggering message with the typed `👌` emoji payload
   (`type=2`, `id=128076`) and sends no extra text
 
@@ -372,8 +376,9 @@ achievement reports.
    enqueue
 4. If not blocked, get a sequence number and enqueue the snapshotted pid/solved state
 5. Background compute starts immediately; it loads completed user history plus earlier
-   pending user inputs for the same `(group, user, pid)`, including superseded
-   unanswered `/submit` text as `result="superseded"` context
+   pending user inputs for the same `(group, user, pid)`. The current request's own
+   pending archive record is excluded by `request_id`; superseded unanswered `/submit`
+   text is visible as `result="superseded"` context.
 6. If `SUBMIT_AC_BACKDOOR` is non-empty and the submission contains that string, return a correct verdict before calling the judge LLM
 7. Otherwise load user history, react with 👀/[睁眼] ack, and call `judge_submission()`
    `[睁眼]` is a QQ special emoji reaction (emoji id), not plain message text.
@@ -643,7 +648,7 @@ exactly for backward compatibility with existing `~/.daily-problem` data.
 ### 1. Stateful scheduler state must be truly shared
 All submit/clarify/review/clear entry points in a group must use the SAME scheduler
 state for that group. Do not add an ad hoc lock or side path for one command, or
-pending context, clear watermarks, and first-blood resolution will diverge.
+pending archive updates, clear watermarks, and first-blood resolution will diverge.
 
 ### 2. Judge user_msg format is JSON
 `judge_submission()` sends `json.dumps({"problem": ..., "submission": ..., "history": ...})`.
@@ -672,8 +677,9 @@ silently fails.
 Must pass `json.dump(sb, f, ensure_ascii=False, indent=2)` for backward compatibility
 with old scoreboard files.
 
-### 9. save_user_submission trims to 20
-Per-user submission history is capped at 20 entries to prevent unbounded growth.
+### 9. save_user_submission keeps full history
+Per-user submission history is intentionally unbounded. Records with a `request_id`
+update the matching existing record in place; records without one append normally.
 
 ### 10. Save Chinese summaries by pid if you need later reuse
 The summary shown in the group post is now persisted in `groups/<gid>/problem_summaries.json`.
@@ -917,7 +923,7 @@ When making changes, verify against old bridge.py:
 6. **Contest**: @all notification, 2s delay
 7. **Dispatch**: create_task (not await), skip own messages, extract_text with @mentions
 8. **WS**: bind 0.0.0.0 for Docker, max_size=2**26, ping_interval=30, ping_timeout=10
-9. **Trimming**: save_user_submission trims to 20, save_scoreboard indent=2
+9. **History persistence**: save_user_submission does not trim; records with request_id upsert
 10. **Nickname fallback**: `card or nick or str(user_id)` — never "群友"
 11. **Status visibility**: new stateful commands MUST publish active request metadata
     so `/status` still reports in-flight work correctly

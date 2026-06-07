@@ -638,10 +638,17 @@ def save_user_submission(group_id: int, user_id: int, submission: dict) -> None:
     uid = str(user_id)
     if uid not in submissions:
         submissions[uid] = []
-    submissions[uid].append(submission)
-    # Trim to last 20
-    if len(submissions[uid]) > 20:
-        submissions[uid] = submissions[uid][-20:]
+    request_id = str(submission.get("request_id", "") or "")
+    if request_id:
+        for idx in range(len(submissions[uid]) - 1, -1, -1):
+            existing = submissions[uid][idx]
+            if str(existing.get("request_id", "") or "") == request_id:
+                submissions[uid][idx] = submission
+                break
+        else:
+            submissions[uid].append(submission)
+    else:
+        submissions[uid].append(submission)
     sb["user_submissions"] = submissions
     save_scoreboard(group_id, sb)
 

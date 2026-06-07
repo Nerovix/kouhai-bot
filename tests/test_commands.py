@@ -798,8 +798,37 @@ def test_submit_llm_failure_shows_admin_message():
 
     assert "模型服务出故障了，联系一下管理员帮帮忙吧～" in _last_text()
     assert ("msg_001", "268") in _reacted
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    records = saved["user_submissions"][str(UID)]
+    assert records[-1]["content"] == "brute force from 1 to A"
+    assert records[-1]["result"] == "service_unavailable"
+    assert records[-1]["reply"] == ""
     _cleanup()
     print("✅ submit: llm failure shows admin message")
+
+
+def test_submit_timeout_is_saved_as_context():
+    _reset_state()
+    _setup_problem()
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+
+    async def _timeout_judge(problem_text, submission, history=None):
+        return ChatCompletionResult(text=None, failure_kind="timeout")
+
+    with _all_patches(), patch("kouhai_bot.handlers.cmd.submit.judge_submission_result", _timeout_judge):
+        from kouhai_bot.handlers.cmd.submit import handle
+        asyncio.run(handle(**_kwargs(_make_event("/submit maybe too slow"))))
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    records = saved["user_submissions"][str(UID)]
+    assert records[-1]["content"] == "maybe too slow"
+    assert records[-1]["result"] == "timeout"
+    assert records[-1]["reason"] == ""
+    assert records[-1]["reply"] == ""
+    _cleanup()
+    print("✅ submit: timeout saved as context")
 
 
 def test_submit_ac_backdoor_accepts_before_judge():
@@ -1301,6 +1330,12 @@ def test_review_llm_failure_shows_admin_message():
 
     assert "模型服务出故障了，联系一下管理员帮帮忙吧～" in _last_text()
     assert ("msg_001", "268") in _reacted
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    records = saved["user_submissions"][str(UID)]
+    assert records[-1]["type"] == "review"
+    assert records[-1]["result"] == "service_unavailable"
+    assert records[-1]["content"] == "细讲一下这题"
     _cleanup()
     print("✅ review: llm failure shows admin message")
 
@@ -1369,7 +1404,7 @@ def test_review_parallel_same_group():
     print("✅ review: same-group compute runs in parallel")
 
 
-def test_review_same_user_runs_in_parallel_with_pending_context():
+def test_review_same_user_runs_in_parallel_with_pending_archive_context():
     """Two reviews from the same user should not serialize on the earlier LLM call."""
     _reset_state()
     _setup_problem_for(GID, PID2)
@@ -1598,6 +1633,12 @@ def test_clarify_llm_failure_shows_admin_message():
 
     assert "模型服务出故障了，联系一下管理员帮帮忙吧～" in _last_text()
     assert ("msg_001", "268") in _reacted
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    records = saved["user_submissions"][str(UID)]
+    assert records[-1]["type"] == "clarify"
+    assert records[-1]["result"] == "service_unavailable"
+    assert records[-1]["content"] == "Joker函数是什么"
     _cleanup()
     print("✅ clarify: llm failure shows admin message")
 
@@ -2604,12 +2645,14 @@ def test_submit_same_user_later_submit_drops_unanswered_previous_submit():
             finally:
                 first_cancelled.set()
         if submission == "second solution":
-            assert any(
+            superseded = [
                 item.get("content") == "first solution"
                 and item.get("result") == "superseded"
                 and item.get("problem") == PID
                 for item in history
-            ), f"Dropped submit should remain visible as superseded context: {history}"
+            ]
+            assert sum(1 for matched in superseded if matched) == 1, \
+                f"Dropped submit should remain visible once as superseded context: {history}"
             return json.dumps({"correct": False, "reason": "R2", "reply": "SECOND"})
         return json.dumps({"correct": False, "reason": "RX", "reply": "OTHER"})
 
@@ -2659,7 +2702,11 @@ def test_submit_same_user_later_submit_drops_unanswered_previous_submit():
     with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
         saved = json.load(f)
     records = saved["user_submissions"].get(str(UID), [])
-    assert [item["content"] for item in records] == ["second solution"], records
+    assert [item["content"] for item in records] == ["first solution", "second solution"], records
+    assert records[0]["result"] == "superseded", records
+    assert records[0]["reason"] == "", records
+    assert records[0]["reply"] == "", records
+    assert records[1]["result"] == "incorrect", records
 
     _cleanup()
     print("✅ submit: later same-user submit drops unanswered previous submit")
@@ -2816,6 +2863,42 @@ def test_review_history_formats_types_and_submit_numbers():
     assert "--- 交互 #3 | type=submit | submit #2 | result=correct ---" in text
     assert "提交 #2 [incorrect]" not in text
     print("✅ review: history format separates interaction and submit numbers")
+
+
+def test_user_submission_history_is_unbounded_and_upserts_by_request_id():
+    _reset_state()
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    from kouhai_bot.handlers.shared import load_user_submissions, save_user_submission
+
+    for i in range(25):
+        save_user_submission(GID, UID, {
+            "timestamp": f"2026-05-14T00:00:{i:02d}+08:00",
+            "type": "submit",
+            "content": f"idea {i}",
+            "result": "incorrect",
+            "reason": "",
+            "reply": "",
+            "problem": PID,
+            "request_id": f"req-{i}",
+        })
+    save_user_submission(GID, UID, {
+        "timestamp": "2026-05-14T00:00:03+08:00",
+        "type": "submit",
+        "content": "idea 3 updated",
+        "result": "superseded",
+        "reason": "",
+        "reply": "",
+        "problem": PID,
+        "request_id": "req-3",
+    })
+
+    records = load_user_submissions(GID, UID)
+    assert len(records) == 25, records
+    assert records[0]["content"] == "idea 0", records
+    assert records[3]["content"] == "idea 3 updated", records
+    assert records[3]["result"] == "superseded", records
+    _cleanup()
+    print("✅ history: user submissions are unbounded and upsert by request id")
 
 
 def test_clarify_prompt_hides_original_problem_identity():
@@ -3031,6 +3114,8 @@ def test_submit_user_group_blocked_uses_dynamic_wait():
 if __name__ == "__main__":
     test_submit_correct()
     test_submit_incorrect()
+    test_submit_llm_failure_shows_admin_message()
+    test_submit_timeout_is_saved_as_context()
     test_submit_already_solved()
     test_review_uses_latest_solved_problem()
     test_review_alias_dispatches_to_review_handler()
@@ -3041,7 +3126,7 @@ if __name__ == "__main__":
     test_review_unknown_referenced_card_is_friendly()
     test_review_long_reply_is_chunked_into_one_forward_card()
     test_review_parallel_same_group()
-    test_review_same_user_runs_in_parallel_with_pending_context()
+    test_review_same_user_runs_in_parallel_with_pending_archive_context()
     test_review_after_pending_submit_uses_snapshotted_solved_problem()
     test_submit_off_topic()
     test_submit_operation_not_blocked()
@@ -3075,6 +3160,8 @@ if __name__ == "__main__":
     test_submit_same_user_later_submit_drops_unanswered_previous_submit()
     test_clear_drops_unanswered_same_user_submit()
     test_dropping_unanswered_submit_unblocks_score_resolution()
+    test_review_history_formats_types_and_submit_numbers()
+    test_user_submission_history_is_unbounded_and_upserts_by_request_id()
     test_clarify_prompt_hides_original_problem_identity()
     test_submit_same_user_includes_previous_clarify_history()
     test_submit_parallel_different_groups_do_not_block()

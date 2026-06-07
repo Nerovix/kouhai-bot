@@ -193,16 +193,6 @@ class PendingRequest:
         }
 
 
-@dataclass
-class PendingContext:
-    seq: int
-    kind: str
-    content: str
-    problem: str
-    timestamp: str
-    result: str = "pending"
-
-
 def _refresh_runtime() -> None:
     global _runtime_loop, _compute_sem, _coordinators
     try:
@@ -344,16 +334,36 @@ def _unique_user_ids(user_ids: list[int] | None) -> list[int]:
     return result
 
 
-def _pending_context_record(item: PendingContext) -> dict:
-    return {
-        "timestamp": item.timestamp,
-        "type": item.kind,
-        "content": item.content,
-        "result": item.result,
-        "reason": "",
-        "reply": "",
-        "problem": item.problem,
+def _request_id(req: PendingRequest) -> str:
+    request_id = str((req.event_log or {}).get("request_id", "") or "")
+    if request_id:
+        return request_id
+    if req.seq:
+        return f"local-{req.group_id}-{req.user_id}-{req.command}-{req.message_id}-{req.seq}"
+    return ""
+
+
+def _context_record(
+    req: PendingRequest,
+    *,
+    result: str = "pending",
+    reason: str = "",
+    reply: str = "",
+    problem: str = "",
+) -> dict:
+    record = {
+        "timestamp": req.admitted_wall.isoformat(),
+        "type": req.kind,
+        "content": req.payload,
+        "result": result,
+        "reason": reason,
+        "reply": reply,
+        "problem": problem or req.target_pid,
     }
+    request_id = _request_id(req)
+    if request_id:
+        record["request_id"] = request_id
+    return record
 
 
 def _is_problem_solved_in_scoreboard(group_id: int, pid: str) -> bool:
@@ -465,7 +475,6 @@ class GroupCoordinator:
         self.group_id = group_id
         self.lock = asyncio.Lock()
         self.active: dict[int, PendingRequest] = {}
-        self.pending_context: dict[tuple[int, int, str], list[PendingContext]] = {}
         self.clear_watermarks: dict[tuple[int, int, str], int] = {}
         self.submit_candidates: dict[str, list[PendingRequest]] = {}
         self.scoring_pids: set[str] = set()
@@ -477,16 +486,11 @@ class GroupCoordinator:
         self.active[req.seq] = req
         resolve_pids = self._discard_superseded_submits_locked(req)
         if req.kind in _USER_CONTEXT_WRITERS and req.target_pid:
-            self.pending_context.setdefault(
-                (req.group_id, req.user_id, req.target_pid),
-                [],
-            ).append(PendingContext(
-                seq=req.seq,
-                kind=req.kind,
-                content=req.payload,
-                problem=req.target_pid,
-                timestamp=req.admitted_wall.isoformat(),
-            ))
+            save_user_submission(
+                req.group_id,
+                req.user_id,
+                _context_record(req, problem=req.target_pid),
+            )
         if req.submit_score_candidate and req.submit_pid:
             self.submit_candidates.setdefault(req.submit_pid, []).append(req)
         req.task = asyncio.create_task(
@@ -524,41 +528,8 @@ class GroupCoordinator:
             extra=extra,
         )
 
-    def _remove_pending_context_locked(self, req: PendingRequest) -> None:
-        if req.kind not in _USER_CONTEXT_WRITERS or not req.target_pid:
-            return
-        key = (req.group_id, req.user_id, req.target_pid)
-        items = self.pending_context.get(key)
-        if not items:
-            return
-        kept = [item for item in items if item.seq != req.seq]
-        if kept:
-            self.pending_context[key] = kept
-        else:
-            self.pending_context.pop(key, None)
-
-    def _mark_pending_context_result_locked(
-        self,
-        req: PendingRequest,
-        result: str,
-    ) -> None:
-        if req.kind not in _USER_CONTEXT_WRITERS or not req.target_pid:
-            return
-        key = (req.group_id, req.user_id, req.target_pid)
-        for item in self.pending_context.get(key, []):
-            if item.seq == req.seq:
-                item.result = result
-                return
-
-    def _finish_request_locked(
-        self,
-        req: PendingRequest,
-        *,
-        keep_pending_context: bool = False,
-    ) -> str:
+    def _finish_request_locked(self, req: PendingRequest) -> str:
         self.active.pop(req.seq, None)
-        if not keep_pending_context:
-            self._remove_pending_context_locked(req)
         pid = (req.compute_result or {}).get("pid", "") or req.submit_pid
         if pid:
             candidates = self.submit_candidates.get(pid)
@@ -588,9 +559,14 @@ class GroupCoordinator:
 
             old.discarded = True
             old.compute_result = {"kind": "discarded", "pid": old.submit_pid}
-            self._mark_pending_context_result_locked(old, "superseded")
+            if req.kind == "submit":
+                save_user_submission(
+                    old.group_id,
+                    old.user_id,
+                    _context_record(old, result="superseded", problem=old.submit_pid),
+                )
             self._log_finished(old, "stale", problem=old.submit_pid)
-            resolved_pids.add(self._finish_request_locked(old, keep_pending_context=True))
+            resolved_pids.add(self._finish_request_locked(old))
             if old.task and not old.task.done():
                 old.task.cancel()
         return {pid for pid in resolved_pids if pid}
@@ -607,24 +583,19 @@ class GroupCoordinator:
     ) -> list[dict]:
         target_user_id = req.user_id if user_id is None else user_id
         async with self.lock:
-            history = _load_user_problem_history(req.group_id, target_user_id, pid)
-            key = (req.group_id, target_user_id, pid)
-            watermark = self.clear_watermarks.get(key, 0)
-            pending = [
-                _pending_context_record(item)
-                for item in self.pending_context.get(key, [])
-                if item.seq < req.seq and item.seq > watermark
+            request_id = _request_id(req)
+            history = [
+                item for item in _load_user_problem_history(req.group_id, target_user_id, pid)
+                if not request_id or str(item.get("request_id", "") or "") != request_id
             ]
-        return sorted([*history, *pending], key=lambda item: str(item.get("timestamp", "")))
+        return sorted(history, key=lambda item: str(item.get("timestamp", "")))
 
     async def _save_context_record(self, req: PendingRequest, record: dict) -> bool:
         async with self.lock:
             key = (req.group_id, req.user_id, str(record.get("problem", "") or ""))
             if self.clear_watermarks.get(key, 0) >= req.seq:
-                self._remove_pending_context_locked(req)
                 return False
             save_user_submission(req.group_id, req.user_id, record)
-            self._remove_pending_context_locked(req)
             return True
 
     async def _run_request(self, req: PendingRequest) -> None:
@@ -983,6 +954,10 @@ class GroupCoordinator:
             ))
             req.submit_judge_done = True
             req.submit_correct = False
+            await self._save_context_record(
+                req,
+                _context_record(req, result="no_statement", problem=result.get("pid", "")),
+            )
             await self._resolve_submit_scores(pid=result.get("pid", ""))
             await self._finish_request(req)
             return
@@ -992,6 +967,10 @@ class GroupCoordinator:
             await self._send_llm_failure(req)
             req.submit_judge_done = True
             req.submit_correct = False
+            await self._save_context_record(
+                req,
+                _context_record(req, result=status, problem=result.get("pid", "")),
+            )
             await self._resolve_submit_scores(pid=result.get("pid", ""))
             await self._finish_request(req)
             return
@@ -1013,17 +992,16 @@ class GroupCoordinator:
             await self._finish_request(req)
             return
 
-        record = {
-            "timestamp": req.admitted_wall.isoformat(),
-            "type": "submit",
-            "content": req.payload,
-            "result": "correct" if correct else "incorrect",
-            "reason": reason,
-            "reply": reply,
-            "problem": pid,
-        }
-
-        await self._save_context_record(req, record)
+        await self._save_context_record(
+            req,
+            _context_record(
+                req,
+                result="correct" if correct else "incorrect",
+                reason=reason,
+                reply=reply,
+                problem=pid,
+            ),
+        )
         req.submit_judge_done = True
         req.submit_correct = bool(correct)
 
@@ -1095,12 +1073,20 @@ class GroupCoordinator:
             await send_group_msg(req.group_id, build_plain_message(
                 f"@{req.nickname} 抱歉，题面缓存不可用～"
             ))
+            await self._save_context_record(
+                req,
+                _context_record(req, result="no_statement", problem=result.get("pid", "")),
+            )
             await self._finish_request(req)
             return
         if kind in {"timeout", "service_unavailable", "cancelled", "error", "unavailable"}:
             status = "timeout" if kind == "timeout" else "service_unavailable"
             self._log_finished(req, status, problem=result.get("pid", ""))
             await self._send_llm_failure(req)
+            await self._save_context_record(
+                req,
+                _context_record(req, result=status, problem=result.get("pid", "")),
+            )
             await self._finish_request(req)
             return
 
@@ -1116,6 +1102,10 @@ class GroupCoordinator:
         if not reply:
             self._log_finished(req, "service_unavailable", problem=pid)
             await self._send_llm_failure(req)
+            await self._save_context_record(
+                req,
+                _context_record(req, result="service_unavailable", problem=pid),
+            )
             await self._finish_request(req)
             return
 
@@ -1130,16 +1120,10 @@ class GroupCoordinator:
             build_text(f" {reply}"),
         ])
 
-        record = {
-            "timestamp": req.admitted_wall.isoformat(),
-            "type": "clarify",
-            "content": req.payload,
-            "result": "clarify",
-            "reason": "",
-            "reply": reply,
-            "problem": pid,
-        }
-        await self._save_context_record(req, record)
+        await self._save_context_record(
+            req,
+            _context_record(req, result="clarify", reply=reply, problem=pid),
+        )
         self._log_finished(req, "ok", problem=pid)
         await self._finish_request(req)
 
@@ -1159,12 +1143,20 @@ class GroupCoordinator:
             await send_group_msg(req.group_id, build_plain_message(
                 f"@{req.nickname} 抱歉，题面缓存不可用～"
             ))
+            await self._save_context_record(
+                req,
+                _context_record(req, result="no_statement", problem=result.get("pid", "")),
+            )
             await self._finish_request(req)
             return
         if kind in {"timeout", "service_unavailable", "empty", "cancelled", "error"}:
             status = "timeout" if kind == "timeout" else "service_unavailable"
             self._log_finished(req, status, problem=result.get("pid", ""))
             await self._send_llm_failure(req)
+            await self._save_context_record(
+                req,
+                _context_record(req, result=status, problem=result.get("pid", "")),
+            )
             await self._finish_request(req)
             return
 
@@ -1276,16 +1268,10 @@ class GroupCoordinator:
                 build_text(f" {reply}"),
             ])
 
-        record = {
-            "timestamp": req.admitted_wall.isoformat(),
-            "type": "review",
-            "content": req.payload,
-            "result": "review",
-            "reason": "",
-            "reply": reply,
-            "problem": pid,
-        }
-        await self._save_context_record(req, record)
+        await self._save_context_record(
+            req,
+            _context_record(req, result="review", reply=reply, problem=pid),
+        )
         self._log_finished(req, "ok", problem=pid)
         await self._finish_request(req)
 
@@ -1300,12 +1286,6 @@ class GroupCoordinator:
             clear_user_problem_submissions(req.group_id, req.user_id, pid)
             key = (req.group_id, req.user_id, pid)
             self.clear_watermarks[key] = max(self.clear_watermarks.get(key, 0), req.seq)
-            items = self.pending_context.get(key, [])
-            kept = [item for item in items if item.seq > req.seq]
-            if kept:
-                self.pending_context[key] = kept
-            else:
-                self.pending_context.pop(key, None)
         await react_emoji(req.message_id, "128076")
         self._log_finished(req, "ok", problem=pid)
         await self._finish_request(req)

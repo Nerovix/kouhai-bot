@@ -54,6 +54,10 @@ _CONTEST_URL_RE = re.compile(
 )
 
 
+class NonFormulaImageProblem(RuntimeError):
+    """Raised when a statement is unavailable because it depends on diagrams/images."""
+
+
 def _data_dir() -> Path:
     return Path(get_config().data_dir)
 
@@ -398,7 +402,31 @@ def _ensure_statement(problem: dict) -> dict:
     os.makedirs(picker.CACHE_DIR, exist_ok=True)
     os.makedirs(picker.GROUPS_DIR, exist_ok=True)
     stmt = picker.fetch_statement(problem)
-    return stmt if isinstance(stmt, dict) else {}
+    if isinstance(stmt, dict):
+        return stmt
+    if _has_non_formula_images(problem):
+        raise NonFormulaImageProblem(_problem_id(problem) or "unknown")
+    return {}
+
+
+def _has_non_formula_images(problem: dict) -> bool:
+    from .problems import picker
+
+    contest_id = problem.get("contestId")
+    index = problem.get("index")
+    if contest_id in (None, "") or not index:
+        return False
+    try:
+        result = picker.cf_statement.process_problem(contest_id, index, vl_backend="none")
+    except Exception as e:
+        logger.warning(
+            "failed to inspect non-formula images for %s%s: %s",
+            contest_id,
+            index,
+            e,
+        )
+        return False
+    return bool(result.get("has_non_formula_images"))
 
 
 def resolve_problem_by_pid(pid: str) -> dict:

@@ -3389,6 +3389,30 @@ def test_private_setproblem_current_copies_empty_private_history():
     print("✅ private setproblem: copies empty private history")
 
 
+def test_private_setproblem_non_formula_image_hint():
+    _reset_state()
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.setproblem import handle
+        from kouhai_bot.private_judge import NonFormulaImageProblem
+
+        with patch(
+            "kouhai_bot.handlers.cmd.setproblem.resolve_problem_by_pid",
+            side_effect=NonFormulaImageProblem("1065C"),
+        ):
+            asyncio.run(handle(**_kwargs(_make_private_event("/setproblem 1065C"))))
+
+    private_text = "\n".join(
+        " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
+        for item in _private_sent
+    )
+    assert "非公式图片" in private_text, private_text
+    assert "处理能力有限" in private_text, private_text
+    assert "换一道题" in private_text, private_text
+    _cleanup()
+    print("✅ private setproblem: explains non-formula image limitation")
+
+
 def test_private_problem_card_hides_original_problem_identity():
     _reset_state()
     _write_statement(PID, {

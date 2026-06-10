@@ -492,7 +492,9 @@ commands are rejected in private with a friendly message.
   review as available. It sends a private problem card, preferring the current group's
   cached forward-card payload when the pid is the current group problem. Generated
   private cards must not expose the original CF id, title, contest id, or rating in the
-  card title.
+  card title. If an explicit pid/link fails because the statement fetcher detects
+  non-formula images (`tex-graphics` diagrams), tell the user the bot has limited
+  ability on image-dependent statements and suggest choosing another problem.
 - `/problem` in private resends the selected private problem card. `/tag`, `/status`,
   `/clear`, `/submit`, `/clarify`, and `/review` all operate on private state and do
   not emit group @mentions.

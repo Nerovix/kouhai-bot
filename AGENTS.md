@@ -502,7 +502,10 @@ commands are rejected in private with a friendly message.
   target side. It rejects while there is an active group or private stateful request
   for the same user/problem.
 - `/sync` sends the source history as one forward-card-style history card to the target
-  chat after copying. If the source is empty, it sends only the friendly abort message.
+  chat after copying. The card title is `<群昵称>在当前的历史记录如下：`; each record shows
+  only user-visible content as `👤：...   🤖：...`, omitting internal type/result/reason
+  fields. If the history is too long for one node, chunk it like long `/review` output.
+  If the source is empty, it sends only the friendly abort message.
 - A normal user's private correct submit for the current group problem can score through
   group `/sync` if the group has not already solved that pid. Scoring is performed under
   the group coordinator lock, schedules the official editorial follow-up, and writes the

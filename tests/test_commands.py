@@ -3564,6 +3564,86 @@ def test_sync_private_correct_current_problem_scores_for_normal_user():
     print("✅ sync: private AC scores current group problem for normal user")
 
 
+def test_sync_history_card_uses_friendly_visible_format():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _group_members[GID][0]["card"] = "AliceCard"
+    private_records = [
+        {
+            "timestamp": "2026-05-14T12:00:00+08:00",
+            "type": "submit",
+            "content": "first line\nsecond line",
+            "result": "incorrect",
+            "reason": "secret reason",
+            "reply": "bot reply\nvisible",
+            "problem": PID,
+        },
+        {
+            "timestamp": "2026-05-14T12:01:00+08:00",
+            "type": "clarify",
+            "content": "what is n?",
+            "result": "clarify",
+            "reason": "hidden clarify reason",
+            "reply": "n is input",
+            "problem": PID,
+        },
+    ]
+
+    with _all_patches():
+        from kouhai_bot.private_judge import save_private_submission
+        from kouhai_bot.handlers.cmd.sync import handle
+
+        for record in private_records:
+            save_private_submission(UID, record)
+        asyncio.run(handle(**_kwargs(_make_event("/sync"))))
+
+    history_text = "\n".join(
+        _last_text_item(item)
+        for item in _private_sent
+        if item["user_id"] == 1
+    )
+    assert "AliceCard在当前的历史记录如下：" in history_text, history_text
+    assert "👤：first line second line   🤖：bot reply visible" in history_text, history_text
+    assert "👤：what is n?   🤖：n is input" in history_text, history_text
+    assert "secret reason" not in history_text and "hidden clarify reason" not in history_text
+    assert "submit" not in history_text and "incorrect" not in history_text
+    assert _forwarded, "Expected history to be forwarded to group"
+    _cleanup()
+    print("✅ sync: history card uses friendly visible format")
+
+
+def test_sync_history_card_chunks_long_history():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    long_text = "x" * 6500
+
+    with _all_patches():
+        from kouhai_bot.private_judge import save_private_submission
+        from kouhai_bot.handlers.cmd.sync import handle
+
+        save_private_submission(UID, {
+            "timestamp": "2026-05-14T12:00:00+08:00",
+            "type": "submit",
+            "content": long_text,
+            "result": "incorrect",
+            "reason": "hidden",
+            "reply": "try again",
+            "problem": PID,
+        })
+        asyncio.run(handle(**_kwargs(_make_event("/sync"))))
+
+    assert _forwarded, "Expected history forward card"
+    assert len(_forwarded[0]["messages"]) >= 3, _forwarded
+    chunk_text = "".join(
+        _last_text_item(item)
+        for item in _private_sent
+        if item["user_id"] == 1
+    )
+    assert long_text in chunk_text, "Long history should not be truncated"
+    _cleanup()
+    print("✅ sync: long history card is chunked")
+
+
 def test_private_sync_from_solved_group_marks_private_review_state():
     _reset_state()
     _setup_problem_for(GID, PID)

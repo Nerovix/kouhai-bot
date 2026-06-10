@@ -645,22 +645,28 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
     return True
 
 
-def format_history_records(records: list[dict], *, source_label: str) -> str:
-    lines = [f"{source_label} 历史记录"]
-    for idx, item in enumerate(records, 1):
-        typ = str(item.get("type", "") or "unknown")
-        content = str(item.get("content", "") or "").strip()
-        result = str(item.get("result", "") or "")
-        reason = str(item.get("reason", "") or "")
-        reply = str(item.get("reply", "") or "")
-        lines.append("")
-        lines.append(f"#{idx} {typ}" + (f" / {result}" if result else ""))
-        if content:
-            lines.append(f"用户：{content}")
-        if reason:
-            lines.append(f"判定：{reason}")
-        if reply:
-            lines.append(f"Bot：{reply}")
+def _one_line(text: Any) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _chunk_text(text: str, size: int = PRIVATE_FORWARD_THRESHOLD) -> list[str]:
+    if size <= 0:
+        return [text]
+    return [text[i:i + size] for i in range(0, len(text), size)] or [text]
+
+
+def format_history_records(records: list[dict], *, user_display_name: str) -> str:
+    name = _one_line(user_display_name) or "这位群友"
+    lines = [f"{name}在当前的历史记录如下："]
+    for item in records:
+        content = _one_line(item.get("content", ""))
+        reply = _one_line(item.get("reply", ""))
+        if content and reply:
+            lines.append(f"👤：{content}   🤖：{reply}")
+        elif content:
+            lines.append(f"👤：{content}")
+        elif reply:
+            lines.append(f"🤖：{reply}")
     return "\n".join(lines)
 
 
@@ -670,13 +676,10 @@ async def send_history_card(
     user_id: int,
     group_id: int,
     records: list[dict],
-    source_label: str,
+    user_display_name: str,
 ) -> bool:
-    text = format_history_records(records, source_label=source_label)
-    chunks = [
-        text[i:i + PRIVATE_FORWARD_THRESHOLD]
-        for i in range(0, len(text), PRIVATE_FORWARD_THRESHOLD)
-    ] or [text]
+    text = format_history_records(records, user_display_name=user_display_name)
+    chunks = _chunk_text(text)
     cfg = get_config()
     node_ids: list[str] = []
     for chunk in chunks:
@@ -692,10 +695,11 @@ async def send_history_card(
         else:
             if await _send_forward_nodes_private(user_id, node_ids):
                 return True
-    if destination == GROUP_SCOPE:
-        await send_group_msg(group_id, build_plain_message(text[:3500]))
-    else:
-        await send_private_msg(user_id, build_plain_message(text[:3500]))
+    for chunk in chunks:
+        if destination == GROUP_SCOPE:
+            await send_group_msg(group_id, build_plain_message(chunk))
+        else:
+            await send_private_msg(user_id, build_plain_message(chunk))
     return True
 
 

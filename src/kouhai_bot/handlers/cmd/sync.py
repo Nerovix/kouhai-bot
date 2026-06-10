@@ -52,6 +52,17 @@ def _only_clarifies(records: list[dict]) -> list[dict]:
     return [item for item in records if item.get("type") == "clarify"]
 
 
+async def _history_display_name(group_id: int, user_id: int, sender: dict) -> str:
+    try:
+        nickname_map = await fetch_group_member_nickname_map(group_id)
+        name = nickname_map.get(str(user_id))
+        if name:
+            return name
+    except Exception:
+        pass
+    return sender.get("card") or sender.get("nickname") or str(user_id)
+
+
 async def _send_text(scope: str, group_id: int, user_id: int, text: str) -> None:
     if scope == PRIVATE_SCOPE:
         await send_private_msg(user_id, build_plain_message(text))
@@ -145,10 +156,8 @@ async def handle(group_id: int, user_id: int, sender: dict,
 
     if source_scope == PRIVATE_SCOPE:
         source_records = load_private_problem_history(user_id, pid)
-        source_label = "private judge"
     else:
         source_records = group_problem_history(group_id, user_id, pid)
-        source_label = "群聊"
 
     starred_limited = _is_starred_limited(user_id)
     if starred_limited:
@@ -193,7 +202,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
         user_id=user_id,
         group_id=group_id,
         records=source_records,
-        source_label=source_label,
+        user_display_name=await _history_display_name(group_id, user_id, sender),
     )
 
     extra = ""

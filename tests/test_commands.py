@@ -3427,6 +3427,53 @@ def test_private_problem_card_hides_original_problem_identity():
     print("✅ private problem card: hides original identity")
 
 
+def test_private_state_load_logs_corrupt_json_once(caplog):
+    _reset_state()
+    state_dir = os.path.join(_data_dir(), "private_judge", "users")
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, f"{UID}.json"), "w") as f:
+        f.write("{bad json")
+
+    with _all_patches():
+        from kouhai_bot.private_judge import _PRIVATE_STATE_LOAD_WARNED, load_private_state
+
+        _PRIVATE_STATE_LOAD_WARNED.clear()
+        caplog.set_level("WARNING", logger="kouhai-bot.private_judge")
+        state = load_private_state(UID)
+        state_again = load_private_state(UID)
+
+    assert state["user_submissions"] == []
+    assert state_again["user_submissions"] == []
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("failed to load private judge state" in message for message in messages) == 1
+    _cleanup()
+    print("✅ private state: corrupt JSON logs once")
+
+
+def test_private_state_save_writes_complete_json_without_temp_leftovers():
+    _reset_state()
+    with _all_patches():
+        from kouhai_bot.private_judge import load_private_state, save_private_state
+
+        save_private_state(UID, {
+            "current_problem": {"today": PID},
+            "user_submissions": [{"problem": PID, "content": "x"}],
+            "solved_problems": {},
+            "last_solved_problem": "",
+            "notified_group_problem_private": {},
+            "problem_cards": {},
+        })
+        loaded = load_private_state(UID)
+
+    assert loaded["current_problem"]["today"] == PID
+    assert loaded["user_submissions"][0]["content"] == "x"
+    state_dir = os.path.join(_data_dir(), "private_judge", "users")
+    leftovers = [name for name in os.listdir(state_dir) if name.endswith(".tmp")]
+    assert leftovers == []
+    _cleanup()
+    print("✅ private state: atomic save writes complete JSON")
+
+
 def test_private_review_allowed_after_group_solves_current_problem():
     _reset_state()
     global _deepseek_response

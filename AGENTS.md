@@ -863,6 +863,11 @@ problem, the card title should stay generic. Do not include the original problem
 title, contest id, or rating there; anti-spoiler clarification also assumes the bot does
 not reveal the original problem identity to the user.
 
+### 28. Private judge state writes must be atomic
+`private_judge/users/<uid>.json` is user history, not a disposable cache. Write it via a
+same-directory temp file and `os.replace`, and log JSON/IO load failures before falling
+back to defaults so corruption or permission problems are diagnosable.
+
 ## Testing
 
 ```bash

@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import re
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +40,7 @@ TZ = timezone(timedelta(hours=8))
 PRIVATE_SCOPE = "private"
 GROUP_SCOPE = "group"
 PRIVATE_FORWARD_THRESHOLD = 3000
+_PRIVATE_STATE_LOAD_WARNED: set[str] = set()
 
 _CF_API = "https://codeforces.com/api/problemset.problems"
 _PROBLEM_RE = re.compile(r"^(?:CF)?(\d+)([A-Za-z][A-Za-z0-9]*)$", re.I)
@@ -77,6 +79,22 @@ def _default_state() -> dict[str, Any]:
     }
 
 
+def _warn_private_state_load_failure(path: Path, reason: str, exc: Exception | None = None) -> None:
+    key = str(path)
+    if key in _PRIVATE_STATE_LOAD_WARNED:
+        return
+    _PRIVATE_STATE_LOAD_WARNED.add(key)
+    if exc is None:
+        logger.warning("invalid private judge state at %s; using defaults: %s", path, reason)
+    else:
+        logger.warning(
+            "failed to load private judge state at %s; using defaults: %s",
+            path,
+            reason,
+            exc_info=True,
+        )
+
+
 def load_private_state(user_id: int) -> dict[str, Any]:
     path = _state_file(user_id)
     if not path.exists():
@@ -85,8 +103,10 @@ def load_private_state(user_id: int) -> dict[str, Any]:
         with path.open(encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, dict):
+            _warn_private_state_load_failure(path, f"expected object, got {type(data).__name__}")
             return _default_state()
-    except Exception:
+    except Exception as e:
+        _warn_private_state_load_failure(path, str(e), e)
         return _default_state()
 
     state = _default_state()
@@ -105,8 +125,37 @@ def load_private_state(user_id: int) -> dict[str, Any]:
 def save_private_state(user_id: int, state: dict[str, Any]) -> None:
     path = _state_file(user_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    tmp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            tmp_name = f.name
+            json.dump(state, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except Exception:
+        if tmp_name:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+        raise
 
 
 def get_private_current_problem(user_id: int) -> dict | None:

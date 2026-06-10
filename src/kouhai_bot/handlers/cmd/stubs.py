@@ -13,6 +13,11 @@ from ..shared import (
 from ...napcat.client import (
     build_plain_message,
     send_group_msg,
+    send_private_msg,
+)
+from ...private_judge import (
+    get_private_current_problem,
+    send_problem_card_private,
 )
 
 
@@ -43,6 +48,24 @@ async def handle_problem(group_id: int, user_id: int, sender: dict,
     """Resend today's problem as the original merged-forward card.
     Falls back to regenerating problem text if daily_msg.json is missing."""
     if raw_text.lstrip() != "/problem":
+        return
+    if event.get("message_type") == "private":
+        problem = get_private_current_problem(user_id)
+        if not problem:
+            await send_private_msg(user_id, build_plain_message(
+                "你还没有 private judge 题目～先发 /setproblem 设置一道吧。"
+            ))
+            return
+        ok = await send_problem_card_private(
+            user_id,
+            group_id,
+            problem,
+            prefer_group_card=True,
+        )
+        if not ok:
+            await send_private_msg(user_id, build_plain_message(
+                "暂时无法重新发送题目，稍后再试试？"
+            ))
         return
 
     from ...config import get_config
@@ -129,15 +152,26 @@ async def handle_tag(group_id: int, user_id: int, sender: dict,
                      message_id: str, raw_text: str, segments: list,
                      event: dict) -> None:
     nickname = _nick(sender)
-    problem = get_today_problem(group_id)
+    is_private = event.get("message_type") == "private"
+    problem = get_private_current_problem(user_id) if is_private else get_today_problem(group_id)
     if not problem:
-        await send_group_msg(group_id, build_plain_message(f"@{nickname} 还没有今日题目～"))
+        if is_private:
+            await send_private_msg(user_id, build_plain_message("你还没有 private judge 题目～"))
+        else:
+            await send_group_msg(group_id, build_plain_message(f"@{nickname} 还没有今日题目～"))
         return
     tags = problem.get("tags", [])
     if not tags:
-        await send_group_msg(group_id, build_plain_message(f"@{nickname} 当前题目没有 tag 信息～"))
+        if is_private:
+            await send_private_msg(user_id, build_plain_message("当前题目没有 tag 信息～"))
+        else:
+            await send_group_msg(group_id, build_plain_message(f"@{nickname} 当前题目没有 tag 信息～"))
         return
-    await send_group_msg(group_id, build_plain_message(f"@{nickname} 当前题目的 tags：{'、'.join(tags)}"))
+    text = f"当前题目的 tags：{'、'.join(tags)}"
+    if is_private:
+        await send_private_msg(user_id, build_plain_message(text))
+    else:
+        await send_group_msg(group_id, build_plain_message(f"@{nickname} {text}"))
 
 
 # ── /scoreboard ─────────────────────────────────────────────────────────
@@ -216,15 +250,27 @@ async def handle_status(group_id: int, user_id: int, sender: dict,
                         event: dict) -> None:
     """Show bot's current busy/idle status."""
     from .newproblem import get_newproblem_status
-    from .submit import get_group_lock_status
-    from ...napcat.client import build_plain_message, build_reply, send_group_msg
+    from .submit import get_group_lock_status, get_private_lock_status
+    from ...napcat.client import build_plain_message, build_reply, send_group_msg, send_private_msg
 
-    status = get_newproblem_status(group_id) or get_group_lock_status(group_id)
+    is_private = event.get("message_type") == "private"
+    status = get_private_lock_status(user_id, group_id) if is_private else (
+        get_newproblem_status(group_id) or get_group_lock_status(group_id)
+    )
     if status is None:
-        await send_group_msg(group_id, build_plain_message("🟢 bot 当前空闲，没有在处理请求～"))
+        text = "🟢 bot 当前空闲，没有在处理请求～"
+        if is_private:
+            await send_private_msg(user_id, build_plain_message(text))
+        else:
+            await send_group_msg(group_id, build_plain_message(text))
         return
 
     cmd = status["command"]
+    if is_private:
+        await send_private_msg(user_id, build_plain_message(
+            f"🔴 private judge 当前有 {cmd} 请求还在处理中～"
+        ))
+        return
     if status.get("message_id"):
         await send_group_msg(group_id, build_reply(
             f"🔴 bot 当前有 {cmd} 请求还在处理中～",

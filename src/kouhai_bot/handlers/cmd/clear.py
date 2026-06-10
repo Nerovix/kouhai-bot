@@ -9,8 +9,11 @@ from .. import registry
 from ..registry import CommandDef
 from ...eventlog import EVENT_META_KEY
 from ...napcat.client import (
+    build_face,
+    send_private_msg,
     react_emoji,
 )
+from ...private_judge import GROUP_SCOPE, PRIVATE_SCOPE
 from .submit import enqueue_clear_request
 
 logger = logging.getLogger("kouhai-bot.cmd.clear")
@@ -19,9 +22,13 @@ logger = logging.getLogger("kouhai-bot.cmd.clear")
 async def handle(group_id: int, user_id: int, sender: dict,
                  message_id: str, raw_text: str, segments: list,
                  event: dict) -> None:
+    scope = PRIVATE_SCOPE if event.get("message_type") == "private" else GROUP_SCOPE
     stripped = raw_text.strip()
     if not re.fullmatch(r"/clear(?:\s+)?", stripped):
-        await react_emoji(message_id, "10060")
+        if scope == PRIVATE_SCOPE:
+            await send_private_msg(user_id, [build_face("10060")])
+        else:
+            await react_emoji(message_id, "10060")
         return
 
     await enqueue_clear_request(
@@ -30,6 +37,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
         sender,
         message_id,
         event_log=event.get(EVENT_META_KEY),
+        scope=scope,
     )
 
 

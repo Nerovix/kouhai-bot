@@ -28,6 +28,7 @@ from ..shared import (
     fetch_group_member_nickname_map,
     format_points,
     get_problem_posted_at,
+    get_problem_summary,
     get_today_problem,
     judge_submission_result,
     load_known_problem_ratings,
@@ -45,20 +46,42 @@ from ...context import get_display_name, load_group_ctx
 from ...user_groups import (
     effective_submit_delay_sec_for_scoreboard,
     get_user_group,
+    is_dynamic_submit_delay_enabled,
     is_default_group,
     settle_dynamic_submit_wait_for_problem,
 )
 from ...curfew import is_curfew_active, format_curfew_message
 from ...eventlog import EVENT_META_KEY, log_command_finished
 from ...editorial_followup import schedule_post_solve_editorial_followup
+from ...private_judge import (
+    GROUP_SCOPE,
+    PRIVATE_SCOPE,
+    clear_private_problem_history,
+    copy_records,
+    get_private_current_problem,
+    group_problem_history,
+    has_group_problem_private_notified,
+    is_group_problem_solved,
+    is_private_solved,
+    load_private_problem_history,
+    mark_group_problem_private_notified,
+    mark_private_solved,
+    replace_private_problem_history,
+    save_private_submission,
+    send_problem_card_private,
+    set_private_current_problem,
+)
 from ...tutorials import format_editorial_for_review, get_official_editorial
 from ...napcat.client import (
     build_at,
+    build_face,
     build_plain_message,
     build_text,
+    delete_msg,
     react_emoji,
     send_group_forward_msg,
     send_group_msg,
+    send_private_forward_msg,
     send_private_msg,
 )
 
@@ -67,7 +90,7 @@ logger = logging.getLogger("kouhai-bot.cmd.submit")
 _COMPUTE_CONCURRENCY = 8
 _runtime_loop: asyncio.AbstractEventLoop | None = None
 _compute_sem: asyncio.Semaphore | None = None
-_coordinators: dict[int, "GroupCoordinator"] = {}
+_coordinators: dict[tuple[str, int], "GroupCoordinator"] = {}
 _USER_CONTEXT_WRITERS = {"submit", "clarify", "review"}
 _REVIEW_FORWARD_THRESHOLD = 200
 _REVIEW_CHUNK_SIZE = 3000
@@ -161,6 +184,7 @@ class PendingRequest:
     message_id: str
     command: str
     nickname: str
+    scope: str = GROUP_SCOPE
     payload: str = ""
     submit_pid: str = ""
     submit_problem: dict | None = None
@@ -185,12 +209,17 @@ class PendingRequest:
 
     def status_dict(self) -> dict:
         return {
+            "scope": self.scope,
             "group_id": self.group_id,
             "user_id": self.user_id,
             "message_id": self.message_id,
             "command": self.command,
             "admitted_at": self.admitted_at,
         }
+
+    @property
+    def is_private(self) -> bool:
+        return self.scope == PRIVATE_SCOPE
 
 
 def _refresh_runtime() -> None:
@@ -211,12 +240,24 @@ def _compute_limit() -> asyncio.Semaphore:
     return _compute_sem
 
 
-def _get_coordinator(group_id: int) -> "GroupCoordinator":
+def _coordinator_key(group_id: int, *, scope: str = GROUP_SCOPE, user_id: int = 0) -> tuple[str, int]:
+    if scope == PRIVATE_SCOPE:
+        return (PRIVATE_SCOPE, int(user_id))
+    return (GROUP_SCOPE, int(group_id))
+
+
+def _get_coordinator(
+    group_id: int,
+    *,
+    scope: str = GROUP_SCOPE,
+    user_id: int = 0,
+) -> "GroupCoordinator":
     _refresh_runtime()
-    coord = _coordinators.get(group_id)
+    key = _coordinator_key(group_id, scope=scope, user_id=user_id)
+    coord = _coordinators.get(key)
     if coord is None:
-        coord = GroupCoordinator(group_id)
-        _coordinators[group_id] = coord
+        coord = GroupCoordinator(group_id, scope=scope, owner_id=key[1])
+        _coordinators[key] = coord
     return coord
 
 
@@ -232,6 +273,33 @@ async def _judge_llm_limited(
 ):
     async with _compute_limit():
         return await judge_submission_result(problem_text, submission, history)
+
+
+async def _send_req_plain(req: PendingRequest, text: str, *, mention: bool = True) -> int | None:
+    if req.is_private:
+        return await send_private_msg(req.user_id, build_plain_message(text.strip()))
+    if mention:
+        return await send_group_msg(req.group_id, [
+            build_at(req.user_id),
+            build_text(f" {text.strip()}"),
+        ])
+    return await send_group_msg(req.group_id, build_plain_message(text))
+
+
+async def _send_req_segments(req: PendingRequest, segments: list[dict]) -> int | None:
+    if req.is_private:
+        cleaned = [seg for seg in segments if seg.get("type") != "at"]
+        if not cleaned:
+            cleaned = build_plain_message("")
+        return await send_private_msg(req.user_id, cleaned)
+    return await send_group_msg(req.group_id, segments)
+
+
+async def _react_req(req: PendingRequest, emoji_id: str) -> None:
+    if req.is_private:
+        await send_private_msg(req.user_id, [build_face(emoji_id)])
+        return
+    await react_emoji(req.message_id, emoji_id)
 
 
 def _load_latest_group_summary(group_id: int) -> str:
@@ -313,8 +381,17 @@ def _build_review_history(history: list[dict]) -> str:
     return "\n".join([stats, *parts])
 
 
-def _load_user_problem_history(group_id: int, user_id: int, pid: str) -> list[dict]:
-    history = load_user_submissions(group_id, user_id)
+def _load_user_problem_history(
+    group_id: int,
+    user_id: int,
+    pid: str,
+    *,
+    scope: str = GROUP_SCOPE,
+) -> list[dict]:
+    if scope == PRIVATE_SCOPE:
+        history = load_private_problem_history(user_id, pid)
+    else:
+        history = load_user_submissions(group_id, user_id)
     items = [item for item in history if item.get("problem") == pid]
     return sorted(items, key=lambda item: str(item.get("timestamp", "")))
 
@@ -471,11 +548,13 @@ async def _reveal_problem_source(group_id: int) -> str:
 
 
 class GroupCoordinator:
-    def __init__(self, group_id: int):
+    def __init__(self, group_id: int, *, scope: str = GROUP_SCOPE, owner_id: int | None = None):
         self.group_id = group_id
+        self.scope = scope
+        self.owner_id = int(owner_id if owner_id is not None else group_id)
         self.lock = asyncio.Lock()
         self.active: dict[int, PendingRequest] = {}
-        self.clear_watermarks: dict[tuple[int, int, str], int] = {}
+        self.clear_watermarks: dict[tuple[str, int, int, str], int] = {}
         self.submit_candidates: dict[str, list[PendingRequest]] = {}
         self.scoring_pids: set[str] = set()
         self.next_seq = 1
@@ -486,11 +565,11 @@ class GroupCoordinator:
         self.active[req.seq] = req
         resolve_pids = self._discard_superseded_submits_locked(req)
         if req.kind in _USER_CONTEXT_WRITERS and req.target_pid:
-            save_user_submission(
-                req.group_id,
-                req.user_id,
-                _context_record(req, problem=req.target_pid),
-            )
+            record = _context_record(req, problem=req.target_pid)
+            if req.is_private:
+                save_private_submission(req.user_id, record)
+            else:
+                save_user_submission(req.group_id, req.user_id, record)
         if req.submit_score_candidate and req.submit_pid:
             self.submit_candidates.setdefault(req.submit_pid, []).append(req)
         req.task = asyncio.create_task(
@@ -560,11 +639,11 @@ class GroupCoordinator:
             old.discarded = True
             old.compute_result = {"kind": "discarded", "pid": old.submit_pid}
             if req.kind == "submit":
-                save_user_submission(
-                    old.group_id,
-                    old.user_id,
-                    _context_record(old, result="superseded", problem=old.submit_pid),
-                )
+                record = _context_record(old, result="superseded", problem=old.submit_pid)
+                if old.is_private:
+                    save_private_submission(old.user_id, record)
+                else:
+                    save_user_submission(old.group_id, old.user_id, record)
             self._log_finished(old, "stale", problem=old.submit_pid)
             resolved_pids.add(self._finish_request_locked(old))
             if old.task and not old.task.done():
@@ -585,17 +664,25 @@ class GroupCoordinator:
         async with self.lock:
             request_id = _request_id(req)
             history = [
-                item for item in _load_user_problem_history(req.group_id, target_user_id, pid)
+                item for item in _load_user_problem_history(
+                    req.group_id,
+                    target_user_id,
+                    pid,
+                    scope=req.scope if target_user_id == req.user_id else GROUP_SCOPE,
+                )
                 if not request_id or str(item.get("request_id", "") or "") != request_id
             ]
         return sorted(history, key=lambda item: str(item.get("timestamp", "")))
 
     async def _save_context_record(self, req: PendingRequest, record: dict) -> bool:
         async with self.lock:
-            key = (req.group_id, req.user_id, str(record.get("problem", "") or ""))
+            key = (req.scope, req.group_id, req.user_id, str(record.get("problem", "") or ""))
             if self.clear_watermarks.get(key, 0) >= req.seq:
                 return False
-            save_user_submission(req.group_id, req.user_id, record)
+            if req.is_private:
+                save_private_submission(req.user_id, record)
+            else:
+                save_user_submission(req.group_id, req.user_id, record)
             return True
 
     async def _run_request(self, req: PendingRequest) -> None:
@@ -637,10 +724,7 @@ class GroupCoordinator:
                 self.group_id, req.command, req.seq, e, exc_info=True,
             )
             self._log_finished(req, "error", extra={"error": str(e)[:500]})
-            await send_group_msg(
-                req.group_id,
-                build_plain_message(f"@{req.nickname} 处理 /{req.command} 时出了点问题，稍后再试试？"),
-            )
+            await _send_req_plain(req, f"处理 /{req.command} 时出了点问题，稍后再试试？")
             await self._finish_request(req)
 
     async def _compute_submit(self, req: PendingRequest) -> dict:
@@ -668,7 +752,7 @@ class GroupCoordinator:
             }
 
         history = await self._load_user_problem_history_for_request(req, pid)
-        await react_emoji(req.message_id, random.choice(["128064", "289"]))
+        await _react_req(req, random.choice(["128064", "289"]))
         result = await _judge_llm_limited(problem_text, req.payload, history)
         if not result.text:
             return {"kind": result.failure_kind or "error", "pid": pid}
@@ -683,8 +767,12 @@ class GroupCoordinator:
             return {"kind": "no_statement", "pid": pid}
 
         cfg = get_config()
-        summary = _load_latest_group_summary(req.group_id)
-        await react_emoji(req.message_id, random.choice(["128064", "289"]))
+        summary = (
+            get_problem_summary(req.group_id, pid)
+            if req.is_private
+            else _load_latest_group_summary(req.group_id)
+        )
+        await _react_req(req, random.choice(["128064", "289"]))
         result = await _call_llm_limited(
             [
                 {"role": "system", "content": CLARIFY_PROMPT},
@@ -750,7 +838,7 @@ class GroupCoordinator:
         user_parts.append(f"用户的问题：\n{req.payload}")
 
         cfg = get_config()
-        await react_emoji(req.message_id, random.choice(["128064", "289"]))
+        await _react_req(req, random.choice(["128064", "289"]))
         result = await _call_llm_limited(
             [
                 {"role": "system", "content": REVIEW_PROMPT},
@@ -770,17 +858,17 @@ class GroupCoordinator:
         return {"kind": "review", "pid": pid, "reply": reply, "model_tag": result.model_tag}
 
     async def _send_already_solved(self, req: PendingRequest) -> None:
-        await send_group_msg(req.group_id, [
-            build_at(req.user_id),
-            build_text(" 已经有人解出本题了～想刷下一道可以发 /newproblem 哦"),
-        ])
+        if req.is_private:
+            await _send_req_plain(req, "这题已经通过啦，可以直接 /review 复盘。")
+        else:
+            await send_group_msg(req.group_id, [
+                build_at(req.user_id),
+                build_text(" 已经有人解出本题了～想刷下一道可以发 /newproblem 哦"),
+            ])
 
     async def _send_llm_failure(self, req: PendingRequest) -> None:
-        await react_emoji(req.message_id, "268")
-        await send_group_msg(req.group_id, [
-            build_at(req.user_id),
-            build_text(_LLM_FAILURE_TEXT),
-        ])
+        await _react_req(req, "268")
+        await _send_req_plain(req, _LLM_FAILURE_TEXT)
 
     async def _send_correct_only(
         self,
@@ -797,10 +885,7 @@ class GroupCoordinator:
             text = " 做法被判定为正确了～"
         if model_tag:
             text = text.rstrip() + model_tag
-        await send_group_msg(req.group_id, [
-            build_at(req.user_id),
-            build_text(text),
-        ])
+        await _send_req_plain(req, text)
         req.submit_waiting_reply_sent = True
 
     def _problem_source_from_snapshot(self, req: PendingRequest, pid: str) -> str:
@@ -813,6 +898,24 @@ class GroupCoordinator:
         if rating and rating != "?":
             parts.append(rating)
         return f"本题来自 {' '.join(parts)}✨" if parts else ""
+
+    async def _send_private_success(self, req: PendingRequest, pid: str, model_tag: str = "") -> None:
+        mark_private_solved(req.user_id, pid, source="private")
+        current_pid = ""
+        current = get_today_problem(req.group_id)
+        if current:
+            current_pid = str(current.get("today", "") or "")
+        if current_pid and current_pid == pid:
+            text = (
+                "做对了！🎉 private judge 不直接加分。"
+                "如果群里还没人通过这题，可以到服务群发 /sync，把这次通过同步到群榜。"
+            )
+        else:
+            text = "做对了！🎉 这次通过只记录在 private judge，不计入群榜。"
+        if model_tag:
+            text = text.rstrip() + model_tag
+        self._log_finished(req, "correct", problem=pid, extra={"scope": PRIVATE_SCOPE})
+        await _send_req_plain(req, text)
 
     async def _send_scoreboard_success(self, req: PendingRequest, pid: str, model_tag: str = "") -> None:
         async with self.lock:
@@ -930,16 +1033,17 @@ class GroupCoordinator:
         kind = result.get("kind")
         if kind == "no_problem":
             self._log_finished(req, "no_problem")
-            await send_group_msg(req.group_id, build_plain_message(
-                f"@{req.nickname} 当前还没有题目可以提交～发 /newproblem 刷新一道？"
-            ))
+            if req.is_private:
+                await _send_req_plain(req, "当前还没有 private judge 题目～先发 /setproblem 设置一道题吧。")
+            else:
+                await send_group_msg(req.group_id, build_plain_message(
+                    f"@{req.nickname} 当前还没有题目可以提交～发 /newproblem 刷新一道？"
+                ))
             await self._finish_request(req)
             return
         if kind == "bad_pid":
             self._log_finished(req, "bad_pid")
-            await send_group_msg(req.group_id, build_plain_message(
-                f"@{req.nickname} 加载题目信息失败，稍后再试试？"
-            ))
+            await _send_req_plain(req, "加载题目信息失败，稍后再试试？")
             await self._finish_request(req)
             return
         if kind == "already_solved":
@@ -949,9 +1053,7 @@ class GroupCoordinator:
             return
         if kind == "no_statement":
             self._log_finished(req, "no_statement", problem=result.get("pid", ""))
-            await send_group_msg(req.group_id, build_plain_message(
-                f"@{req.nickname} 加载题目信息失败，稍后再试试？"
-            ))
+            await _send_req_plain(req, "加载题目信息失败，稍后再试试？")
             req.submit_judge_done = True
             req.submit_correct = False
             await self._save_context_record(
@@ -985,7 +1087,7 @@ class GroupCoordinator:
 
         if reaction == "123":
             self._log_finished(req, "offtopic", problem=pid)
-            await react_emoji(req.message_id, "123")
+            await _react_req(req, "123")
             req.submit_judge_done = True
             req.submit_correct = False
             await self._resolve_submit_scores(pid)
@@ -1006,6 +1108,10 @@ class GroupCoordinator:
         req.submit_correct = bool(correct)
 
         if correct:
+            if req.is_private:
+                await self._send_private_success(req, pid, model_tag)
+                await self._finish_request(req)
+                return
             if req.submit_score_candidate:
                 async with self.lock:
                     earlier_waiting = any(
@@ -1032,10 +1138,7 @@ class GroupCoordinator:
             if model_tag:
                 reply = reply.rstrip() + model_tag
             self._log_finished(req, "incorrect", problem=pid)
-            await send_group_msg(req.group_id, [
-                build_at(req.user_id),
-                build_text(f" {reply}"),
-            ])
+            await _send_req_plain(req, reply)
             await self._resolve_submit_scores(pid)
             await self._finish_request(req)
             return
@@ -1044,10 +1147,7 @@ class GroupCoordinator:
         if model_tag:
             reason = reason.rstrip() + model_tag
         self._log_finished(req, "incorrect", problem=pid)
-        await send_group_msg(req.group_id, [
-            build_at(req.user_id),
-            build_text(f" {reason}。再想想？🤔"),
-        ])
+        await _send_req_plain(req, f"{reason}。再想想？🤔")
         await self._resolve_submit_scores(pid)
         await self._finish_request(req)
 
@@ -1056,23 +1156,22 @@ class GroupCoordinator:
         kind = result.get("kind")
         if kind == "no_problem":
             self._log_finished(req, "no_problem")
-            await send_group_msg(req.group_id, build_plain_message(
-                f"@{req.nickname} 还没有今日题目哦～"
-            ))
+            if req.is_private:
+                await _send_req_plain(req, "当前还没有 private judge 题目～先发 /setproblem 设置一道题吧。")
+            else:
+                await send_group_msg(req.group_id, build_plain_message(
+                    f"@{req.nickname} 还没有今日题目哦～"
+                ))
             await self._finish_request(req)
             return
         if kind == "bad_pid":
             self._log_finished(req, "bad_pid")
-            await send_group_msg(req.group_id, build_plain_message(
-                f"@{req.nickname} 读取题目信息失败～"
-            ))
+            await _send_req_plain(req, "读取题目信息失败～")
             await self._finish_request(req)
             return
         if kind == "no_statement":
             self._log_finished(req, "no_statement", problem=result.get("pid", ""))
-            await send_group_msg(req.group_id, build_plain_message(
-                f"@{req.nickname} 抱歉，题面缓存不可用～"
-            ))
+            await _send_req_plain(req, "抱歉，题面缓存不可用～")
             await self._save_context_record(
                 req,
                 _context_record(req, result="no_statement", problem=result.get("pid", "")),
@@ -1094,7 +1193,7 @@ class GroupCoordinator:
         parsed = result.get("parsed", {})
         if parsed.get("reaction") == "123":
             self._log_finished(req, "offtopic", problem=pid)
-            await react_emoji(req.message_id, "123")
+            await _react_req(req, "123")
             await self._finish_request(req)
             return
 
@@ -1115,10 +1214,7 @@ class GroupCoordinator:
         model_tag = result.get("model_tag", "")
         if model_tag:
             reply = reply.rstrip() + model_tag
-        await send_group_msg(req.group_id, [
-            build_at(req.user_id),
-            build_text(f" {reply}"),
-        ])
+        await _send_req_plain(req, reply)
 
         await self._save_context_record(
             req,
@@ -1132,17 +1228,12 @@ class GroupCoordinator:
         kind = result.get("kind")
         if kind == "no_review_problem":
             self._log_finished(req, "no_review_problem")
-            await send_group_msg(req.group_id, [
-                build_at(req.user_id),
-                build_text(" 还没有已通过的题目可以 review 哦～先做出一道再来聊吧！"),
-            ])
+            await _send_req_plain(req, "还没有已通过的题目可以 review 哦～先做出一道再来聊吧！")
             await self._finish_request(req)
             return
         if kind == "no_statement":
             self._log_finished(req, "no_statement", problem=result.get("pid", ""))
-            await send_group_msg(req.group_id, build_plain_message(
-                f"@{req.nickname} 抱歉，题面缓存不可用～"
-            ))
+            await _send_req_plain(req, "抱歉，题面缓存不可用～")
             await self._save_context_record(
                 req,
                 _context_record(req, result="no_statement", problem=result.get("pid", "")),
@@ -1163,9 +1254,7 @@ class GroupCoordinator:
         pid = result.get("pid", "")
         if not pid:
             self._log_finished(req, "error")
-            await send_group_msg(req.group_id, build_plain_message(
-                f"@{req.nickname} 读取题目信息失败～"
-            ))
+            await _send_req_plain(req, "读取题目信息失败～")
             await self._finish_request(req)
             return
 
@@ -1211,10 +1300,16 @@ class GroupCoordinator:
                 node_ids.append(str(self_resp))
             if node_ids:
                 await asyncio.sleep(0.5)
-                fwd_resp = await send_group_forward_msg(
-                    req.group_id,
-                    [{"type": "node", "data": {"id": node_id}} for node_id in node_ids],
-                )
+                if req.is_private:
+                    fwd_resp = await send_private_forward_msg(
+                        req.user_id,
+                        [{"type": "node", "data": {"id": node_id}} for node_id in node_ids],
+                    )
+                else:
+                    fwd_resp = await send_group_forward_msg(
+                        req.group_id,
+                        [{"type": "node", "data": {"id": node_id}} for node_id in node_ids],
+                    )
                 if fwd_resp:
                     logger.info(
                         "[group_%s] /review seq=%s forward-card send ok: fwd_msg_id=%s node_count=%s",
@@ -1223,10 +1318,11 @@ class GroupCoordinator:
                         fwd_resp,
                         len(node_ids),
                     )
-                    await send_group_msg(req.group_id, [
-                        build_at(req.user_id),
-                        build_text(" 回复较长，已折叠到卡片里啦 👆"),
-                    ])
+                    if not req.is_private:
+                        await send_group_msg(req.group_id, [
+                            build_at(req.user_id),
+                            build_text(" 回复较长，已折叠到卡片里啦 👆"),
+                        ])
                 else:
                     logger.warning(
                         "[group_%s] /review seq=%s forward-card send failed after self-send; falling back to direct group messages",
@@ -1242,7 +1338,10 @@ class GroupCoordinator:
                             len(chunks),
                             len(chunk),
                         )
-                        await send_group_msg(req.group_id, build_plain_message(chunk))
+                        if req.is_private:
+                            await send_private_msg(req.user_id, build_plain_message(chunk))
+                        else:
+                            await send_group_msg(req.group_id, build_plain_message(chunk))
             else:
                 for idx, chunk in enumerate(chunks, 1):
                     logger.info(
@@ -1253,7 +1352,10 @@ class GroupCoordinator:
                         len(chunks),
                         len(chunk),
                     )
-                    await send_group_msg(req.group_id, build_plain_message(chunk))
+                    if req.is_private:
+                        await send_private_msg(req.user_id, build_plain_message(chunk))
+                    else:
+                        await send_group_msg(req.group_id, build_plain_message(chunk))
         else:
             logger.info(
                 "[group_%s] /review seq=%s user=%s pid=%s using direct-send path: reply_len=%s",
@@ -1263,10 +1365,7 @@ class GroupCoordinator:
                 pid,
                 len(reply),
             )
-            await send_group_msg(req.group_id, [
-                build_at(req.user_id),
-                build_text(f" {reply}"),
-            ])
+            await _send_req_plain(req, reply)
 
         await self._save_context_record(
             req,
@@ -1278,23 +1377,54 @@ class GroupCoordinator:
     async def _finalize_clear(self, req: PendingRequest) -> None:
         pid = req.target_pid
         if not pid:
-            await react_emoji(req.message_id, "10060")
+            await _react_req(req, "10060")
             await self._finish_request(req)
             return
 
         async with self.lock:
-            clear_user_problem_submissions(req.group_id, req.user_id, pid)
-            key = (req.group_id, req.user_id, pid)
+            if req.is_private:
+                clear_private_problem_history(req.user_id, pid)
+            else:
+                clear_user_problem_submissions(req.group_id, req.user_id, pid)
+            key = (req.scope, req.group_id, req.user_id, pid)
             self.clear_watermarks[key] = max(self.clear_watermarks.get(key, 0), req.seq)
-        await react_emoji(req.message_id, "128076")
+        await _react_req(req, "128076")
         self._log_finished(req, "ok", problem=pid)
         await self._finish_request(req)
 
 
 def get_group_lock_status(group_id: int) -> dict | None:
     _refresh_runtime()
-    coord = _coordinators.get(group_id)
+    coord = _coordinators.get(_coordinator_key(group_id))
     return coord.status() if coord else None
+
+
+def get_private_lock_status(user_id: int, group_id: int | None = None) -> dict | None:
+    _refresh_runtime()
+    coord = _coordinators.get(_coordinator_key(group_id or 0, scope=PRIVATE_SCOPE, user_id=user_id))
+    return coord.status() if coord else None
+
+
+def has_active_problem_request(
+    *,
+    scope: str,
+    group_id: int,
+    user_id: int,
+    pid: str,
+) -> bool:
+    _refresh_runtime()
+    coord = _coordinators.get(_coordinator_key(group_id, scope=scope, user_id=user_id))
+    if coord is None:
+        return False
+    target = str(pid or "")
+    for req in coord.active.values():
+        if req.user_id != user_id:
+            continue
+        if req.kind not in _USER_CONTEXT_WRITERS:
+            continue
+        if req.target_pid == target or req.submit_pid == target or req.review_pid == target:
+            return True
+    return False
 
 
 async def run_group_state_update(group_id: int, fn: Callable[[], T | Awaitable[T]]) -> T:
@@ -1314,23 +1444,37 @@ async def enqueue_submit_request(
     message_id: str,
     submission: str,
     event_log: dict | None = None,
+    *,
+    scope: str = GROUP_SCOPE,
 ) -> str:
-    coord = _get_coordinator(group_id)
+    coord = _get_coordinator(group_id, scope=scope, user_id=user_id)
     req: PendingRequest | None = None
     async with coord.lock:
         sb = load_scoreboard(group_id)
-        wait_window = effective_submit_delay_sec_for_scoreboard(user_id, sb)
-        posted_at = get_problem_posted_at(group_id)
-        if wait_window > 0 and posted_at is not None:
-            remaining = wait_window - (time.time() - posted_at)
-            if remaining > 0:
-                return _format_group_submit_message_for_remaining(
-                    user_id,
-                    int(math.ceil(remaining)),
-                )
-        problem = get_today_problem(group_id)
+        if scope == GROUP_SCOPE:
+            wait_window = effective_submit_delay_sec_for_scoreboard(user_id, sb)
+            posted_at = get_problem_posted_at(group_id)
+            if wait_window > 0 and posted_at is not None:
+                remaining = wait_window - (time.time() - posted_at)
+                if remaining > 0:
+                    return _format_group_submit_message_for_remaining(
+                        user_id,
+                        int(math.ceil(remaining)),
+                    )
+            problem = get_today_problem(group_id)
+        else:
+            problem = get_private_current_problem(user_id)
         submit_pid = problem.get("today", "") if problem else ""
-        already_solved = bool(submit_pid and _scoreboard_has_problem_solve(sb, submit_pid))
+        if scope == PRIVATE_SCOPE:
+            already_solved = bool(
+                submit_pid
+                and (
+                    is_private_solved(user_id, submit_pid)
+                    or is_group_problem_solved(group_id, submit_pid)
+                )
+            )
+        else:
+            already_solved = bool(submit_pid and _scoreboard_has_problem_solve(sb, submit_pid))
         req = PendingRequest(
             kind="submit",
             group_id=group_id,
@@ -1339,12 +1483,13 @@ async def enqueue_submit_request(
             message_id=message_id,
             command="submit",
             nickname=get_display_name(sender),
+            scope=scope,
             payload=submission,
             submit_pid=submit_pid,
             submit_problem=problem,
             target_pid=submit_pid,
             submit_already_solved_at_enqueue=already_solved,
-            submit_score_candidate=bool(submit_pid and not already_solved),
+            submit_score_candidate=bool(scope == GROUP_SCOPE and submit_pid and not already_solved),
             event_log=event_log,
         )
         coord._enqueue_locked(req)
@@ -1359,9 +1504,11 @@ async def enqueue_clarify_request(
     message_id: str,
     question: str,
     event_log: dict | None = None,
+    *,
+    scope: str = GROUP_SCOPE,
 ) -> None:
-    coord = _get_coordinator(group_id)
-    problem = get_today_problem(group_id)
+    coord = _get_coordinator(group_id, scope=scope, user_id=user_id)
+    problem = get_private_current_problem(user_id) if scope == PRIVATE_SCOPE else get_today_problem(group_id)
     pid = problem.get("today", "") if problem else ""
     req = PendingRequest(
         kind="clarify",
@@ -1371,6 +1518,7 @@ async def enqueue_clarify_request(
         message_id=message_id,
         command="clarify",
         nickname=get_display_name(sender),
+        scope=scope,
         payload=question,
         target_pid=pid,
         event_log=event_log,
@@ -1388,8 +1536,10 @@ async def enqueue_review_request(
     review_pid: str,
     mentioned_user_ids: list[int] | None = None,
     event_log: dict | None = None,
+    *,
+    scope: str = GROUP_SCOPE,
 ) -> None:
-    coord = _get_coordinator(group_id)
+    coord = _get_coordinator(group_id, scope=scope, user_id=user_id)
     req = PendingRequest(
         kind="review",
         group_id=group_id,
@@ -1398,6 +1548,7 @@ async def enqueue_review_request(
         message_id=message_id,
         command="review",
         nickname=get_display_name(sender),
+        scope=scope,
         payload=question,
         review_pid=review_pid,
         review_mentioned_user_ids=_unique_user_ids(mentioned_user_ids),
@@ -1414,9 +1565,11 @@ async def enqueue_clear_request(
     sender: dict,
     message_id: str,
     event_log: dict | None = None,
+    *,
+    scope: str = GROUP_SCOPE,
 ) -> None:
-    coord = _get_coordinator(group_id)
-    problem = get_today_problem(group_id)
+    coord = _get_coordinator(group_id, scope=scope, user_id=user_id)
+    problem = get_private_current_problem(user_id) if scope == PRIVATE_SCOPE else get_today_problem(group_id)
     pid = problem.get("today", "") if problem else ""
     req = PendingRequest(
         kind="clear",
@@ -1426,6 +1579,7 @@ async def enqueue_clear_request(
         message_id=message_id,
         command="clear",
         nickname=get_display_name(sender),
+        scope=scope,
         target_pid=pid,
         event_log=event_log,
     )
@@ -1433,31 +1587,102 @@ async def enqueue_clear_request(
     await req.done_event.wait()
 
 
+async def _redirect_blocked_group_submit_to_private(
+    group_id: int,
+    user_id: int,
+    sender: dict,
+    message_id: str,
+    submission: str,
+) -> bool:
+    problem = get_today_problem(group_id)
+    pid = str(problem.get("today", "") or "") if problem else ""
+    if not problem or not pid:
+        return False
+
+    set_private_current_problem(user_id, problem)
+    if not load_private_problem_history(user_id, pid):
+        group_history = group_problem_history(group_id, user_id, pid)
+        if group_history:
+            replace_private_problem_history(user_id, pid, copy_records(group_history))
+    first = not has_group_problem_private_notified(user_id, pid)
+    if first:
+        intro_id = await send_private_msg(user_id, build_plain_message(
+            "你现在还在群提交等待期，这次提交已转到 private judge；我也帮你把当前群题设好了。"
+        ))
+        if intro_id is None:
+            await send_group_msg(group_id, [
+                build_at(user_id),
+                build_text(" 我想把这次提交转到 private judge，但私聊发送失败了；这次先不撤回也不判题，检查一下是否能接收临时会话？"),
+            ])
+            return True
+        mark_group_problem_private_notified(user_id, pid)
+        await send_problem_card_private(user_id, group_id, problem, prefer_group_card=True)
+    else:
+        mark_group_problem_private_notified(user_id, pid)
+
+    repeated = await send_private_msg(user_id, build_plain_message(
+        f"刚才被撤回的提交内容：\n{submission}\n\n开始 judge～"
+    ))
+    if repeated is None:
+        await send_group_msg(group_id, [
+            build_at(user_id),
+            build_text(" 私聊复述提交失败了；这次先不撤回也不判题，联系管理员看一下私聊权限吧。"),
+        ])
+        return True
+
+    try:
+        await delete_msg(message_id)
+    except Exception:
+        logger.warning("[group_%s] failed to delete early starred submit %s", group_id, message_id)
+
+    await enqueue_submit_request(
+        group_id,
+        user_id,
+        sender,
+        message_id,
+        submission,
+        event_log=None,
+        scope=PRIVATE_SCOPE,
+    )
+    return True
+
+
 async def handle(group_id: int, user_id: int, sender: dict,
                  message_id: str, raw_text: str, segments: list,
                  event: dict) -> None:
     """Handle /submit command."""
     nickname = get_display_name(sender)
+    scope = PRIVATE_SCOPE if event.get("message_type") == "private" else GROUP_SCOPE
 
     stripped = raw_text.lstrip()
     match = re.match(r'/submit\s+', stripped)
     if not match:
-        await send_group_msg(group_id, build_plain_message(
-            f"@{nickname} 用法：/submit 你的做法。试试看？"
-        ))
+        if scope == PRIVATE_SCOPE:
+            await send_private_msg(user_id, build_plain_message("用法：/submit 你的做法。试试看？"))
+        else:
+            await send_group_msg(group_id, build_plain_message(
+                f"@{nickname} 用法：/submit 你的做法。试试看？"
+            ))
         return
 
     submission = stripped[match.end():].strip()
     if not submission:
-        await send_group_msg(group_id, build_plain_message(
-            f"@{nickname} /submit 后面要写你的做法呀，只发 /submit 我不知道你做了啥 😅"
-        ))
+        if scope == PRIVATE_SCOPE:
+            await send_private_msg(user_id, build_plain_message(
+                "/submit 后面要写你的做法呀，只发 /submit 我不知道你做了啥 ❤️"
+            ))
+        else:
+            await send_group_msg(group_id, build_plain_message(
+                f"@{nickname} /submit 后面要写你的做法呀，只发 /submit 我不知道你做了啥 😅"
+            ))
         return
 
     if is_curfew_active():
-        await send_group_msg(group_id, build_plain_message(
-            format_curfew_message()
-        ))
+        msg = format_curfew_message()
+        if scope == PRIVATE_SCOPE:
+            await send_private_msg(user_id, build_plain_message(msg))
+        else:
+            await send_group_msg(group_id, build_plain_message(msg))
         return
 
     blocked_message = await enqueue_submit_request(
@@ -1467,8 +1692,19 @@ async def handle(group_id: int, user_id: int, sender: dict,
         message_id,
         submission,
         event_log=event.get(EVENT_META_KEY),
+        scope=scope,
     )
     if blocked_message:
+        user_group = get_user_group(user_id)
+        if scope == GROUP_SCOPE and is_dynamic_submit_delay_enabled(user_group):
+            if await _redirect_blocked_group_submit_to_private(
+                group_id,
+                user_id,
+                sender,
+                message_id,
+                submission,
+            ):
+                return
         await send_group_msg(group_id, [
             build_at(user_id),
             build_text(f" {blocked_message}"),

@@ -15,7 +15,7 @@ def test_discover_commands():
     cmds = all_commands()
     names = {c.name for c in cmds}
     expected = {"help", "newproblem", "submit", "problem",
-                "tag", "clarify", "scoreboard"}
+                "tag", "clarify", "scoreboard", "setproblem", "sync"}
     missing = expected - names
     assert not missing, f"Missing commands: {missing}"
     assert len(cmds) >= 7
@@ -49,6 +49,7 @@ def test_alias_lookup():
         "rv": "review",
         "pb": "problem",
         "np": "newproblem",
+        "sp": "setproblem",
     }
     for alias, canonical in expected.items():
         cmd = get(alias)

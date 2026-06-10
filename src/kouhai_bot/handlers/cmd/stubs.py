@@ -7,6 +7,7 @@ from ..shared import (
     fetch_group_member_nickname_map,
     format_points,
     get_today_problem,
+    high_difficulty_notice,
     is_already_solved,
     load_scoreboard,
 )
@@ -36,6 +37,16 @@ async def _send_solved_problem_hint(group_id: int, nickname: str) -> None:
         await send_group_msg(group_id, build_plain_message(
             f"@{nickname} 这题已经通过啦，可以发 /newproblem 挑战下一题～"
         ))
+    except Exception:
+        return
+
+
+async def _send_high_difficulty_notice_group(group_id: int, problem: dict | None) -> None:
+    notice = high_difficulty_notice(problem)
+    if not notice:
+        return
+    try:
+        await send_group_msg(group_id, build_plain_message(notice))
     except Exception:
         return
 
@@ -114,6 +125,7 @@ async def handle_problem(group_id: int, user_id: int, sender: dict,
                 if fwd_resp:
                     if pid:
                         save_problem_card_ref(group_id, fwd_resp, pid, "problem_resend")
+                    await _send_high_difficulty_notice_group(group_id, current_problem)
                     await _send_solved_problem_hint(group_id, nickname)
                     return
             post_msg = daily_msg.get("post_msg")
@@ -135,6 +147,7 @@ async def handle_problem(group_id: int, user_id: int, sender: dict,
                     daily_msg["fwd_message_id"] = fwd_resp
                     with open(daily_msg_path, "w") as f:
                         json.dump(daily_msg, f, ensure_ascii=False, indent=2)
+                    await _send_high_difficulty_notice_group(group_id, current_problem)
                     await _send_solved_problem_hint(group_id, nickname)
                     return
         except Exception:

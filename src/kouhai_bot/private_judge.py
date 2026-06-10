@@ -20,6 +20,7 @@ from .config import get_config
 from .handlers.shared import (
     get_problem_summary,
     get_today_problem,
+    high_difficulty_notice,
     load_scoreboard,
     save_problem_summary,
     summarize_problem,
@@ -617,6 +618,16 @@ async def _send_forward_nodes_group(group_id: int, node_ids: list[str]) -> int |
     )
 
 
+async def _send_high_difficulty_notice_private(user_id: int, problem: dict) -> None:
+    notice = high_difficulty_notice(problem)
+    if not notice:
+        return
+    try:
+        await send_private_msg(user_id, build_plain_message(notice))
+    except Exception as e:
+        logger.warning("failed to send private high-difficulty notice: %s", e)
+
+
 async def send_problem_card_private(user_id: int, group_id: int, problem: dict, *, prefer_group_card: bool = True) -> bool:
     cfg = get_config()
     pid = str(problem.get("today", "") or "")
@@ -643,6 +654,7 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
             if value:
                 node_ids.append(str(value))
         if await _send_forward_nodes_private(user_id, node_ids):
+            await _send_high_difficulty_notice_private(user_id, problem)
             return True
 
     post_msg = payload.get("post_msg")
@@ -663,6 +675,7 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
         if resp:
             node_ids.append(str(resp))
     if await _send_forward_nodes_private(user_id, node_ids):
+        await _send_high_difficulty_notice_private(user_id, problem)
         return True
 
     await send_private_msg(user_id, build_plain_message(post_msg))
@@ -670,6 +683,7 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
         await send_private_msg(user_id, build_plain_message(str(sample)))
     if notes_message:
         await send_private_msg(user_id, build_plain_message(notes_message))
+    await _send_high_difficulty_notice_private(user_id, problem)
     return True
 
 

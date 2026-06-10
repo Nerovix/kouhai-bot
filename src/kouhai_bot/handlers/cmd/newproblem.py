@@ -16,6 +16,7 @@ from .. import registry
 from ..registry import CommandDef
 from ..shared import (
     get_today_problem,
+    high_difficulty_notice,
     is_already_solved,
     load_scoreboard,
     save_problem_card_ref,
@@ -55,6 +56,16 @@ def _has_unsolved_problem(group_id: int) -> bool:
 
 def _nickname(sender: dict) -> str:
     return sender.get("card") or sender.get("nickname") or str(sender.get("user_id", "?"))
+
+
+async def _send_high_difficulty_notice_group(group_id: int, problem: dict | None) -> None:
+    notice = high_difficulty_notice(problem)
+    if not notice:
+        return
+    try:
+        await send_group_msg(group_id, build_plain_message(notice))
+    except Exception as e:
+        logger.warning("[group_%s] Failed to send high-difficulty notice: %s", group_id, e)
 
 
 async def enqueue_force_new_problem(
@@ -507,6 +518,7 @@ async def _do_daily_post_locked(
         logger.error(f"[group_{group_id}] Problem forward-card send failed, falling back to direct")
         ok = await send_group_msg(group_id, build_plain_message(post_msg))
         if ok:
+            await _send_high_difficulty_notice_group(group_id, picked_state)
             await _commit_problem_state(group_id, picked_state)
             try:
                 _save_daily_msg(
@@ -534,6 +546,7 @@ async def _do_daily_post_locked(
     await _commit_problem_state(group_id, picked_state)
     if pid:
         save_problem_card_ref(group_id, fwd_resp, pid, "daily_post" if prefix is None else "newproblem")
+    await _send_high_difficulty_notice_group(group_id, picked_state)
 
     try:
         _save_daily_msg(

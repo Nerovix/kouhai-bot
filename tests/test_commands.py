@@ -1934,6 +1934,36 @@ def test_problem_unsolved_resend_does_not_show_next_problem_hint():
     print("✅ problem: unsolved resend has no next-problem hint")
 
 
+def test_problem_high_difficulty_resend_warns_after_card():
+    _reset_state()
+    _setup_problem()
+    _write_state(GID, {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2901,
+        "tags": ["number theory", "dp"],
+        "date": "2026-05-14",
+    })
+    _write_group_file(GID, "daily_msg.json", {
+        "msg_id": 1111,
+        "pid": PID,
+    })
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.stubs import handle_problem
+        asyncio.run(handle_problem(**_kwargs(_make_event("/problem"))))
+
+    assert len(_forwarded) == 1, f"Expected problem card resend, got: {_forwarded}"
+    text = _last_text()
+    assert "难度较高" in text, text
+    assert "题解" in text, text
+    _cleanup()
+    print("✅ problem: high difficulty resend warns after card")
+
+
 def test_problem_no_current_problem():
     """No current problem → friendly /newproblem hint."""
     _reset_state()
@@ -3451,6 +3481,38 @@ def test_private_problem_card_hides_original_problem_identity():
     print("✅ private problem card: hides original identity")
 
 
+def test_private_problem_card_high_difficulty_warns_after_card():
+    _reset_state()
+    _write_group_file(GID, "daily_msg.json", {
+        "msg_id": 1111,
+        "pid": PID,
+    })
+    problem = {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2901,
+        "tags": [],
+    }
+
+    with _all_patches(), patch("kouhai_bot.private_judge.asyncio.sleep", AsyncMock()):
+        from kouhai_bot.private_judge import send_problem_card_private
+
+        ok = asyncio.run(send_problem_card_private(UID, GID, problem, prefer_group_card=True))
+
+    assert ok
+    assert len(_private_forwarded) == 1, f"Expected private problem card, got: {_private_forwarded}"
+    private_text = "\n".join(
+        " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
+        for item in _private_sent
+    )
+    assert "难度较高" in private_text, private_text
+    assert "题解" in private_text, private_text
+    _cleanup()
+    print("✅ private problem card: high difficulty warns after card")
+
+
 def test_private_state_load_logs_corrupt_json_once(caplog):
     _reset_state()
     state_dir = os.path.join(_data_dir(), "private_judge", "users")
@@ -3750,6 +3812,7 @@ if __name__ == "__main__":
     test_problem_ignores_stale_daily_msg_pid()
     test_problem_solved_resend_shows_next_problem_hint()
     test_problem_unsolved_resend_does_not_show_next_problem_hint()
+    test_problem_high_difficulty_resend_warns_after_card()
     test_problem_alias_dispatches_to_problem_handler()
     test_tag_with_tags()
     test_scoreboard_with_data()
@@ -3776,6 +3839,7 @@ if __name__ == "__main__":
     test_review_history_formats_types_and_submit_numbers()
     test_user_submission_history_is_unbounded_and_upserts_by_request_id()
     test_clarify_prompt_hides_original_problem_identity()
+    test_private_problem_card_high_difficulty_warns_after_card()
     test_submit_same_user_includes_previous_clarify_history()
     test_submit_parallel_different_groups_do_not_block()
     test_submit_starred_user_shows_own_group_top5()

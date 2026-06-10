@@ -869,6 +869,13 @@ problem, the card title should stay generic. Do not include the original problem
 title, contest id, or rating there; anti-spoiler clarification also assumes the bot does
 not reveal the original problem identity to the user.
 
+### 27.5. High-rating problem cards need a caution
+After sending a problem card for a problem with rating greater than 2800, send a short
+follow-up warning that the problem is hard, the bot's reasoning may be limited, and the
+user should check the official/editorial solution if the bot seems wrong. Keep this as
+a separate message after the card, not inside private card titles where source identity
+could leak.
+
 ### 28. Private judge state writes must be atomic
 `private_judge/users/<uid>.json` is user history, not a disposable cache. Write it via a
 same-directory temp file and `os.replace`, and log JSON/IO load failures before falling

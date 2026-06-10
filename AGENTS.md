@@ -15,9 +15,9 @@ NapCat (QQ) ──WS──> worker.py
 ## Key Design Decisions
 
 - **Command auto-discovery**: Each command in `handlers/cmd/*.py` calls `register()` at module load. The `registry.discover_commands()` scans with `pkgutil.iter_modules`. Adding a new command = create a `.py` file with a `register()` function.
-- **Limited aliases**: Only five short aliases are supported: `/newproblem`→`/np`, `/problem`→`/pb`, `/submit`→`/sbm`, `/review`→`/rv`, `/clarify`→`/clrf`. Old aliases such as `/sb`, `/排名`, and Chinese aliases remain unsupported. New commands default to `aliases=[]` unless explicitly approved.
+- **Limited aliases**: Only six short aliases are supported: `/newproblem`→`/np`, `/problem`→`/pb`, `/submit`→`/sbm`, `/review`→`/rv`, `/clarify`→`/clrf`, `/setproblem`→`/sp`. Old aliases such as `/sb`, `/排名`, and Chinese aliases remain unsupported. New commands default to `aliases=[]` unless explicitly approved.
 - **Help auto-generation**: `handlers/cmd/help.py` reads `registry.all_commands()` and builds the help text dynamically. Descriptions must match old bridge.py wording.
-  `usage` field = args suffix in /help display (e.g. `usage="你的做法"` → `/submit 你的做法`).
+  `usage` field = args suffix in /help display (e.g. `usage="你的做法"` → `/submit 你的做法`). Group help hides private-only details for `/setproblem` and `/sync` and only briefly mentions private judge; private help lists the private-judge command set.
 - **Scheduler current-group config**: `~/.kouhai-bot/scheduler_config.json` stores job list + time overrides for `CURRENT_GROUP`. Jobs are defined in `scheduler/jobs.py`.
 - **Command event log**: `eventlog.py` writes append-only JSONL command events by real local date. `achievements.py` reads those events for the 04:00-to-04:00 daily report. `eventlog_backfill.py` and `tools/backfill_command_events.py` can reconstruct recent saved submit/clarify/review events from `scoreboard.json`.
 - **Formula VL**: `problems/fetcher.py` handles CF formula images → Qwen-VL → inline LaTeX. Has white-bg preprocessing, hallucination detection, retry.
@@ -31,7 +31,8 @@ NapCat (QQ) ──WS──> worker.py
   configured users' waits halve down to the floor. Runtime wait state lives in
   `scoreboard.json.user_group_waits`; real QQ IDs belong only in local config/runtime data.
   `do_daily_post` writes `state.json` `posted_at`; if missing, cooldown falls back
-  to matching `daily_msg.json` mtime.
+  to matching `daily_msg.json` mtime. Dynamic-wait users who submit before their group
+  wait expires are redirected to private judge instead of being judged in the group.
 - **Curfew (宵禁)**: `curfew.py` — `/submit` is blocked during a daily quiet window defined
   by `CURFEW_START_HOUR` and `CURFEW_DURATION_HOURS`. Other commands (clarify, review,
   scoreboard, etc.) are unaffected. Curfew wraps past midnight correctly (e.g. start=22,
@@ -205,6 +206,7 @@ groups/<gid>/used.json       # used problem IDs
 groups/<gid>/groupctx_*.json # group message context
 groups/<gid>/command_events/YYYY-MM-DD.jsonl # structured command event log by real local date
 groups/<gid>/problem_ratings.json # cached problem rating by pid for weighted scoreboard totals
+private_judge/users/<uid>.json # per-user private judge current problem, history, solved markers, redirect state
 annotations/pending/<gid>/<pid>.json # pending human-label bundle for solved problems
 annotations/labeled/<gid>/<pid>.json # completed human-label bundle for solved problems
 statements/<pid>.json        # cached problem statements
@@ -225,44 +227,52 @@ No repository-local runtime queue is used.
 
 | Command | File | Handler | Lock | Model | Notes |
 |---------|------|---------|------|-------|-------|
-| `/submit` (`/sbm`) | submit.py | `handle` | ✅ state scheduler | per-provider `judge_model` | Judge solution, save history, serialize only first-blood/scoreboard; configured user-group delay checked before enqueue |
-| `/clarify` (`/clrf`) | clarify.py | `handle` | ✅ state scheduler | per-provider `clarify_model` | Clarify problem details (JSON output, anti-spoiler, no original problem identity), using admission-time pid |
-| `/clear` | clear.py | `handle` | ✅ state scheduler | — | Clear the current user's stored submit/clarify/review history for the admission-time current problem |
+| `/submit` (`/sbm`) | submit.py | `handle` | ✅ state scheduler | per-provider `judge_model` | Judge solution, save history, serialize only first-blood/scoreboard; configured dynamic-wait group submits redirect to private judge; private AC does not score until synced |
+| `/clarify` (`/clrf`) | clarify.py | `handle` | ✅ state scheduler | per-provider `clarify_model` | Clarify problem details (JSON output, anti-spoiler, no original problem identity), using admission-time pid; private uses pid-specific summary |
+| `/clear` | clear.py | `handle` | ✅ state scheduler | — | Clear the current user's stored submit/clarify/review history for the admission-time current problem or current private problem |
 | `/newproblem` (`/np`) | newproblem.py | `handle` | ✅ post lock | per-provider `summary_model` | Force new problem when solved (or none); unsolved needs exact `/newproblem --force`; samples are forwarded as separate nodes; if statement has `notes`, translate+symbol-normalize and append as a dedicated notes node; commits state only after card delivery succeeds and keeps `daily_msg.json` in sync even on direct-text fallback |
-| `/problem` (`/pb`) | stubs.py | `handle_problem` | ❌ | — | Resend current problem via forward card only when `daily_msg.json.pid` matches `state.json.today`; if solved, add a friendly `/newproblem` hint |
-| `/tag` | stubs.py | `handle_tag` | ❌ | — | Show CF tags |
+| `/problem` (`/pb`) | stubs.py | `handle_problem` | ❌ | — | Resend current group/private problem via forward card; group path only uses `daily_msg.json` when pid matches `state.json.today`; if solved, add a friendly `/newproblem` hint |
+| `/tag` | stubs.py | `handle_tag` | ❌ | — | Show current group/private problem CF tags |
 | `/scoreboard` | stubs.py | `handle_scoreboard` | ❌ | — | Cumulative weighted leaderboard; shows the formula at the top, then refreshes latest group nicknames at display time |
 | `/help` | help.py | `handle` | ❌ | — | Auto-generated help (forward card) |
-| `/review` (`/rv`) | review.py | `handle` | ✅ state scheduler | per-provider `review_model` | Discuss the latest solved problem by default; quoted problem cards can target older problems |
-| `/status` | stubs.py | `handle_status` | ❌ | — | Check whether this group has active `/newproblem`/daily post or stateful work |
+| `/review` (`/rv`) | review.py | `handle` | ✅ state scheduler | per-provider `review_model` | Discuss the latest solved group/private problem by default; quoted group problem cards can target older problems |
+| `/status` | stubs.py | `handle_status` | ❌ | — | Check whether this group or private judge has active stateful work |
+| `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, or `random` |
+| `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite |
 
 ### Stateful Command Runtime
 
 Stateful commands (`/submit`, `/clarify`, `/review`, `/clear`) no longer serialize
-through one global lock or one per-group FIFO execution queue. They run through a
-**per-group state scheduler** implemented in `submit.py`; `/newproblem` and
+through one global lock or one per-group FIFO execution queue. Group requests run
+through a **per-group state scheduler** implemented in `submit.py`; private judge
+requests run through a separate **per-user private coordinator**. `/newproblem` and
 `daily_post` use their own per-group post lock and commit current-problem state only
 after delivery.
 
 Key rules:
 
 - **Admission-time snapshots**: every stateful request receives a monotonically
-  increasing per-group sequence and snapshots its target pid at admission. `/submit`,
-  `/clarify`, and `/clear` use the then-current problem; `/review` uses the then-latest
-  solved problem.
+  increasing per-coordinator sequence and snapshots its target pid at admission.
+  Group `/submit`, `/clarify`, and `/clear` use the then-current group problem;
+  private versions use the then-current private problem. Group `/review` uses the
+  then-latest solved group problem; private `/review` uses the current private problem
+  if solved privately or already solved by the group, otherwise the user's latest
+  private solved problem.
 - **Parallel compute**: expensive LLM work for `/submit`, `/clarify`, and `/review`
   starts immediately and shares a **global concurrency limit of 8**. Same-user requests
   do not wait for earlier LLM calls to finish.
 - **Pending archive context**: when a `/submit`, `/clarify`, or `/review` request is
   admitted for a target problem, its user input is saved immediately to
-  `scoreboard.json.user_submissions` with `result="pending"` and a `request_id`. Later
-  same-user requests load these pending records plus completed history; the current
-  request's own pending record is excluded by `request_id`. Final handling updates that
-  same record in place. Superseded unanswered `/submit`, timeout, and service-failure
-  records therefore remain historical context across restarts with empty
-  `reason`/`reply`.
+  group `scoreboard.json.user_submissions` or private
+  `private_judge/users/<uid>.json.user_submissions` with `result="pending"` and a
+  `request_id`. Later same-user requests load these pending records plus completed
+  history; the current request's own pending record is excluded by `request_id`.
+  Final handling updates that same record in place. Superseded unanswered `/submit`,
+  timeout, and service-failure records therefore remain historical context across
+  restarts with empty `reason`/`reply`.
 - **Short state critical sections**: JSON read/modify/write endpoints are protected by
-  the per-group scheduler async lock. LLM calls never hold this lock.
+  the relevant group/private coordinator async lock. LLM calls never hold this lock.
+  `/sync` also uses the group coordinator lock when it writes group `scoreboard.json`.
 - **Submit first-blood serialization only**: incorrect/off-topic/failure replies are
   sent as soon as they finish. Correct submits are saved immediately; if earlier
   admission-order submit candidates are still unresolved, the user first gets a short
@@ -278,8 +288,8 @@ Key rules:
   same-problem scenario. When superseded by another `/submit`, the older submit's
   persisted pending record is updated to `result="superseded"` so a quick correction or
   addendum can refer to it after a restart, and the received `/submit` still counts as a
-  submit attempt in daily achievements. When superseded by `/clear`, it is removed with
-  the rest of that user's current-problem context.
+  submit attempt in daily achievements for group commands. When superseded by `/clear`,
+  it is removed with the rest of that user's current-problem context.
 - **New problem visibility**: `/newproblem` / `daily_post` pick and summarize a candidate
   without changing `state.json`. Until the new card is successfully delivered, all
   commands still see the old problem. Failed delivery leaves the old current problem
@@ -293,6 +303,7 @@ Key rules:
 Status helpers used by `/status`:
 
 - `get_group_lock_status(group_id)` — earliest active stateful request for that group, if any
+- `get_private_lock_status(user_id, group_id)` — earliest active private request for that user, if any
 - `get_newproblem_status(group_id)` — active `/newproblem`/daily post for that group, if any
 
 ### `/clear` — Clear current-problem user context
@@ -301,8 +312,9 @@ Status helpers used by `/status`:
 - Removes that user's saved `/submit`, `/clarify`, and `/review` history for today's pid
 - Runs through the state scheduler and records a clear watermark so earlier in-flight
   requests for that user/problem cannot write history after clear
-- On success it reacts to the triggering message with the typed `👌` emoji payload
-  (`type=2`, `id=128076`) and sends no extra text
+- On group success it reacts to the triggering message with the typed `👌` emoji payload
+  (`type=2`, `id=128076`) and sends no extra text. In private chats it sends the same
+  face instead of a message reaction.
 
 ### Dispatch Pattern
 
@@ -312,16 +324,21 @@ handlers. Tests may pass `spawn_handlers=False` to await a handler directly.
 
 Read-only commands (`/problem`, `/tag`, `/scoreboard`, `/help`, `/status`) still do
 not enter the state scheduler.
+Private dispatch maps DMs to `CURRENT_GROUP`, requires the sender to be a member of that
+service group, and only allows the private command whitelist: `/setproblem`, `/problem`,
+`/tag`, `/submit`, `/clarify`, `/review`, `/clear`, `/sync`, `/status`, and `/help`.
+Private commands do not require @mentions and should not send @ segments back.
 
 ### Command Event Log
 
 `eventlog.py` owns the append-only structured command log under
 `groups/<gid>/command_events/YYYY-MM-DD.jsonl`.
 
-- Dispatch writes a `received` event after a command is recognized.
+- Dispatch writes a `received` event after a group command is recognized. Private
+  commands are not written to group command event logs.
 - Dispatch writes generic `finished` events (`ok` / `error`) for commands that do not
   publish detailed status themselves.
-- `/submit`, `/clarify`, and `/review` carry the same event metadata through the group
+- Group `/submit`, `/clarify`, and `/review` carry the same event metadata through the group
   state scheduler and write detailed final statuses such as `correct`, `incorrect`,
   `post_solve_correct`, `timeout`, `offtopic`, `stale`, `no_problem`, and
   `no_review_problem`. `post_solve_correct` means a concurrent `/submit` was judged
@@ -372,8 +389,11 @@ achievement reports.
 3. Enter the group's state scheduler long enough to atomically check dynamic user-group
    submit wait, snapshot today's pid, and snapshot solved state. If the user is still
    inside the effective wait window (`max(submit_delay_sec, saved wait_sec)` after
-   `posted_at`), reply with that group's delay message plus remaining wait time; do not
-   enqueue
+   `posted_at`) and belongs to a dynamic-wait group, redirect the submit to private
+   judge instead of judging/scoring in the group. If the private intro or repeated
+   submit text cannot be sent, do not recall the group message, do not judge, and do not
+   consume the first-notice marker. Non-dynamic waits still reply with the group's delay
+   message and do not enqueue.
 4. If not blocked, get a sequence number and enqueue the snapshotted pid/solved state
 5. Background compute starts immediately; it loads completed user history plus earlier
    pending user inputs for the same `(group, user, pid)`. The current request's own
@@ -381,7 +401,8 @@ achievement reports.
    text is visible as `result="superseded"` context.
 6. If `SUBMIT_AC_BACKDOOR` is non-empty and the submission contains that string, return a correct verdict before calling the judge LLM
 7. Otherwise load user history, react with 👀/[睁眼] ack, and call `judge_submission()`
-   `[睁眼]` is a QQ special emoji reaction (emoji id), not plain message text.
+   `[睁眼]` is a QQ special emoji reaction (emoji id), not plain message text. In private
+   judge, send face messages instead of group message reactions.
 8. Incorrect/off-topic/failure results finalize immediately when compute finishes
 9. If the problem was already solved when this `/submit` entered the queue: reply
    "已经有人解出..." without calling the judge.
@@ -401,6 +422,12 @@ achievement reports.
     not-counted message and **do not** send the official tutorial again.
 15. If incorrect: reply with judge's reason.
 
+Private `/submit` uses the same judge path and private history, but a correct result
+only marks the problem solved in `private_judge/users/<uid>.json`; it does not update
+the group scoreboard or daily achievements. If the private problem is the current group
+problem, the success message tells the user they can `/sync` in the service group to
+score it if the group has not already solved it.
+
 ### `/clarify` — Anti-Spoiler Clarification
 
 LLM `timeout=600` (10 minutes per HTTP attempt; retries in `shared.py` can extend total wait).
@@ -412,7 +439,9 @@ Timeout comes from `llm.clarify_timeout_sec`. Output:
 - Normal: reply text only, must not leak solution hints
 - Must not reveal the original problem identity, including problem ID, title, or contest ID
 
-Loads **Chinese summary from group context** (last assistant message) for LLM grounding.
+Group `/clarify` loads **Chinese summary from group context** (last assistant message)
+for LLM grounding. Private `/clarify` uses `problem_summaries.json` for the selected
+pid, so a private CF link/random problem is not paired with the current group summary.
 The target pid is snapshotted at admission. Final saving is protected by the state
 scheduler lock, but final reply is not ordered behind unrelated same-group requests.
 
@@ -438,6 +467,47 @@ scheduler lock, but final reply is not ordered behind unrelated same-group reque
   editorial via `format_editorial_for_review()` (truncated to 12k chars). `REVIEW_PROMPT` states
   that this is official editorial **only the model sees** — do not paste it to the user or spoil
   that the group received a tutorial card. Use it to validate the user's approach and explain WAs.
+
+Private `/review` targets the current private problem when it was solved privately or
+the group has solved that same current problem. Otherwise it targets the user's latest
+private solved problem. This lets private review become available automatically after
+someone solves the current group problem, even if the user only set that problem in
+private judge.
+
+### Private Judge
+
+Private judge lives in `private_judge.py` plus `/setproblem` and `/sync` command
+modules. It is available only in DMs from members of `CURRENT_GROUP`; group-only
+commands are rejected in private with a friendly message.
+
+- Private state is per user in `private_judge/users/<uid>.json`: current problem,
+  `user_submissions`, solved markers, latest solved pid, and starred-submit redirect
+  notification markers.
+- Private and group contexts are independent by default. `copy_records()` is used when
+  copying history between sides so later writes do not share dict instances.
+- `/setproblem` (`/sp`) is private-only. Empty args select the current group problem;
+  `CF2234B`, `2234B`, Codeforces problemset/contest links, and `random` are supported.
+  If private history is empty and group history exists for the selected pid, it copies
+  group history into private. If the group has already solved that pid, it marks private
+  review as available. It sends a private problem card, preferring the current group's
+  cached forward-card payload when the pid is the current group problem.
+- `/problem` in private resends the selected private problem card. `/tag`, `/status`,
+  `/clear`, `/submit`, `/clarify`, and `/review` all operate on private state and do
+  not emit group @mentions.
+- `/sync` copies the **current group problem only** between group and private judge.
+  In a group chat it copies private → group; in private it copies group → private.
+  If the source side has no relevant records, it aborts and does not overwrite the
+  target side. It rejects while there is an active group or private stateful request
+  for the same user/problem.
+- `/sync` sends the source history as one forward-card-style history card to the target
+  chat after copying. If the source is empty, it sends only the friendly abort message.
+- A normal user's private correct submit for the current group problem can score through
+  group `/sync` if the group has not already solved that pid. Scoring is performed under
+  the group coordinator lock, schedules the official editorial follow-up, and writes the
+  private records into group `scoreboard.json`.
+- Dynamic-wait/starred users redirected to private judge can still `/sync`, but only
+  `clarify` records are copied; submit/review/correct records are ignored and never
+  score.
 
 ### 8.5. Review parallelism depends on enqueue-time pid snapshot
 If `/review` is meant to compute in parallel with later same-group requests, do not
@@ -581,7 +651,10 @@ Local HTML labeling UI:
 5. If the command mutates group state or appends to submission history, route it through
    the state scheduler helpers in `submit.py`; read/modify/write JSON sections must
    use the same per-group scheduler lock
-6. That's it — auto-discovered, auto-listed in /help
+6. If the command is usable in private chat, add it to the private whitelist in
+   `handlers/__init__.py`, update private `/help` filtering, and avoid group @mentions
+   or message reactions in private replies
+7. That's it — auto-discovered, auto-listed in /help
 
 ## Adding a Scheduled Job
 
@@ -645,6 +718,10 @@ records do not settle waits.
 
 Existing `solves` and submission record fields MUST match the old bridge's format
 exactly for backward compatibility with existing `~/.daily-problem` data.
+Private judge submission records use the same record shape inside
+`private_judge/users/<uid>.json.user_submissions` so group/private history can be copied
+without conversion. Do not add private-only fields to individual history records unless
+all sync paths intentionally preserve or strip them.
 
 ## Pitfalls & Lessons Learned
 
@@ -652,6 +729,8 @@ exactly for backward compatibility with existing `~/.daily-problem` data.
 All submit/clarify/review/clear entry points in a group must use the SAME scheduler
 state for that group. Do not add an ad hoc lock or side path for one command, or
 pending archive updates, clear watermarks, and first-blood resolution will diverge.
+Private judge has separate per-user coordinators; do not route private stateful commands
+through the group coordinator except for the short group write section inside `/sync`.
 
 ### 2. Judge user_msg format is JSON
 `judge_submission()` sends `json.dumps({"problem": ..., "submission": ..., "history": ...})`.
@@ -765,6 +844,16 @@ cache file to force re-translation after updating prompts or rescraping editoria
 `/review` gets English source (+ code in extracted text) for internal grounding.
 The post-AC card gets Chinese translation without code. Do not send Chinese translation
 into review unless product requirements change.
+
+### 25. Private judge sync must not erase on empty source
+`/sync` uses the other side as source and overwrites the current side for the current
+group problem only. If the source side has no records, abort with a friendly message and
+leave the target untouched. This protects users from accidental history loss.
+
+### 26. Private chats use messages, not group affordances
+Private command handlers must not send @ segments or call `react_emoji`. Use plain
+private messages or face segments (`build_face`) instead. Long private review/history
+responses can use private merged-forward cards.
 
 ## Testing
 
@@ -937,3 +1026,6 @@ When making changes, verify against old bridge.py:
     so `/status` still reports in-flight work correctly
 12. **Official tutorial**: first AC only; congrats + separate forward card; translation
     omits code; review uses English editorial in LLM context only, not user-visible spoiler
+13. **Private judge**: private commands are service-group-member only, private history is
+    independent, `/sync` aborts on empty source, and private AC never scores unless a
+    normal user syncs the current group problem back to the group before it is solved

@@ -3389,6 +3389,44 @@ def test_private_setproblem_current_copies_empty_private_history():
     print("✅ private setproblem: copies empty private history")
 
 
+def test_private_problem_card_hides_original_problem_identity():
+    _reset_state()
+    _write_statement(PID, {
+        "name": "D. Superhero's Job",
+        "time_limit": "2s",
+        "memory_limit": "256MB",
+        "description": "Statement text",
+        "input": "n",
+        "output": "answer",
+        "samples": [{"input": "1", "output": "1"}],
+    })
+    _write_group_file(GID, "problem_summaries.json", {
+        PID: {"summary_zh": "SUMMARY_ONLY"},
+    })
+
+    with _all_patches():
+        from kouhai_bot.private_judge import build_problem_card_payload
+
+        payload = asyncio.run(build_problem_card_payload(GID, {
+            "today": PID,
+            "contestId": 542,
+            "index": "D",
+            "name": "Superhero's Job",
+            "rating": 2600,
+            "tags": [],
+        }))
+
+    post_msg = payload["post_msg"]
+    assert post_msg.startswith("private judge 题目"), post_msg
+    assert "SUMMARY_ONLY" in post_msg, post_msg
+    assert PID not in post_msg, post_msg
+    assert "CF" not in post_msg, post_msg
+    assert "Superhero" not in post_msg, post_msg
+    assert "2600" not in post_msg and "rating" not in post_msg, post_msg
+    _cleanup()
+    print("✅ private problem card: hides original identity")
+
+
 def test_private_review_allowed_after_group_solves_current_problem():
     _reset_state()
     global _deepseek_response

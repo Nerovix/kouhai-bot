@@ -490,15 +490,7 @@ async def build_problem_card_payload(group_id: int, problem: dict, *, greeting: 
     if not stmt:
         stmt = _ensure_statement(problem)
     summary = await _problem_summary(group_id, pid, stmt) if stmt else ""
-    stmt_name = stmt.get("name", "") if stmt else ""
-    name = str(problem.get("name", "") or stmt_name)
-    rating = str(problem.get("rating", "") or "")
-    title_parts = [f"{greeting}：CF{pid}"]
-    if name:
-        title_parts.append(name)
-    if rating and rating != "?":
-        title_parts.append(f"rating {rating}")
-    post_msg = " ".join(title_parts)
+    post_msg = greeting
     if summary:
         post_msg += "\n\n" + summary
     return {
@@ -558,7 +550,7 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
         except Exception as e:
             logger.warning("failed to build private problem card for %s: %s", pid, e)
             await send_private_msg(user_id, build_plain_message(
-                f"题目 CF{pid} 已设置，但题面暂时拉不到，稍后再试试 /problem。"
+                "题目已设置，但题面暂时拉不到，稍后再试试 /problem。"
             ))
             return False
 
@@ -580,7 +572,7 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
     sample_messages = payload.get("sample_messages")
     notes_message = payload.get("notes_message")
     if not isinstance(post_msg, str):
-        post_msg = f"当前题目：CF{pid}"
+        post_msg = "当前题目"
     if not isinstance(sample_messages, list):
         sample_messages = []
     if not isinstance(notes_message, str):

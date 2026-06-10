@@ -490,7 +490,9 @@ commands are rejected in private with a friendly message.
   If private history is empty and group history exists for the selected pid, it copies
   group history into private. If the group has already solved that pid, it marks private
   review as available. It sends a private problem card, preferring the current group's
-  cached forward-card payload when the pid is the current group problem.
+  cached forward-card payload when the pid is the current group problem. Generated
+  private cards must not expose the original CF id, title, contest id, or rating in the
+  card title.
 - `/problem` in private resends the selected private problem card. `/tag`, `/status`,
   `/clear`, `/submit`, `/clarify`, and `/review` all operate on private state and do
   not emit group @mentions.
@@ -854,6 +856,12 @@ leave the target untouched. This protects users from accidental history loss.
 Private command handlers must not send @ segments or call `react_emoji`. Use plain
 private messages or face segments (`build_face`) instead. Long private review/history
 responses can use private merged-forward cards.
+
+### 27. Private problem cards should not reveal source identity
+When `/setproblem` builds a private card for an explicitly selected or random CF
+problem, the card title should stay generic. Do not include the original problem id,
+title, contest id, or rating there; anti-spoiler clarification also assumes the bot does
+not reveal the original problem identity to the user.
 
 ## Testing
 

@@ -3603,8 +3603,8 @@ def test_sync_history_card_uses_friendly_visible_format():
         if item["user_id"] == 1
     )
     assert "AliceCard在当前的历史记录如下：" in history_text, history_text
-    assert "👤：first line second line   🤖：bot reply visible" in history_text, history_text
-    assert "👤：what is n?   🤖：n is input" in history_text, history_text
+    assert "👤：first line second line\n🤖：bot reply visible" in history_text, history_text
+    assert "👤：what is n?\n🤖：n is input" in history_text, history_text
     assert "secret reason" not in history_text and "hidden clarify reason" not in history_text
     assert "submit" not in history_text and "incorrect" not in history_text
     assert _forwarded, "Expected history to be forwarded to group"

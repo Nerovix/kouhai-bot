@@ -662,7 +662,8 @@ def format_history_records(records: list[dict], *, user_display_name: str) -> st
         content = _one_line(item.get("content", ""))
         reply = _one_line(item.get("reply", ""))
         if content and reply:
-            lines.append(f"👤：{content}   🤖：{reply}")
+            lines.append(f"👤：{content}")
+            lines.append(f"🤖：{reply}")
         elif content:
             lines.append(f"👤：{content}")
         elif reply:

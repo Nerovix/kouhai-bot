@@ -37,6 +37,7 @@ from ...napcat.client import (
     send_private_msg,
 )
 from ...problems.picker import _normalize_sample_block
+from ...statement_render import image_message_from_path, render_text_to_png
 from .submit import run_group_state_update
 
 logger = logging.getLogger("kouhai-bot.cmd.newproblem")
@@ -223,6 +224,7 @@ def _save_daily_msg(
     sample_messages: list[str],
     notes_message: str,
     snake_enabled: bool,
+    rendered_paths: list[str] | None = None,
     node_payload: dict | None = None,
     fwd_message_id: int | None = None,
 ) -> None:
@@ -233,6 +235,7 @@ def _save_daily_msg(
         "sample_messages": sample_messages,
         "notes_message": notes_message,
         "snake_enabled": snake_enabled,
+        "rendered_paths": rendered_paths or [],
     }
     if fwd_message_id is not None:
         daily_msg["fwd_message_id"] = fwd_message_id
@@ -309,7 +312,21 @@ async def _send_problem_forward_card(
     snake_enabled: bool = True,
 ) -> tuple[int | None, dict]:
     cfg = get_config()
-    self_resp = await send_private_msg(cfg.bot_qq, build_plain_message(post_msg))
+
+    rendered_paths: list[str] = []
+
+    async def _send_text_node(text: str, slug: str) -> int | None:
+        try:
+            image_path = render_text_to_png(text, group_id=group_id, slug=slug)
+            rendered_paths.append(image_path)
+            resp = await send_private_msg(cfg.bot_qq, image_message_from_path(image_path))
+            if resp:
+                return resp
+        except Exception as e:
+            logger.warning(f"[group_{group_id}] Render/send image node failed ({slug}): {e}")
+        return await send_private_msg(cfg.bot_qq, build_plain_message(text))
+
+    self_resp = await _send_text_node(post_msg, "problem")
     if not self_resp:
         return None, {}
 
@@ -331,7 +348,7 @@ async def _send_problem_forward_card(
 
     sample_msg_ids: list[int] = []
     for i, sample_msg in enumerate(sample_messages, 1):
-        sample_resp = await send_private_msg(cfg.bot_qq, build_plain_message(sample_msg))
+        sample_resp = await _send_text_node(sample_msg, f"sample-{i}")
         if sample_resp:
             sample_msg_ids.append(sample_resp)
         else:
@@ -339,7 +356,7 @@ async def _send_problem_forward_card(
 
     note_msg_id = None
     if notes_message:
-        note_resp = await send_private_msg(cfg.bot_qq, build_plain_message(notes_message))
+        note_resp = await _send_text_node(notes_message, "notes")
         if note_resp:
             note_msg_id = note_resp
         else:
@@ -359,6 +376,7 @@ async def _send_problem_forward_card(
         "sample_msg_ids": sample_msg_ids,
         "note_msg_id": note_msg_id,
         "snake_msg_id": snake_msg_id,
+        "rendered_paths": rendered_paths,
     }
     return fwd_resp, payload
 
@@ -505,7 +523,20 @@ async def _do_daily_post_locked(
     )
     if not fwd_resp:
         logger.error(f"[group_{group_id}] Problem forward-card send failed, falling back to direct")
-        ok = await send_group_msg(group_id, build_plain_message(post_msg))
+        ok = None
+        sent_any_image = False
+        for image_path in node_payload.get("rendered_paths", []):
+            try:
+                ok = await send_group_msg(group_id, image_message_from_path(image_path))
+            except Exception as e:
+                logger.warning(f"[group_{group_id}] Direct rendered image send failed: {e}")
+            if not ok:
+                break
+            sent_any_image = True
+        if not ok and not sent_any_image:
+            ok = await send_group_msg(group_id, build_plain_message(post_msg))
+        elif sent_any_image:
+            ok = ok or True
         if ok:
             await _commit_problem_state(group_id, picked_state)
             try:
@@ -516,6 +547,7 @@ async def _do_daily_post_locked(
                     sample_messages=sample_messages,
                     notes_message=notes_message,
                     snake_enabled=True,
+                    rendered_paths=node_payload.get("rendered_paths", []),
                     node_payload=node_payload,
                 )
             except Exception as e:
@@ -543,6 +575,7 @@ async def _do_daily_post_locked(
             sample_messages=sample_messages,
             notes_message=notes_message,
             snake_enabled=True,
+            rendered_paths=node_payload.get("rendered_paths", []),
             node_payload=node_payload,
             fwd_message_id=fwd_resp,
         )

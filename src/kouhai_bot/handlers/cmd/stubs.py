@@ -109,6 +109,7 @@ async def handle_problem(group_id: int, user_id: int, sender: dict,
                     if pid:
                         save_problem_card_ref(group_id, fwd_resp, pid, "problem_resend")
                     daily_msg.update(node_payload)
+                    daily_msg["rendered_paths"] = node_payload.get("rendered_paths", [])
                     daily_msg["fwd_message_id"] = fwd_resp
                     with open(daily_msg_path, "w") as f:
                         json.dump(daily_msg, f, ensure_ascii=False, indent=2)
@@ -132,6 +133,11 @@ async def handle_tag(group_id: int, user_id: int, sender: dict,
     problem = get_today_problem(group_id)
     if not problem:
         await send_group_msg(group_id, build_plain_message(f"@{nickname} 还没有今日题目～"))
+        return
+    if not is_already_solved(group_id):
+        await send_group_msg(group_id, build_plain_message(
+            f"@{nickname} 当前题还没解出，tag 先保密哦～"
+        ))
         return
     tags = problem.get("tags", [])
     if not tags:

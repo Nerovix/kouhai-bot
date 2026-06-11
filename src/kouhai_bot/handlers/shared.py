@@ -130,7 +130,7 @@ def robust_json_parse(text: str) -> dict:
 
 # ── Problem statement loading ───────────────────────────────────────────
 
-def load_problem_statement(pid: str) -> str:
+def load_problem_statement(pid: str, *, include_identity: bool = True) -> str:
     """Load full problem statement from cache, formatted for LLM."""
     cfg = get_config()
     stmt_path = os.path.join(cfg.data_dir, "statements", f"{pid}.json")
@@ -141,7 +141,7 @@ def load_problem_statement(pid: str) -> str:
         stmt = json.load(f)
 
     parts = []
-    if stmt.get("name"):
+    if include_identity and stmt.get("name"):
         parts.append(f"Problem: {stmt['name']}")
     if stmt.get("time_limit"):
         parts.append(f"Time limit: {stmt['time_limit']}")

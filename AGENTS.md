@@ -152,6 +152,107 @@ NapCat runs in a Docker container and connects to the host via `host.docker.inte
 (Docker bridge IP: 172.17.0.1). If the bot binds to `127.0.0.1`, Docker containers
 CANNOT connect — they'll get ECONNREFUSED. Always use `0.0.0.0` when NapCat is in Docker.
 
+### NapCat Docker wiring checklist
+
+This bot is a **reverse WebSocket server** plus a **NapCat HTTP API client**:
+
+- `kouhai_bot.napcat.client.NapCatServer` listens on `napcat_ws_host:napcat_ws_port`;
+  NapCat must connect to it through a OneBot11 `websocketClients` entry.
+- Message sending uses `napcat_http_host:napcat_http_port` and calls NapCat OneBot11
+  HTTP actions such as `send_group_msg`, `send_private_msg`, and
+  `get_group_member_info`; NapCat must expose an enabled OneBot11 `httpServers`
+  entry on that port.
+
+When NapCat is deployed with Docker Compose, prefer this pattern:
+
+```yaml
+services:
+  napcat:
+    environment:
+      ACCOUNT: "<bot_qq>"  # enables fast login after the first successful login
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "3000:3000"  # OneBot HTTP API for bot -> NapCat actions
+      - "8095:8095"  # optional NapCat WS server ports for other clients
+      - "8096:8096"
+      - "8097:8097"
+      - "6099:6099"  # WebUI
+```
+
+NapCat OneBot11 config should include both sides:
+
+```json
+{
+  "network": {
+    "httpServers": [
+      {
+        "enable": true,
+        "name": "kouhai-http-api",
+        "host": "0.0.0.0",
+        "port": 3000,
+        "enableCors": true,
+        "enableWebsocket": false,
+        "messagePostFormat": "array",
+        "token": "",
+        "debug": false
+      }
+    ],
+    "websocketClients": [
+      {
+        "enable": true,
+        "name": "kouhai-bot-reverse-ws",
+        "url": "ws://host.docker.internal:<napcat_ws_port>",
+        "messagePostFormat": "array",
+        "reportSelfMessage": false,
+        "reconnectInterval": 5000,
+        "token": "",
+        "debug": false,
+        "heartInterval": 30000
+      }
+    ]
+  }
+}
+```
+
+Avoid using a bot `napcat_ws_port` that is already published by the NapCat container
+as a WebSocket **server** port. If Docker publishes `8095:8095`, `8096:8096`, and
+`8097:8097`, then the bot cannot also listen on host `8097`; `uv run restart` will
+fail with `OSError: [Errno 98] ... address already in use` or
+`Detached bot failed to bind NapCat WS port ...`. Pick a free host port such as
+`8098` for `config.yaml` and point NapCat `websocketClients[].url` at that same port.
+
+Troubleshooting symptoms:
+
+- `getaddrinfo ENOTFOUND host.docker.internal` in NapCat logs means the container
+  cannot resolve the host alias. Add Compose `extra_hosts:
+  ["host.docker.internal:host-gateway"]` and recreate the container.
+- Bot logs show `NapCat connected from ...`, but group replies do not send and
+  `send_group_msg failed: Server disconnected`: reverse WS is working, but NapCat's
+  OneBot HTTP server is missing or not loaded. Enable `httpServers` on
+  `napcat_http_port` and restart NapCat.
+- NapCat asks for a QR code after every restart even after a successful login:
+  set Compose `ACCOUNT: "<bot_qq>"` so the container starts QQ with `-q <bot_qq>`.
+
+Useful checks:
+
+```bash
+uv run status
+tail -n 80 ~/.kouhai-bot/logs/<group_id>/$(TZ=Asia/Shanghai date +%F).log
+docker logs --tail 160 napcat
+docker exec napcat getent hosts host.docker.internal
+curl -sS -X POST http://127.0.0.1:3000/get_status \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+Healthy state:
+
+- `uv run status` reports `occupied=yes` and `current_worktree_running=yes`.
+- Bot log contains `NapCat connected from ...`.
+- NapCat log contains `HTTP服务: 0.0.0.0:3000` and
+  `WebSocket反向服务: ws://host.docker.internal:<napcat_ws_port>`.
+- `get_status` returns JSON with `"online": true` and `"good": true`.
+
 ### LLM fallback
 
 Providers in `llm.providers` are tried **in list order**. Each provider is retried

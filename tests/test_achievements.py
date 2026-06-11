@@ -40,6 +40,7 @@ def _log_command(
     command: str,
     at: datetime,
     status: str = "ok",
+    extra: dict | None = None,
 ) -> None:
     with patch("kouhai_bot.eventlog.now_tz", return_value=at):
         meta = log_command_received(
@@ -51,7 +52,7 @@ def _log_command(
             raw_text=f"/{command} payload",
         )
     with patch("kouhai_bot.eventlog.now_tz", return_value=at + timedelta(seconds=2)):
-        log_command_finished(meta, status=status, problem="542D")
+        log_command_finished(meta, status=status, problem="542D", extra=extra)
 
 
 def test_achievement_window_uses_4am_cutoff():
@@ -130,6 +131,19 @@ def test_build_achievement_report_counts_window_and_statuses():
                 at=datetime(2026, 5, 15, 4, 1, tzinfo=TZ),
                 status="correct",
             )
+            _log_command(
+                user_id=4,
+                nickname="Carol",
+                command="sync",
+                at=datetime(2026, 5, 14, 7, 30, tzinfo=TZ),
+                status="correct",
+                extra={
+                    "synced_submit_count": 2,
+                    "synced_correct_count": 1,
+                    "synced_clarify_count": 2,
+                    "synced_review_count": 3,
+                },
+            )
 
             report = build_achievement_report(
                 GID,
@@ -139,10 +153,10 @@ def test_build_achievement_report_counts_window_and_statuses():
         assert "统计窗口：05-14 04:00 ~ 05-15 04:00" in report
         assert "最早 submit：Alice（04:01）" in report
         assert "最晚 submit：Bob（03:50）" in report
-        assert "通过题目最多：Alice、Bob（1 次）" in report
+        assert "通过题目最多：Alice、Bob、Carol（1 次）" in report
         assert "submit 尝试最多：Alice（3 次）" in report
-        assert "review 最多：Alice（2 次）" in report
-        assert "clarify 最多：Bob（1 次）" in report
+        assert "review 最多：Carol（3 次）" in report
+        assert "clarify 最多：Carol（2 次）" in report
         assert "TooEarly" not in report
         assert "TooLate" not in report
     finally:

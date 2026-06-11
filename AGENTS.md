@@ -345,6 +345,10 @@ Private commands do not require @mentions and should not send @ segments back.
   correct after an earlier admitted submit had already solved the same problem; it is
   saved to user history but not counted as a new solve and does not send an extra
   user-visible message.
+- Group `/sync` writes `status="synced"` or `status="correct"` itself on success. Its
+  finished event includes `synced_submit_count`, `synced_clarify_count`,
+  `synced_review_count`, and `synced_correct_count` so private-judge records imported
+  into the group count in daily achievements.
 - Event files are partitioned by the event's real Asia/Shanghai date. Do not store
   04:00 logical-day values in the log; achievement/reporting code should read the
   relevant real-date files and filter by `timestamp`.
@@ -369,12 +373,12 @@ only. The event log still stores real timestamps and real local-date file partit
 
 The built-in scheduler job `daily_achievements` runs at 12:00 and reports:
 
-- earliest/latest `/submit`
-- most solved problems (`/submit` finished with `status="correct"`)
-- most `/submit` attempts (counted from received `/submit` commands, so superseded
-  `status="stale"` submits still count as attempts)
-- most `/review`
-- most `/clarify`
+- earliest/latest `/submit`, including group `/sync` commands that import submit records
+- most solved problems (`/submit status="correct"` plus successful scoring `/sync`)
+- most `/submit` attempts (received `/submit` commands plus submit records imported by
+  `/sync`; superseded `status="stale"` submits still count as attempts)
+- most `/review`, including review records imported by `/sync`
+- most `/clarify`, including clarify records imported by `/sync`
 
 Existing group scheduler configs that already enable `daily_post` are normalized to
 run `daily_achievements` immediately before it. Set
@@ -508,11 +512,14 @@ commands are rejected in private with a friendly message.
   only user-visible content as `👤：...` followed by `🤖：...` on the next line, omitting
   internal type/result/reason fields. If the history is too long for one node, chunk it
   like long `/review` output. If the source is empty, it sends only the friendly abort
-  message.
+  message. On successful group sync, react to the triggering message with `👌`
+  (`id=128076`) instead of sending a generic success message; private sync sends no
+  extra success text.
 - A normal user's private correct submit for the current group problem can score through
   group `/sync` if the group has not already solved that pid. Scoring is performed under
-  the group coordinator lock, schedules the official editorial follow-up, and writes the
-  private records into group `scoreboard.json`.
+  the group coordinator lock, reveals the original problem source, schedules the official
+  editorial follow-up, writes the private records into group `scoreboard.json`, and logs
+  the imported records for daily achievements.
 - Dynamic-wait/starred users redirected to private judge can still `/sync`, but only
   `clarify` records are copied; submit/review/correct records are ignored and never
   score.

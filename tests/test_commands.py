@@ -430,6 +430,7 @@ def _all_patches():
     stack.enter_context(patch("kouhai_bot.handlers.cmd.setproblem.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.sync.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.sync.send_private_msg", _mock_send_private))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.sync.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.editorial_followup.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.editorial_followup.send_group_forward_msg", _mock_send_group_forward))
     stack.enter_context(patch("kouhai_bot.private_judge.send_group_msg", _mock_send_group))
@@ -3634,18 +3635,40 @@ def test_sync_private_correct_current_problem_scores_for_normal_user():
         "problem": PID,
     }
 
-    with _all_patches():
+    with _all_patches(), patch(
+        "kouhai_bot.handlers.cmd.sync._reveal_problem_source",
+        AsyncMock(return_value="本题来自 CF542D✨"),
+    ):
         from kouhai_bot.private_judge import save_private_submission
         from kouhai_bot.handlers.cmd.sync import handle
+        from kouhai_bot.eventlog import EVENT_META_KEY, load_events, log_command_received
 
         save_private_submission(UID, private_record)
-        asyncio.run(handle(**_kwargs(_make_event("/sync"))))
+        event = _make_event("/sync")
+        event[EVENT_META_KEY] = log_command_received(
+            group_id=GID,
+            user_id=UID,
+            sender=event["sender"],
+            command="sync",
+            message_id=event["message_id"],
+            raw_text=event["raw_message"],
+        )
+        asyncio.run(handle(**_kwargs(event)))
+        logged_events = load_events(GID, event[EVENT_META_KEY]["date"])
 
     with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
         saved = json.load(f)
     assert saved["solves"] and str(saved["solves"][0]["user_id"]) == str(UID), saved
     assert saved["user_submissions"][str(UID)][0]["content"] == "private ac"
-    assert any("本题 +" in _last_text_item(item) for item in _sent), _sent
+    text = "\n".join(_last_text_item(item) for item in _sent)
+    assert "本题 +" in text, _sent
+    assert "本题来自 CF542D" in text, text
+    assert "已同步完成" not in text, text
+    assert ("msg_001", "128076") in _reacted, _reacted
+    finished = [item for item in logged_events if item.get("type") == "finished"]
+    assert finished and finished[-1]["status"] == "correct", finished
+    assert finished[-1]["synced_submit_count"] == 1, finished[-1]
+    assert finished[-1]["synced_correct_count"] == 1, finished[-1]
     _cleanup()
     print("✅ sync: private AC scores current group problem for normal user")
 
@@ -3694,6 +3717,8 @@ def test_sync_history_card_uses_friendly_visible_format():
     assert "secret reason" not in history_text and "hidden clarify reason" not in history_text
     assert "submit" not in history_text and "incorrect" not in history_text
     assert _forwarded, "Expected history to be forwarded to group"
+    assert not any("已同步完成" in _last_text_item(item) for item in _sent), _sent
+    assert ("msg_001", "128076") in _reacted, _reacted
     _cleanup()
     print("✅ sync: history card uses friendly visible format")
 
@@ -3770,6 +3795,8 @@ def test_private_sync_from_solved_group_marks_private_review_state():
         review_pid = get_private_review_pid(UID, GID)
 
     assert review_pid == PID
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "已同步完成" not in private_text, private_text
     _cleanup()
     print("✅ sync: solved group state is persisted for private review")
 

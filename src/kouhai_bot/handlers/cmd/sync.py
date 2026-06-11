@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 
 from .. import registry
 from ..registry import CommandDef
-from ...napcat.client import build_at, build_plain_message, build_text, send_group_msg, send_private_msg
+from ...eventlog import EVENT_META_KEY, log_command_finished
+from ...napcat.client import build_at, build_plain_message, build_text, react_emoji, send_group_msg, send_private_msg
 from ...private_judge import (
     GROUP_SCOPE,
     PRIVATE_SCOPE,
@@ -35,6 +37,7 @@ from ..shared import (
     rating_to_points,
 )
 from .submit import (
+    _reveal_problem_source,
     _update_scoreboard_for_pid,
     has_active_problem_request,
     run_group_state_update,
@@ -42,6 +45,7 @@ from .submit import (
 from ...editorial_followup import schedule_post_solve_editorial_followup
 
 logger = logging.getLogger("kouhai-bot.cmd.sync")
+OK_REACTION_ID = "128076"
 
 
 def _is_starred_limited(user_id: int) -> bool:
@@ -70,12 +74,29 @@ async def _send_text(scope: str, group_id: int, user_id: int, text: str) -> None
         await send_group_msg(group_id, [build_at(user_id), build_text(f" {text}")])
 
 
-async def _score_synced_private_ac(group_id: int, user_id: int, sender: dict, pid: str) -> str:
+async def _react_group_success(message_id: str) -> None:
+    try:
+        await react_emoji(message_id, OK_REACTION_ID)
+    except Exception as e:
+        logger.warning("failed to react to successful sync %s: %s", message_id, e)
+
+
+def _synced_record_counts(records: list[dict], *, scored_correct: bool) -> dict[str, int]:
+    counter = Counter(str(item.get("type", "") or "") for item in records if isinstance(item, dict))
+    return {
+        "synced_submit_count": int(counter.get("submit", 0)),
+        "synced_clarify_count": int(counter.get("clarify", 0)),
+        "synced_review_count": int(counter.get("review", 0)),
+        "synced_correct_count": 1 if scored_correct else 0,
+    }
+
+
+async def _score_synced_private_ac(group_id: int, user_id: int, sender: dict, pid: str) -> tuple[str, bool]:
     problem = get_today_problem(group_id)
     if not problem or str(problem.get("today", "") or "") != pid:
-        return ""
+        return "", False
     if is_group_problem_solved(group_id, pid):
-        return "群里已经有人先通过这题了，本次只同步记录，不再加分。"
+        return "群里已经有人先通过这题了，本次只同步记录，不再加分。", False
 
     nickname = sender.get("card") or sender.get("nickname") or str(user_id)
 
@@ -87,7 +108,7 @@ async def _score_synced_private_ac(group_id: int, user_id: int, sender: dict, pi
 
     updated = await run_group_state_update(group_id, _update)
     if updated is None:
-        return "群里已经有人先通过这题了，本次只同步记录，不再加分。"
+        return "群里已经有人先通过这题了，本次只同步记录，不再加分。", False
     is_fb, solved, top5, sb = updated
     ranked = []
     try:
@@ -116,8 +137,11 @@ async def _score_synced_private_ac(group_id: int, user_id: int, sender: dict, pi
             lines.append(
                 f"{entry['rank']}. {name} ({entry['solved']} 题，{format_points(entry['score'])} 分)"
             )
+    reveal = await _reveal_problem_source(group_id)
+    if reveal:
+        lines.extend(["", reveal])
     schedule_post_solve_editorial_followup(group_id, pid)
-    return "\n".join(lines)
+    return "\n".join(lines), True
 
 
 async def handle(group_id: int, user_id: int, sender: dict,
@@ -206,16 +230,27 @@ async def handle(group_id: int, user_id: int, sender: dict,
     )
 
     extra = ""
+    scored_correct = False
     if target_scope == GROUP_SCOPE and source_scope == PRIVATE_SCOPE and not starred_limited:
         if private_record_has_correct(source_records, pid):
-            extra = await _score_synced_private_ac(group_id, user_id, sender, pid)
+            extra, scored_correct = await _score_synced_private_ac(group_id, user_id, sender, pid)
     elif starred_limited:
         extra = "打星模式下本次只同步 clarify，submit/review/通过记录已忽略。"
 
-    text = "已同步完成。"
-    if extra:
-        text += "\n" + extra
-    await _send_text(target_scope, group_id, user_id, text)
+    if target_scope == GROUP_SCOPE:
+        await _react_group_success(message_id)
+        log_command_finished(
+            event.get(EVENT_META_KEY),
+            status="correct" if scored_correct else "synced",
+            problem=pid,
+            extra={
+                **_synced_record_counts(source_records, scored_correct=scored_correct),
+                "source_scope": source_scope,
+                "target_scope": target_scope,
+            },
+        )
+        if extra:
+            await _send_text(target_scope, group_id, user_id, extra)
 
 
 def register() -> None:

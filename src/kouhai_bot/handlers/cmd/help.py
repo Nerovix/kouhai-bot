@@ -61,6 +61,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
         build_plain_message,
         send_group_msg,
         send_private_msg,
+        send_private_forward_msg,
         send_group_forward_msg,
     )
     cfg = get_config()
@@ -90,6 +91,14 @@ async def handle(group_id: int, user_id: int, sender: dict,
     msg = build_plain_message(text)
 
     if is_private:
+        self_resp = await send_private_msg(cfg.bot_qq, msg)
+        if self_resp:
+            await asyncio.sleep(0.5)
+            fwd_resp = await send_private_forward_msg(user_id, [
+                {"type": "node", "data": {"id": str(self_resp)}},
+            ])
+            if fwd_resp:
+                return
         await send_private_msg(user_id, msg)
         return
 

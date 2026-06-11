@@ -45,12 +45,12 @@ _PRIVATE_STATE_LOAD_WARNED: set[str] = set()
 
 _CF_API = "https://codeforces.com/api/problemset.problems"
 _PROBLEM_RE = re.compile(r"^(?:CF)?(\d+)([A-Za-z][A-Za-z0-9]*)$", re.I)
-_PROBLEMSET_URL_RE = re.compile(
-    r"https?://(?:www\.)?codeforces\.com/problemset/problem/(\d+)/([A-Za-z0-9]+)",
+_PROBLEM_PATH_RE = re.compile(
+    r"(?:^|/)(?:problemset/)?problem/(\d+)/([A-Za-z0-9]+)(?:[/?#]|$)",
     re.I,
 )
-_CONTEST_URL_RE = re.compile(
-    r"https?://(?:www\.)?codeforces\.com/contest/(\d+)/problem/([A-Za-z0-9]+)",
+_CONTEST_PATH_RE = re.compile(
+    r"(?:^|/)contest/(\d+)/problem/([A-Za-z0-9]+)(?:[/?#]|$)",
     re.I,
 )
 
@@ -321,7 +321,7 @@ def parse_problem_ref(text: str) -> tuple[int, str] | None:
     value = (text or "").strip()
     if not value:
         return None
-    for pattern in (_PROBLEMSET_URL_RE, _CONTEST_URL_RE):
+    for pattern in (_CONTEST_PATH_RE, _PROBLEM_PATH_RE):
         match = pattern.search(value)
         if match:
             return int(match.group(1)), match.group(2).upper()

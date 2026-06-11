@@ -85,7 +85,8 @@ async def handle(group_id: int, user_id: int, sender: dict,
         parsed = parse_problem_ref(arg)
         if not parsed:
             await send_private_msg(user_id, build_plain_message(
-                "我没认出这道题～可以发 CF2234B、2234B，或者 Codeforces 题目链接。"
+                "我没认出这道题～可以发 CF2234B、2234B、Codeforces 题目链接，"
+                "或者 /contest/2233/problem/F 这样的路径。"
             ))
             return
         pid = problem_id_from_ref(*parsed)

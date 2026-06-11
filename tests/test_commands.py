@@ -1622,6 +1622,38 @@ def test_submit_operation_not_blocked():
     print("✅ submit: 操作 not blocked")
 
 
+def test_private_submit_sends_ack_face_instead_of_reaction():
+    _reset_state()
+    _setup_problem()
+    global _deepseek_response
+    _deepseek_response = {
+        "correct": False,
+        "reason": "做法还不够完整",
+        "reply": "再补一下关键证明～",
+        "reaction": "",
+    }
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.submit import handle
+        from kouhai_bot.handlers.shared import get_today_problem
+        from kouhai_bot.private_judge import set_private_current_problem
+
+        set_private_current_problem(UID, get_today_problem(GID))
+        asyncio.run(handle(**_kwargs(_make_private_event("/submit try dp"))))
+
+    faces = [
+        seg.get("data", {}).get("id")
+        for item in _private_sent if item["user_id"] == UID
+        for seg in item["message"] if isinstance(seg, dict) and seg.get("type") == "face"
+    ]
+    assert any(face in {"128064", "289"} for face in faces), f"Expected private ack face, got: {_private_sent}"
+    assert not _reacted, f"Private submit should not use group reactions: {_reacted}"
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
+    assert "关键证明" in private_text, private_text
+    _cleanup()
+    print("✅ private submit: ack uses face message")
+
+
 def test_submit_no_problem():
     """No problem → appropriate message."""
     _reset_state()
@@ -2150,8 +2182,11 @@ def test_private_help_only_shows_private_judge_commands():
         discover_commands()
         asyncio.run(handle(**_kwargs(_make_private_event("/help"))))
 
-    assert _private_sent, "Expected private help to send directly"
-    msg = _private_sent[-1]["message"]
+    assert _private_forwarded, "Expected private help to be sent as a forward card"
+    assert _private_forwarded[-1]["user_id"] == UID, _private_forwarded
+    self_sends = [item for item in _private_sent if item["user_id"] == 1]
+    assert self_sends, "Expected private help to self-send before forward"
+    msg = self_sends[-1]["message"]
     text = " ".join(
         seg.get("data", {}).get("text", "")
         for seg in msg if isinstance(seg, dict) and seg.get("type") == "text"
@@ -3388,6 +3423,31 @@ def test_submit_user_group_blocked_uses_dynamic_wait():
     print("✅ submit: dynamic wait redirects to private")
 
 
+def test_parse_problem_ref_accepts_loose_codeforces_links():
+    from kouhai_bot.private_judge import parse_problem_ref, problem_id_from_ref
+
+    cases = {
+        "CF2234B": "2234B",
+        "2234B": "2234B",
+        "https://codeforces.com/contest/2233/problem/F": "2233F",
+        "codeforces.com/contest/2233/problem/F": "2233F",
+        "/contest/2233/problem/F": "2233F",
+        "contest/2233/problem/F": "2233F",
+        "https://codeforces.com/problemset/problem/2234/B": "2234B",
+        "codeforces.com/problemset/problem/2234/B": "2234B",
+        "/problemset/problem/2234/B": "2234B",
+        "problem/2230/F": "2230F",
+        "problem/2230/F?locale=en": "2230F",
+    }
+    for raw, expected in cases.items():
+        parsed = parse_problem_ref(raw)
+        assert parsed is not None, raw
+        assert problem_id_from_ref(*parsed) == expected, (raw, parsed)
+
+    assert parse_problem_ref("contest/abc/problem/F") is None
+    print("✅ private setproblem: accepts loose Codeforces links")
+
+
 def test_private_setproblem_current_copies_empty_private_history():
     _reset_state()
     _setup_problem_for(GID, PID)
@@ -3830,6 +3890,7 @@ if __name__ == "__main__":
     test_review_after_pending_submit_uses_snapshotted_solved_problem()
     test_submit_off_topic()
     test_submit_operation_not_blocked()
+    test_private_submit_sends_ack_face_instead_of_reaction()
     test_submit_no_problem()
     test_clarify_with_problem()
     test_clarify_no_problem()
@@ -3845,6 +3906,7 @@ if __name__ == "__main__":
     test_scoreboard_with_data()
     test_scoreboard_splits_default_and_starred_groups()
     test_help_shows_short_aliases_and_configured_newproblem_cooldown()
+    test_private_help_only_shows_private_judge_commands()
     test_newproblem_cooldown()
     test_newproblem_busy_rejects_concurrent_force()
     test_newproblem_unsolved_rejects()
@@ -3872,4 +3934,5 @@ if __name__ == "__main__":
     test_submit_starred_user_shows_own_group_top5()
     test_submit_alias_dispatches_to_submit_handler()
     test_submit_user_group_blocked_within_window()
+    test_parse_problem_ref_accepts_loose_codeforces_links()
     print(f"\n🎉 E2E tests passed")

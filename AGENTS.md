@@ -18,6 +18,8 @@ NapCat (QQ) ──WS──> worker.py
 - **Limited aliases**: Only six short aliases are supported: `/newproblem`→`/np`, `/problem`→`/pb`, `/submit`→`/sbm`, `/review`→`/rv`, `/clarify`→`/clrf`, `/setproblem`→`/sp`. Old aliases such as `/sb`, `/排名`, and Chinese aliases remain unsupported. New commands default to `aliases=[]` unless explicitly approved.
 - **Help auto-generation**: `handlers/cmd/help.py` reads `registry.all_commands()` and builds the help text dynamically. Descriptions must match old bridge.py wording.
   `usage` field = args suffix in /help display (e.g. `usage="你的做法"` → `/submit 你的做法`). Group help hides private-only details for `/setproblem` and `/sync` and only briefly mentions private judge; private help lists the private-judge command set.
+  Group and private help are both delivered as merged-forward cards, with direct text
+  only as fallback.
 - **Scheduler current-group config**: `~/.kouhai-bot/scheduler_config.json` stores job list + time overrides for `CURRENT_GROUP`. Jobs are defined in `scheduler/jobs.py`.
 - **Command event log**: `eventlog.py` writes append-only JSONL command events by real local date. `achievements.py` reads those events for the 04:00-to-04:00 daily report. `eventlog_backfill.py` and `tools/backfill_command_events.py` can reconstruct recent saved submit/clarify/review events from `scoreboard.json`.
 - **Formula VL**: `problems/fetcher.py` handles CF formula images → Qwen-VL → inline LaTeX. Has white-bg preprocessing, hallucination detection, retry.
@@ -490,7 +492,8 @@ commands are rejected in private with a friendly message.
 - Private and group contexts are independent by default. `copy_records()` is used when
   copying history between sides so later writes do not share dict instances.
 - `/setproblem` (`/sp`) is private-only. Empty args select the current group problem;
-  `CF2234B`, `2234B`, Codeforces problemset/contest links, and `random` are supported.
+  `CF2234B`, `2234B`, Codeforces problemset/contest links, path fragments such as
+  `/contest/2233/problem/F` and `problem/2230/F`, and `random` are supported.
   If private history is empty and group history exists for the selected pid, it copies
   group history into private. If the group has already solved that pid, it marks private
   review as available. It sends a private problem card, preferring the current group's

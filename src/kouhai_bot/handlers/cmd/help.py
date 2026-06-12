@@ -75,7 +75,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
         lines.append(
             "🔒 private judge：私聊可用 /setproblem(/sp) 选当前群题、CF题号/链接或 random；"
             "private 通过不自动加分，只有当前群题可在群里 /sync 同步。"
-            "/sync 会用另一侧记录覆盖当前侧，可能丢掉当前侧这题交流历史；打星用户只同步 clarify。"
+            "/sync 会用另一侧记录覆盖当前侧，可能丢掉当前侧这题交流历史；打星用户提交 CD 内只同步 clarify，CD 后可正常同步。"
         )
     else:
         visible = [cmd for cmd in cmds if cmd.name not in _GROUP_HELP_HIDDEN_COMMANDS]

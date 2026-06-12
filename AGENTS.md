@@ -640,9 +640,11 @@ commands are rejected in private with a friendly message.
   the group coordinator lock, reveals the original problem source, schedules the official
   editorial follow-up, writes the private records into group `scoreboard.json`, and logs
   the imported records for daily achievements.
-- Dynamic-wait/starred users redirected to private judge can still `/sync`, but only
-  `clarify` records are copied; submit/review/correct records are ignored and never
-  score.
+- Dynamic-wait/starred users redirected to private judge can still `/sync`. While
+  their current group problem submit CD is active, only `clarify` records are copied
+  in either direction and submit/review/correct records are ignored. Once the CD
+  expires, `/sync` behaves like it does for normal users, including private AC scoring
+  when the group has not already solved that pid.
 
 ### 8.5. Review parallelism depends on enqueue-time pid snapshot
 If `/review` is meant to compute in parallel with later same-group requests, do not

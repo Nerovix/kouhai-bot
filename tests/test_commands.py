@@ -446,6 +446,23 @@ def _all_patches():
     return stack
 
 
+def _starred_config_for_user(user_id: int = UID, *, submit_delay_sec: int = 300) -> _LazyConfig:
+    lazy = _LazyConfig()
+    lazy._config = {
+        **_config_dict(),
+        "user_groups": [
+            UserGroupConfig(
+                name="starred",
+                display_name="打星",
+                user_ids=[user_id],
+                submit_delay_sec=submit_delay_sec,
+                submit_delay_message="将机会多留给年轻人吧～{wait}",
+            )
+        ],
+    }
+    return lazy
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Tests: /submit
 # ═══════════════════════════════════════════════════════════════════════
@@ -3989,6 +4006,152 @@ def test_sync_private_correct_current_problem_scores_for_normal_user():
     print("✅ sync: private AC scores current group problem for normal user")
 
 
+def test_starred_sync_within_cd_only_syncs_clarify_and_rejects_empty_source():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_state(GID, {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+        "date": "2026-05-14",
+        "posted_at": int(time.time()),
+    })
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    private_record = {
+        "timestamp": "2026-05-14T12:00:00+08:00",
+        "type": "submit",
+        "content": "private ac in cd",
+        "result": "correct",
+        "reason": "ok",
+        "reply": "",
+        "problem": PID,
+    }
+
+    with _all_patches(), patch("kouhai_bot.config._config", _starred_config_for_user()):
+        from kouhai_bot.private_judge import save_private_submission
+        from kouhai_bot.handlers.cmd.sync import handle
+
+        save_private_submission(UID, private_record)
+        asyncio.run(handle(**_kwargs(_make_event("/sync"))))
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    assert saved.get("solves", []) == [], saved
+    assert saved.get("user_submissions", {}) == {}, saved
+    text = "\n".join(_last_text_item(item) for item in _sent)
+    assert "打星用户" in text and "CD 内" in text and "仅能同步 clarify" in text, text
+    assert "没有可同步的 clarify" in text, text
+    assert not _reacted, _reacted
+    _cleanup()
+    print("✅ sync: starred user in CD cannot sync private submit")
+
+
+def test_starred_sync_after_cd_scores_like_normal_user():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_state(GID, {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+        "date": "2026-05-14",
+        "posted_at": int(time.time()) - 301,
+    })
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    private_record = {
+        "timestamp": "2026-05-14T12:00:00+08:00",
+        "type": "submit",
+        "content": "private ac after cd",
+        "result": "correct",
+        "reason": "ok",
+        "reply": "",
+        "problem": PID,
+    }
+
+    with _all_patches(), patch("kouhai_bot.config._config", _starred_config_for_user()), patch(
+        "kouhai_bot.handlers.cmd.sync._reveal_problem_source",
+        AsyncMock(return_value=""),
+    ):
+        from kouhai_bot.private_judge import save_private_submission
+        from kouhai_bot.handlers.cmd.sync import handle
+
+        save_private_submission(UID, private_record)
+        asyncio.run(handle(**_kwargs(_make_event("/sync"))))
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    assert saved["solves"] and str(saved["solves"][0]["user_id"]) == str(UID), saved
+    assert saved["user_submissions"][str(UID)][0]["content"] == "private ac after cd"
+    text = "\n".join(_last_text_item(item) for item in _sent)
+    assert "本题 +" in text, text
+    assert "CD 内" not in text and "仅同步 clarify" not in text, text
+    assert ("msg_001", "128076") in _reacted, _reacted
+    _cleanup()
+    print("✅ sync: starred user after CD scores like normal user")
+
+
+def test_private_sync_for_starred_user_within_cd_only_syncs_clarify():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_state(GID, {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+        "date": "2026-05-14",
+        "posted_at": int(time.time()),
+    })
+    group_clarify = {
+        "timestamp": "2026-05-14T12:00:00+08:00",
+        "type": "clarify",
+        "content": "group clarify",
+        "result": "clarify",
+        "reply": "group reply",
+        "problem": PID,
+    }
+    group_submit = {
+        "timestamp": "2026-05-14T12:01:00+08:00",
+        "type": "submit",
+        "content": "group ac should not sync during cd",
+        "result": "correct",
+        "reason": "ok",
+        "reply": "",
+        "problem": PID,
+    }
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {str(UID): [group_clarify, group_submit]}})
+
+    with _all_patches(), patch("kouhai_bot.config._config", _starred_config_for_user()):
+        from kouhai_bot.private_judge import load_private_state, set_private_current_problem
+        from kouhai_bot.handlers.cmd.sync import handle
+
+        set_private_current_problem(UID, {
+            "today": PID,
+            "contestId": 542,
+            "index": "D",
+            "name": "Superhero's Job",
+            "rating": 2600,
+            "tags": [],
+        })
+        asyncio.run(handle(**_kwargs(_make_private_event("/sync"))))
+        private_state = load_private_state(UID)
+
+    records = [item for item in private_state["user_submissions"] if item.get("problem") == PID]
+    assert len(records) == 1 and records[0]["type"] == "clarify", records
+    assert records[0]["content"] == "group clarify", records
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "打星用户" in private_text and "CD 内" in private_text and "仅同步 clarify" in private_text, private_text
+    assert "group ac should not sync" not in private_text, private_text
+    _cleanup()
+    print("✅ private sync: starred user in CD only syncs clarify")
+
+
 def test_sync_history_card_uses_friendly_visible_format():
     _reset_state()
     _setup_problem_for(GID, PID)
@@ -4193,5 +4356,13 @@ if __name__ == "__main__":
     test_submit_starred_user_shows_own_group_top5()
     test_submit_alias_dispatches_to_submit_handler()
     test_submit_user_group_blocked_within_window()
+    test_sync_aborts_when_source_has_no_history_without_clearing_target()
+    test_sync_private_correct_current_problem_scores_for_normal_user()
+    test_starred_sync_within_cd_only_syncs_clarify_and_rejects_empty_source()
+    test_starred_sync_after_cd_scores_like_normal_user()
+    test_private_sync_for_starred_user_within_cd_only_syncs_clarify()
+    test_sync_history_card_uses_friendly_visible_format()
+    test_sync_history_card_chunks_long_history()
+    test_private_sync_from_solved_group_marks_private_review_state()
     test_parse_problem_ref_accepts_loose_codeforces_links()
     print(f"\n🎉 E2E tests passed")

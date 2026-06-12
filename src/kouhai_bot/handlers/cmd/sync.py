@@ -27,7 +27,7 @@ from ...private_judge import (
     replace_private_problem_history,
     send_history_card,
 )
-from ...user_groups import get_user_group, is_dynamic_submit_delay_enabled
+from ...user_groups import get_user_group, is_dynamic_submit_delay_enabled, submit_remaining_sec
 from ..shared import (
     fetch_group_member_nickname_map,
     format_points,
@@ -48,8 +48,8 @@ logger = logging.getLogger("kouhai-bot.cmd.sync")
 OK_REACTION_ID = "128076"
 
 
-def _is_starred_limited(user_id: int) -> bool:
-    return is_dynamic_submit_delay_enabled(get_user_group(user_id))
+def _is_starred_limited(user_id: int, group_id: int) -> bool:
+    return is_dynamic_submit_delay_enabled(get_user_group(user_id)) and submit_remaining_sec(user_id, group_id) > 0
 
 
 def _only_clarifies(records: list[dict]) -> list[dict]:
@@ -183,7 +183,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
     else:
         source_records = group_problem_history(group_id, user_id, pid)
 
-    starred_limited = _is_starred_limited(user_id)
+    starred_limited = _is_starred_limited(user_id, group_id)
     if starred_limited:
         source_records = _only_clarifies(source_records)
 
@@ -193,6 +193,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
                 target_scope,
                 group_id,
                 user_id,
+                "你是打星用户且目前还在提交 CD 内，仅能同步 clarify 记录；"
                 "对面没有可同步的 clarify 记录，本次 sync 已取消，没有覆盖任何历史。",
             )
         else:
@@ -235,7 +236,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
         if private_record_has_correct(source_records, pid):
             extra, scored_correct = await _score_synced_private_ac(group_id, user_id, sender, pid)
     elif starred_limited:
-        extra = "打星模式下本次只同步 clarify，submit/review/通过记录已忽略。"
+        extra = "你是打星用户且目前还在提交 CD 内，本次仅同步 clarify，submit/review/通过记录已忽略。"
 
     if target_scope == GROUP_SCOPE:
         await _react_group_success(message_id)
@@ -251,6 +252,8 @@ async def handle(group_id: int, user_id: int, sender: dict,
         )
         if extra:
             await _send_text(target_scope, group_id, user_id, extra)
+    elif extra:
+        await _send_text(target_scope, group_id, user_id, extra)
 
 
 def register() -> None:

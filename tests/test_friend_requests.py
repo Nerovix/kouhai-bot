@@ -158,3 +158,40 @@ def test_doubt_friend_request_from_non_member_is_ignored(monkeypatch):
 
     assert approved == 0
     assert calls == []
+
+
+def test_private_dispatch_uses_shared_service_group_member_check(monkeypatch):
+    calls = []
+
+    async def fake_handler(**kwargs):
+        calls.append(kwargs)
+
+    async def fake_is_service_group_member(group_id, user_id):
+        assert group_id == 999999
+        assert user_id == 456
+        return True
+
+    monkeypatch.setattr("kouhai_bot.handlers.get_config", _cfg)
+    monkeypatch.setattr("kouhai_bot.handlers.is_service_group_member", fake_is_service_group_member)
+    monkeypatch.setattr(
+        "kouhai_bot.handlers.registry.get",
+        lambda name: SimpleNamespace(name="status", handler=fake_handler) if name == "status" else None,
+    )
+
+    event = {
+        "type": "message",
+        "message_type": "private",
+        "group_id": 0,
+        "user_id": 456,
+        "sender": {"nickname": "Tester", "card": "", "user_id": 456},
+        "message_id": "priv-1",
+        "raw_message": "/status",
+        "message": [{"type": "text", "data": {"text": "/status"}}],
+        "raw": {},
+    }
+
+    asyncio.run(process_event(event, spawn_handlers=False))
+
+    assert len(calls) == 1
+    assert calls[0]["group_id"] == 999999
+    assert calls[0]["user_id"] == 456

@@ -15,7 +15,7 @@ from ..eventlog import (
     log_command_finished,
     log_command_received,
 )
-from ..friend_requests import handle_friend_request_event
+from ..friend_requests import handle_friend_request_event, is_service_group_member
 from ..napcat.client import (
     build_plain_message,
     build_reply,
@@ -167,7 +167,7 @@ async def process_event(
                 "这个命令暂时只能在服务群里使用～private judge 可用 /help 查看支持的命令。"
             ))
             return
-        if not await _is_service_group_member(group_id, user_id):
+        if not await is_service_group_member(group_id, user_id):
             await send_private_msg(user_id, build_plain_message(
                 "private judge 目前只服务当前服务群成员。如果你已经在群里，稍后再试试。"
             ))

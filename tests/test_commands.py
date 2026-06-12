@@ -1624,7 +1624,7 @@ def test_submit_operation_not_blocked():
     print("✅ submit: 操作 not blocked")
 
 
-def test_private_submit_sends_ack_face_instead_of_reaction():
+def test_private_submit_sends_text_ack_instead_of_face_or_reaction():
     _reset_state()
     _setup_problem()
     global _deepseek_response
@@ -1643,17 +1643,38 @@ def test_private_submit_sends_ack_face_instead_of_reaction():
         set_private_current_problem(UID, get_today_problem(GID))
         asyncio.run(handle(**_kwargs(_make_private_event("/submit try dp"))))
 
-    faces = [
-        seg.get("data", {}).get("id")
+    face_segments = [
+        seg
         for item in _private_sent if item["user_id"] == UID
         for seg in item["message"] if isinstance(seg, dict) and seg.get("type") == "face"
     ]
-    assert any(face in {"128064", "289"} for face in faces), f"Expected private ack face, got: {_private_sent}"
+    assert not face_segments, f"Private ack should avoid face segments NapCat may reject: {_private_sent}"
     assert not _reacted, f"Private submit should not use group reactions: {_reacted}"
     private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
+    assert any(token in private_text for token in ("👀", "[睁眼]")), private_text
     assert "关键证明" in private_text, private_text
     _cleanup()
-    print("✅ private submit: ack uses face message")
+    print("✅ private submit: ack uses safe text message")
+
+
+def test_private_clear_invalid_usage_sends_text_ack_instead_of_face():
+    _reset_state()
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.clear import handle
+        asyncio.run(handle(**_kwargs(_make_private_event("/clear now"))))
+
+    face_segments = [
+        seg
+        for item in _private_sent if item["user_id"] == UID
+        for seg in item["message"] if isinstance(seg, dict) and seg.get("type") == "face"
+    ]
+    assert not face_segments, f"Private clear ack should avoid face segments: {_private_sent}"
+    assert not _reacted, f"Private clear should not use group reactions: {_reacted}"
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
+    assert "👌" in private_text, private_text
+    _cleanup()
+    print("✅ private clear invalid usage: ack uses safe text message")
 
 
 def test_submit_no_problem():
@@ -4077,7 +4098,8 @@ if __name__ == "__main__":
     test_review_after_pending_submit_uses_snapshotted_solved_problem()
     test_submit_off_topic()
     test_submit_operation_not_blocked()
-    test_private_submit_sends_ack_face_instead_of_reaction()
+    test_private_submit_sends_text_ack_instead_of_face_or_reaction()
+    test_private_clear_invalid_usage_sends_text_ack_instead_of_face()
     test_submit_no_problem()
     test_clarify_with_problem()
     test_clarify_no_problem()

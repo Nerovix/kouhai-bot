@@ -74,7 +74,7 @@ from ...private_judge import (
 from ...tutorials import format_editorial_for_review, get_official_editorial
 from ...napcat.client import (
     build_at,
-    build_face,
+    build_private_reaction_message,
     build_plain_message,
     build_text,
     delete_msg,
@@ -297,7 +297,7 @@ async def _send_req_segments(req: PendingRequest, segments: list[dict]) -> int |
 
 async def _react_req(req: PendingRequest, emoji_id: str) -> None:
     if req.is_private:
-        await send_private_msg(req.user_id, [build_face(emoji_id)])
+        await send_private_msg(req.user_id, build_private_reaction_message(emoji_id))
         return
     await react_emoji(req.message_id, emoji_id)
 

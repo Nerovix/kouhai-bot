@@ -9,7 +9,7 @@ from .. import registry
 from ..registry import CommandDef
 from ...eventlog import EVENT_META_KEY
 from ...napcat.client import (
-    build_face,
+    build_private_reaction_message,
     send_private_msg,
     react_emoji,
 )
@@ -26,7 +26,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
     stripped = raw_text.strip()
     if not re.fullmatch(r"/clear(?:\s+)?", stripped):
         if scope == PRIVATE_SCOPE:
-            await send_private_msg(user_id, [build_face("10060")])
+            await send_private_msg(user_id, build_private_reaction_message("10060"))
         else:
             await react_emoji(message_id, "10060")
         return

@@ -26,6 +26,7 @@ NapCat (QQ) ──WS──> worker.py
 - **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before VL pipeline via `_vl_processed` flag. Stale caches with images are re-fetched with Qwen-VL. Problems with non-formula images (tex-graphics / diagrams) are skipped.
 - **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
 - **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection, dispatches commands, and owns the scheduler in one process. There is no SQLite event queue, ingress supervisor, worker hot-swap, or auto-update loop.
+- **Friend request auto-approval**: OneBot `post_type="request"` events are parsed by `napcat/client.py` and handled in `handlers.process_event()`. Only `request_type="friend"` is considered. The bot calls `set_friend_add_request` only when the requester is confirmed to be a member of `CURRENT_GROUP` via NapCat member lookup; lookup failure, malformed events, non-friend requests, and non-members are ignored without approving.
 - **User groups**: `user_groups.py` — all users default to `default`; `USER_GROUPS` configures
   non-default groups such as `starred`/`打星`, their members, submit delay, and rejection
   message. `submit_delay_sec > 0` enables dynamic per-user submit waits for that group:
@@ -159,9 +160,9 @@ This bot is a **reverse WebSocket server** plus a **NapCat HTTP API client**:
 - `kouhai_bot.napcat.client.NapCatServer` listens on `napcat_ws_host:napcat_ws_port`;
   NapCat must connect to it through a OneBot11 `websocketClients` entry.
 - Message sending uses `napcat_http_host:napcat_http_port` and calls NapCat OneBot11
-  HTTP actions such as `send_group_msg`, `send_private_msg`, and
-  `get_group_member_info`; NapCat must expose an enabled OneBot11 `httpServers`
-  entry on that port.
+  HTTP actions such as `send_group_msg`, `send_private_msg`,
+  `get_group_member_info`, and `set_friend_add_request`; NapCat must expose an
+  enabled OneBot11 `httpServers` entry on that port.
 
 When NapCat is deployed with Docker Compose, prefer this pattern:
 
@@ -431,6 +432,10 @@ Private dispatch maps DMs to `CURRENT_GROUP`, requires the sender to be a member
 service group, and only allows the private command whitelist: `/setproblem`, `/problem`,
 `/tag`, `/submit`, `/clarify`, `/review`, `/clear`, `/sync`, `/status`, and `/help`.
 Private commands do not require @mentions and should not send @ segments back.
+
+Friend request events are not commands and are not logged to command event logs.
+`process_event()` handles `type="request"` before message dispatch: it accepts only
+friend requests from confirmed `CURRENT_GROUP` members and otherwise returns silently.
 
 ### Command Event Log
 
@@ -874,20 +879,25 @@ See Configuration section above. Binding to `127.0.0.1` breaks Docker NapCat con
 NapCat's `set_msg_emoji_like` API expects `message_id` as int. Pass string and it
 silently fails.
 
-### 8. save_scoreboard needs indent=2
+### 8. Friend requests require confirmed service-group membership
+Auto-approval must remain fail-closed. Do not call `set_friend_add_request` unless
+NapCat confirms the requester is in `CURRENT_GROUP`; if member lookup fails, ignore
+the request rather than approving it.
+
+### 9. save_scoreboard needs indent=2
 Must pass `json.dump(sb, f, ensure_ascii=False, indent=2)` for backward compatibility
 with old scoreboard files.
 
-### 9. save_user_submission keeps full history
+### 10. save_user_submission keeps full history
 Per-user submission history is intentionally unbounded. Records with a `request_id`
 update the matching existing record in place; records without one append normally.
 
-### 10. Save Chinese summaries by pid if you need later reuse
+### 11. Save Chinese summaries by pid if you need later reuse
 The summary shown in the group post is now persisted in `groups/<gid>/problem_summaries.json`.
 Annotation export and the HTML labeling UI reuse this first before attempting any new
 translation. Do not force synchronous translation on detail-page clicks.
 
-### 11. Daily post uses merged-forward
+### 12. Daily post uses merged-forward
 `do_daily_post()` self-sends summary text, sample nodes, optional translated notes node,
 and snake image, then forwards them as one merged card. `daily_msg.json` must persist
 all node references (`msg_id`, `sample_msg_ids`, optional `note_msg_id`, `snake_msg_id`)
@@ -897,49 +907,49 @@ succeeds, `daily_msg.json` must still persist the current `pid` and rebuild inpu
 `state.json.today`.
 Complicated but essential for good UX.
 
-### 12. Dispatch uses create_task
+### 13. Dispatch uses create_task
 Commands are `asyncio.create_task`'d, not `await`ed. This prevents lightweight
 commands from queuing behind locked operations.
 
-### 13. Off-topic submissions are NOT saved
+### 14. Off-topic submissions are NOT saved
 If the judge returns `reaction: "123"`, the submission is marked as troll and
 NOT recorded to scoreboard. The save happens AFTER the reaction check.
 
-### 14. Do not add local off-topic blacklists for `/submit` or `/clarify`
+### 15. Do not add local off-topic blacklists for `/submit` or `/clarify`
 Off-topic handling belongs to the model output (`reaction="123"`), not substring
 matching in the command entrypoint. Local blacklists are too brittle and can
 misfire on normal solution text such as `操作`.
 
-### 15. Nickname fallback is user_id not "群友"
+### 16. Nickname fallback is user_id not "群友"
 `get_display_name()` / `_nick()` fall back to `str(user_id)` (as a string of digits),
 never a generic placeholder like "群友".
 
-### 16. Every message text matters
+### 17. Every message text matters
 The old bridge has specific wording for each message. Every difference was caught
 in review — validation messages, error messages, reminder text, greeting text.
 All must match exactly. See the commit history for the iterative alignment process.
 
-### 17. LaTeX in problem summaries
+### 18. LaTeX in problem summaries
 `summarize_problem()` prompt explicitly forbids LaTeX/markdown. The summary model
 sometimes still outputs LaTeX — ping the user if you see this happening.
 
-### 18. Annotation detail pages must not block on translation
+### 19. Annotation detail pages must not block on translation
 The annotation UI can show a placeholder for `summary_zh`, then fetch translation
 asynchronously. Clicking a problem in the left pane should open the right pane
 immediately; do not make `handle_detail()` await a long translation call.
 
-### 19. Active status tracking prevents confusing UX
+### 20. Active status tracking prevents confusing UX
 The scheduler exposes earliest active request metadata so `/status` can tell users
 there is in-flight stateful work. It is not a queue head and does not imply unrelated
 commands are blocked.
 
-### 20. Clarify reasoning controls
+### 21. Clarify reasoning controls
 `/clarify` sends `thinking={"type": "enabled"}` and `reasoning_effort` unconditionally.
 The upstream API silently ignores fields it doesn't support. The JSON output format
 may occasionally break if extra reasoning content leaks into the response —
 `robust_json_parse` handles this.
 
-### 21. `uv run start` / `restart` / `stop` / `status` are selected by NapCat WS port
+### 22. `uv run start` / `restart` / `stop` / `status` are selected by NapCat WS port
 The `start`, `restart`, `stop`, and `status` entrypoints must use the configured `NAPCAT_WS_PORT` to
 identify the target instance. Do not kill by broad process names like
 `kouhai_bot.worker`, because production and test instances may run at the same time.
@@ -949,45 +959,45 @@ start a fresh detached background instance. `uv run stop` should stop the existi
 listener on that port only. `uv run status` should report whether the port is occupied
 and whether the listener appears to come from the current worktree.
 
-### 22. Official tutorial: first AC only, two messages
+### 23. Official tutorial: first AC only, two messages
 Congrats must stay a direct `send_group_msg` with @mention. Editorial delivery is scheduled
 via `editorial_followup` **after** finalize returns (background task). Merged-forward when
 editorial exists; nothing sent when not. Never bundle congrats and editorial in one card.
 Never `await` editorial translation inside submit finalize — it blocks the whole group queue.
 
-### 23. Tutorial translation cache is per pid
+### 24. Tutorial translation cache is per pid
 `tutorial_translations/{pid}.txt` is not invalidated when scrape JSON changes. Delete the
 cache file to force re-translation after updating prompts or rescraping editorial text.
 
-### 24. Review vs group card use different editorial forms
+### 25. Review vs group card use different editorial forms
 `/review` gets English source (+ code in extracted text) for internal grounding.
 The post-AC card gets Chinese translation without code. Do not send Chinese translation
 into review unless product requirements change.
 
-### 25. Private judge sync must not erase on empty source
+### 26. Private judge sync must not erase on empty source
 `/sync` uses the other side as source and overwrites the current side for the current
 group problem only. If the source side has no records, abort with a friendly message and
 leave the target untouched. This protects users from accidental history loss.
 
-### 26. Private chats use messages, not group affordances
+### 27. Private chats use messages, not group affordances
 Private command handlers must not send @ segments or call `react_emoji`. Use plain
 private messages or face segments (`build_face`) instead. Long private review/history
 responses can use private merged-forward cards.
 
-### 27. Private problem cards should not reveal source identity
+### 28. Private problem cards should not reveal source identity
 When `/setproblem` builds a private card for an explicitly selected or random CF
 problem, the card title should stay generic. Do not include the original problem id,
 title, contest id, or rating there; anti-spoiler clarification also assumes the bot does
 not reveal the original problem identity to the user.
 
-### 27.5. High-rating problem cards need a caution
+### 28.5. High-rating problem cards need a caution
 After sending a problem card for a problem with rating greater than 2800, send a short
 follow-up warning that the problem is hard, the bot's reasoning may be limited, and the
 user should check the official/editorial solution if the bot seems wrong. Keep this as
 a separate message after the card, not inside private card titles where source identity
 could leak.
 
-### 28. Private judge state writes must be atomic
+### 29. Private judge state writes must be atomic
 `private_judge/users/<uid>.json` is user history, not a disposable cache. Write it via a
 same-directory temp file and `os.replace`, and log JSON/IO load failures before falling
 back to defaults so corruption or permission problems are diagnosable.

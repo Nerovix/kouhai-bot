@@ -12,10 +12,11 @@ _PRIVATE_HELP_COMMANDS = {
     "review",
     "clear",
     "sync",
+    "cd",
     "status",
     "help",
 }
-_GROUP_HELP_HIDDEN_COMMANDS = {"setproblem", "sync"}
+_GROUP_HELP_HIDDEN_COMMANDS = {"setproblem", "sync", "cd"}
 
 
 def _format_command_name(cmd: CommandDef) -> str:

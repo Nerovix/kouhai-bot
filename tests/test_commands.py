@@ -433,6 +433,8 @@ def _all_patches():
     stack.enter_context(patch("kouhai_bot.handlers.cmd.sync.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.sync.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.sync.react_emoji", _mock_react))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.cd.send_group_msg", _mock_send_group))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.cd.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.editorial_followup.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.editorial_followup.send_group_forward_msg", _mock_send_group_forward))
     stack.enter_context(patch("kouhai_bot.private_judge.send_group_msg", _mock_send_group))
@@ -2257,6 +2259,7 @@ def test_help_shows_short_aliases_and_configured_newproblem_cooldown():
     assert "/clarify(/clrf) 你的问题 — 向AI澄清题目细节，只回答题目本身不剧透做法" in text, text
     assert "/setproblem(/sp)" not in text, text
     assert "/sync —" not in text, text
+    assert "/cd —" not in text, text
     assert "private judge" in text and "详细用法请私聊发 /help" in text, text
     _cleanup()
     print("✅ help: aliases and dynamic cooldown")
@@ -2281,11 +2284,110 @@ def test_private_help_only_shows_private_judge_commands():
     )
     assert "/setproblem(/sp) [题号|链接|random] — 设置 private judge 当前题" in text, text
     assert "/sync — 在群聊和 private judge 间同步当前群题记录" in text, text
+    assert "/cd — 查看当前群题提交 CD" in text, text
     assert "/newproblem(/np)" not in text, text
     assert "/scoreboard" not in text, text
     assert "可能丢掉当前侧这题交流历史" in text, text
     _cleanup()
     print("✅ private help: filters group-only commands")
+
+
+def test_private_cd_allows_submit_when_no_cooldown_and_dispatches():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+
+    with _all_patches():
+        from kouhai_bot.handlers import process_event
+        from kouhai_bot.handlers.registry import discover_commands
+
+        discover_commands()
+        asyncio.run(process_event(_make_private_event("/cd"), spawn_handlers=False))
+
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
+    assert "你现在可以提交当前群内的题目！" in private_text, private_text
+    _cleanup()
+    print("✅ private cd: no cooldown allows submit")
+
+
+def test_private_cd_shows_remaining_for_starred_user():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_state(GID, {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+        "date": "2026-05-14",
+        "posted_at": 1000,
+    })
+
+    with _all_patches(), patch("kouhai_bot.config._config", _starred_config_for_user()), patch(
+        "kouhai_bot.user_groups.time.time",
+        return_value=1000,
+    ):
+        from kouhai_bot.handlers.cmd.cd import handle
+        asyncio.run(handle(**_kwargs(_make_private_event("/cd"))))
+
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
+    assert "你在5分钟后才能提交当前群内的题目，先休息一下吧～" in private_text, private_text
+    _cleanup()
+    print("✅ private cd: shows starred cooldown")
+
+
+def test_private_cd_formats_multi_unit_remaining():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_state(GID, {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+        "date": "2026-05-14",
+        "posted_at": 1000,
+    })
+
+    with _all_patches(), patch(
+        "kouhai_bot.config._config",
+        _starred_config_for_user(submit_delay_sec=90061),
+    ), patch("kouhai_bot.user_groups.time.time", return_value=1000):
+        from kouhai_bot.handlers.cmd.cd import handle
+        asyncio.run(handle(**_kwargs(_make_private_event("/cd"))))
+
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
+    assert "你在1天1小时1分钟1秒后才能提交当前群内的题目，先休息一下吧～" in private_text, private_text
+    _cleanup()
+    print("✅ private cd: formats multi-unit cooldown")
+
+
+def test_private_cd_allows_after_cooldown_expires():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_state(GID, {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+        "date": "2026-05-14",
+        "posted_at": 699,
+    })
+
+    with _all_patches(), patch("kouhai_bot.config._config", _starred_config_for_user()), patch(
+        "kouhai_bot.user_groups.time.time",
+        return_value=1000,
+    ):
+        from kouhai_bot.handlers.cmd.cd import handle
+        asyncio.run(handle(**_kwargs(_make_private_event("/cd"))))
+
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
+    assert "你现在可以提交当前群内的题目！" in private_text, private_text
+    _cleanup()
+    print("✅ private cd: allows after cooldown expires")
 
 
 def test_newproblem_cooldown():
@@ -4329,6 +4431,10 @@ if __name__ == "__main__":
     test_scoreboard_splits_default_and_starred_groups()
     test_help_shows_short_aliases_and_configured_newproblem_cooldown()
     test_private_help_only_shows_private_judge_commands()
+    test_private_cd_allows_submit_when_no_cooldown_and_dispatches()
+    test_private_cd_shows_remaining_for_starred_user()
+    test_private_cd_formats_multi_unit_remaining()
+    test_private_cd_allows_after_cooldown_expires()
     test_newproblem_cooldown()
     test_newproblem_busy_rejects_concurrent_force()
     test_newproblem_unsolved_rejects()

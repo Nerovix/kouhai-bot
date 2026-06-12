@@ -30,6 +30,8 @@ _sent: list[dict] = []
 _reacted: list[tuple] = []
 _private_sent: list[dict] = []
 _forwarded: list[dict] = []
+_private_forwarded: list[dict] = []
+_deleted: list[str] = []
 _deepseek_response: dict | None = None
 _group_members: dict[int, list[dict]] = {}
 _deepseek_calls: list[dict] = []
@@ -37,11 +39,13 @@ _temp_dir = None
 
 
 def _reset_state():
-    global _sent, _reacted, _private_sent, _forwarded, _deepseek_response, _group_members, _deepseek_calls, _temp_dir
+    global _sent, _reacted, _private_sent, _forwarded, _private_forwarded, _deleted, _deepseek_response, _group_members, _deepseek_calls, _temp_dir
     _sent.clear()
     _reacted.clear()
     _private_sent.clear()
     _forwarded.clear()
+    _private_forwarded.clear()
+    _deleted.clear()
     _deepseek_response = None
     _group_members = {
         GID: [
@@ -83,8 +87,10 @@ def _write_state(group_id: int, data: dict):
 def _write_statement(pid: str, data: dict):
     d = os.path.join(_data_dir(), "statements")
     os.makedirs(d, exist_ok=True)
+    payload = dict(data)
+    payload.setdefault("_vl_processed", True)
     with open(os.path.join(d, f"{pid}.json"), "w") as f:
-        json.dump(data, f)
+        json.dump(payload, f)
 
 
 def _write_scoreboard(group_id: int, data: dict):
@@ -156,6 +162,15 @@ async def _mock_send_private(user_id, message):
 async def _mock_send_group_forward(group_id, messages):
     _forwarded.append({"group_id": group_id, "messages": messages})
     return 2000 + len(_forwarded)
+
+
+async def _mock_send_private_forward(user_id, messages):
+    _private_forwarded.append({"user_id": user_id, "messages": messages})
+    return 3000 + len(_private_forwarded)
+
+
+async def _mock_delete_msg(message_id):
+    _deleted.append(str(message_id))
 
 
 async def _mock_http_post(action, data):
@@ -244,6 +259,21 @@ def _make_event(text="", group_id=GID, user_id=UID, message_id="msg_001", messag
         "type": "message",
         "message_type": "group",
         "group_id": group_id,
+        "user_id": user_id,
+        "sender": {"nickname": "Alice", "card": "", "user_id": user_id},
+        "message_id": message_id,
+        "raw_message": text,
+        "message": message,
+    }
+
+
+def _make_private_event(text="", user_id=UID, message_id="priv_001", message=None):
+    if message is None:
+        message = [{"type": "text", "data": {"text": text}}]
+    return {
+        "type": "message",
+        "message_type": "private",
+        "group_id": GID,
         "user_id": user_id,
         "sender": {"nickname": "Alice", "card": "", "user_id": user_id},
         "message_id": message_id,
@@ -381,11 +411,15 @@ def _all_patches():
     stack.enter_context(patch("kouhai_bot.napcat.client.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.napcat.client.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.napcat.client.send_group_forward_msg", _mock_send_group_forward))
+    stack.enter_context(patch("kouhai_bot.napcat.client.send_private_forward_msg", _mock_send_private_forward))
+    stack.enter_context(patch("kouhai_bot.napcat.client.delete_msg", _mock_delete_msg))
     stack.enter_context(patch("kouhai_bot.napcat.client._http_post", _mock_http_post))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.send_group_forward_msg", _mock_send_group_forward))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.send_private_forward_msg", _mock_send_private_forward))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.delete_msg", _mock_delete_msg))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.clarify.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.review.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.clear.react_emoji", _mock_react))
@@ -393,8 +427,18 @@ def _all_patches():
     stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.stubs.send_group_msg", _mock_send_group))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.stubs.send_private_msg", _mock_send_private))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.setproblem.send_group_msg", _mock_send_group))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.setproblem.send_private_msg", _mock_send_private))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.sync.send_group_msg", _mock_send_group))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.sync.send_private_msg", _mock_send_private))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.sync.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.editorial_followup.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.editorial_followup.send_group_forward_msg", _mock_send_group_forward))
+    stack.enter_context(patch("kouhai_bot.private_judge.send_group_msg", _mock_send_group))
+    stack.enter_context(patch("kouhai_bot.private_judge.send_private_msg", _mock_send_private))
+    stack.enter_context(patch("kouhai_bot.private_judge.send_group_forward_msg", _mock_send_group_forward))
+    stack.enter_context(patch("kouhai_bot.private_judge.send_private_forward_msg", _mock_send_private_forward))
     stack.enter_context(patch("kouhai_bot.handlers.shared.call_chat_completion_result", _mock_chat_completion_result))
     stack.enter_context(patch("kouhai_bot.handlers.shared.judge_submission_result", _mock_judge_result))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.call_chat_completion_result", _mock_chat_completion_result))
@@ -1580,6 +1624,38 @@ def test_submit_operation_not_blocked():
     print("✅ submit: 操作 not blocked")
 
 
+def test_private_submit_sends_ack_face_instead_of_reaction():
+    _reset_state()
+    _setup_problem()
+    global _deepseek_response
+    _deepseek_response = {
+        "correct": False,
+        "reason": "做法还不够完整",
+        "reply": "再补一下关键证明～",
+        "reaction": "",
+    }
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.submit import handle
+        from kouhai_bot.handlers.shared import get_today_problem
+        from kouhai_bot.private_judge import set_private_current_problem
+
+        set_private_current_problem(UID, get_today_problem(GID))
+        asyncio.run(handle(**_kwargs(_make_private_event("/submit try dp"))))
+
+    faces = [
+        seg.get("data", {}).get("id")
+        for item in _private_sent if item["user_id"] == UID
+        for seg in item["message"] if isinstance(seg, dict) and seg.get("type") == "face"
+    ]
+    assert any(face in {"128064", "289"} for face in faces), f"Expected private ack face, got: {_private_sent}"
+    assert not _reacted, f"Private submit should not use group reactions: {_reacted}"
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
+    assert "关键证明" in private_text, private_text
+    _cleanup()
+    print("✅ private submit: ack uses face message")
+
+
 def test_submit_no_problem():
     """No problem → appropriate message."""
     _reset_state()
@@ -1617,6 +1693,50 @@ def test_clarify_with_problem():
         f"Expected clarification, got: {_last_text()}"
     _cleanup()
     print("✅ clarify: with problem")
+
+
+def test_private_clarify_uses_private_problem_summary():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_statement(PID2, {
+        "name": "A. Private Problem",
+        "time_limit": "1s",
+        "memory_limit": "256MB",
+        "description": "Private statement asks for a path count.",
+        "input": "n",
+        "output": "answer",
+        "samples": [{"input": "1", "output": "1"}],
+    })
+    _write_group_file(GID, "problem_summaries.json", {
+        PID2: {"summary_zh": "PRIVATE_PID_SUMMARY"},
+    })
+    ctx_file = os.path.join(_data_dir(), "groups", f"groupctx_{GID}.json")
+    with open(ctx_file, "w") as f:
+        json.dump([{"role": "assistant", "content": "GROUP_CURRENT_SUMMARY"}], f)
+    global _deepseek_response
+    _deepseek_response = '{"reply": "按 private 题面解释。", "reaction": ""}'
+
+    with _all_patches():
+        from kouhai_bot.private_judge import set_private_current_problem
+        from kouhai_bot.handlers.cmd.clarify import handle
+
+        set_private_current_problem(UID, {
+            "today": PID2,
+            "contestId": 100,
+            "index": "A",
+            "name": "Private Problem",
+            "rating": 2000,
+            "tags": [],
+        })
+        asyncio.run(handle(**_kwargs(_make_private_event("/clarify 输入是什么？"))))
+
+    clarify_calls = [call for call in _deepseek_calls if call.get("task") == "clarify"]
+    assert clarify_calls, _deepseek_calls
+    user_content = clarify_calls[-1]["messages"][-1]["content"]
+    assert "PRIVATE_PID_SUMMARY" in user_content, user_content
+    assert "GROUP_CURRENT_SUMMARY" not in user_content, user_content
+    _cleanup()
+    print("✅ private clarify: uses pid-specific summary")
 
 
 def test_clarify_llm_failure_shows_admin_message():
@@ -1849,6 +1969,36 @@ def test_problem_unsolved_resend_does_not_show_next_problem_hint():
     print("✅ problem: unsolved resend has no next-problem hint")
 
 
+def test_problem_high_difficulty_resend_warns_after_card():
+    _reset_state()
+    _setup_problem()
+    _write_state(GID, {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2901,
+        "tags": ["number theory", "dp"],
+        "date": "2026-05-14",
+    })
+    _write_group_file(GID, "daily_msg.json", {
+        "msg_id": 1111,
+        "pid": PID,
+    })
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.stubs import handle_problem
+        asyncio.run(handle_problem(**_kwargs(_make_event("/problem"))))
+
+    assert len(_forwarded) == 1, f"Expected problem card resend, got: {_forwarded}"
+    text = _last_text()
+    assert "难度较高" in text, text
+    assert "题解" in text, text
+    _cleanup()
+    print("✅ problem: high difficulty resend warns after card")
+
+
 def test_problem_no_current_problem():
     """No current problem → friendly /newproblem hint."""
     _reset_state()
@@ -2019,8 +2169,37 @@ def test_help_shows_short_aliases_and_configured_newproblem_cooldown():
     assert "/tag — 查看当前题目的算法标签" in text, text
     assert "/review(/rv) 你的问题 — 默认复盘上一道已通过题；引用题目卡片可复盘旧题；@群友可带入其上下文" in text, text
     assert "/clarify(/clrf) 你的问题 — 向AI澄清题目细节，只回答题目本身不剧透做法" in text, text
+    assert "/setproblem(/sp)" not in text, text
+    assert "/sync —" not in text, text
+    assert "private judge" in text and "详细用法请私聊发 /help" in text, text
     _cleanup()
     print("✅ help: aliases and dynamic cooldown")
+
+
+def test_private_help_only_shows_private_judge_commands():
+    _reset_state()
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.help import handle
+        from kouhai_bot.handlers.registry import discover_commands
+        discover_commands()
+        asyncio.run(handle(**_kwargs(_make_private_event("/help"))))
+
+    assert _private_forwarded, "Expected private help to be sent as a forward card"
+    assert _private_forwarded[-1]["user_id"] == UID, _private_forwarded
+    self_sends = [item for item in _private_sent if item["user_id"] == 1]
+    assert self_sends, "Expected private help to self-send before forward"
+    msg = self_sends[-1]["message"]
+    text = " ".join(
+        seg.get("data", {}).get("text", "")
+        for seg in msg if isinstance(seg, dict) and seg.get("type") == "text"
+    )
+    assert "/setproblem(/sp) [题号|链接|random] — 设置 private judge 当前题" in text, text
+    assert "/sync — 在群聊和 private judge 间同步当前群题记录" in text, text
+    assert "/newproblem(/np)" not in text, text
+    assert "/scoreboard" not in text, text
+    assert "可能丢掉当前侧这题交流历史" in text, text
+    _cleanup()
+    print("✅ private help: filters group-only commands")
 
 
 def test_newproblem_cooldown():
@@ -3091,7 +3270,55 @@ def test_submit_parallel_different_groups_do_not_block():
 
 
 def test_submit_user_group_blocked_within_window():
-    """Configured user groups can delay /submit shortly after a new problem is posted."""
+    """Delayed starred group /submit is recalled and judged in private."""
+    _reset_state()
+    global _deepseek_response
+    _deepseek_response = {"correct": False, "reason": "private no", "reply": "还不对"}
+    _setup_problem_for(GID, PID)
+    _write_state(GID, {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+        "date": "2026-05-14",
+        "posted_at": int(time.time()),
+    })
+
+    lazy = _LazyConfig()
+    lazy._config = {
+        **_config_dict(),
+        "user_groups": [
+            UserGroupConfig(
+                name="starred",
+                display_name="打星",
+                user_ids=[UID],
+                submit_delay_sec=300,
+                submit_delay_message="将机会多留给年轻人吧～{wait}",
+            )
+        ],
+    }
+
+    with _all_patches(), patch("kouhai_bot.config._config", lazy):
+        from kouhai_bot.handlers.cmd.submit import handle
+        asyncio.run(handle(**_kwargs(_make_event("/submit my solution text here"))))
+
+    assert _deleted == ["msg_001"], f"Expected original group submit to be recalled: {_deleted}"
+    private_text = "\n".join(
+        " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
+        for item in _private_sent
+    )
+    assert "已转到 private judge" in private_text, private_text
+    assert "刚才被撤回的提交内容" in private_text, private_text
+    assert "my solution text here" in private_text, private_text
+    assert _deepseek_calls, "Private judge should run for redirected submit"
+    _cleanup()
+    print("✅ submit: delayed user group submit redirects to private")
+
+
+def test_starred_redirect_does_not_mark_first_notice_when_private_intro_fails():
+    """If the first private notice cannot be sent, retry should still send intro/card later."""
     _reset_state()
     _setup_problem_for(GID, PID)
     _write_state(GID, {
@@ -3119,25 +3346,85 @@ def test_submit_user_group_blocked_within_window():
         ],
     }
 
-    with ExitStack() as stack:
-        stack.enter_context(patch("kouhai_bot.config._config", lazy))
-        stack.enter_context(patch("kouhai_bot.napcat.client.send_group_msg", _mock_send_group))
-        stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.send_group_msg", _mock_send_group))
-        stack.enter_context(patch("kouhai_bot.handlers.shared.judge_submission_result", _mock_judge_result))
-        from kouhai_bot.handlers.cmd.submit import handle
-        asyncio.run(handle(**_kwargs(_make_event("/submit my solution text here"))))
+    async def _fail_private_send(user_id, message):
+        return None
 
-    text = _last_text()
-    assert "将机会多留给年轻人吧～" in text, f"Expected user-group reminder, got: {text}"
-    assert "请等待" in text and "后再提交" in text, f"Expected wait hint, got: {text}"
-    assert not _deepseek_calls, f"Judge should not run for blocked submit: {_deepseek_calls}"
+    with _all_patches(), patch("kouhai_bot.config._config", lazy):
+        from kouhai_bot.handlers.cmd.submit import handle
+        from kouhai_bot.private_judge import has_group_problem_private_notified
+
+        with patch("kouhai_bot.handlers.cmd.submit.send_private_msg", _fail_private_send):
+            asyncio.run(handle(**_kwargs(_make_event("/submit my solution text here"))))
+
+        notified = has_group_problem_private_notified(UID, PID)
+
+    assert not notified
+    assert _deleted == [], f"Submit should not be recalled when private repeat failed: {_deleted}"
+    assert not _deepseek_calls, f"Judge should not run when private repeat failed: {_deepseek_calls}"
+    assert any("私聊发送失败" in _last_text_item(item) for item in _sent), _sent
     _cleanup()
-    print("✅ submit: user group blocked within window")
+    print("✅ submit: failed private redirect does not consume first notice")
+
+
+def test_starred_redirect_does_not_mark_first_notice_when_private_repeat_fails():
+    """If repeat DM fails after intro/card, retry should still send intro/card later."""
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_state(GID, {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+        "date": "2026-05-14",
+        "posted_at": int(time.time()),
+    })
+
+    lazy = _LazyConfig()
+    lazy._config = {
+        **_config_dict(),
+        "user_groups": [
+            UserGroupConfig(
+                name="starred",
+                display_name="打星",
+                user_ids=[UID],
+                submit_delay_sec=300,
+                submit_delay_message="将机会多留给年轻人吧～{wait}",
+            )
+        ],
+    }
+
+    async def _fail_repeat_send(user_id, message):
+        text = _last_text_item({"message": message})
+        if "刚才被撤回的提交内容" in text:
+            return None
+        return await _mock_send_private(user_id, message)
+
+    with _all_patches(), patch("kouhai_bot.config._config", lazy):
+        from kouhai_bot.handlers.cmd.submit import handle
+        from kouhai_bot.private_judge import has_group_problem_private_notified
+
+        with patch("kouhai_bot.handlers.cmd.submit.send_private_msg", _fail_repeat_send):
+            asyncio.run(handle(**_kwargs(_make_event("/submit my solution text here"))))
+
+        notified = has_group_problem_private_notified(UID, PID)
+
+    assert not notified
+    assert _deleted == [], f"Submit should not be recalled when private repeat failed: {_deleted}"
+    assert not any(call.get("task") == "judge" for call in _deepseek_calls), (
+        f"Judge should not run when private repeat failed: {_deepseek_calls}"
+    )
+    assert any("私聊复述提交失败" in _last_text_item(item) for item in _sent), _sent
+    _cleanup()
+    print("✅ submit: failed private repeat does not consume first notice")
 
 
 def test_submit_user_group_blocked_uses_dynamic_wait():
-    """Dynamic wait stored in scoreboard extends the configured floor."""
+    """Dynamic wait still redirects starred submits to private judge."""
     _reset_state()
+    global _deepseek_response
+    _deepseek_response = {"correct": False, "reason": "private no", "reply": "还不对"}
     _setup_problem_for(GID, PID)
     _write_state(GID, {
         "today": PID,
@@ -3177,20 +3464,598 @@ def test_submit_user_group_blocked_uses_dynamic_wait():
         ],
     }
 
-    with ExitStack() as stack:
-        stack.enter_context(patch("kouhai_bot.config._config", lazy))
-        stack.enter_context(patch("kouhai_bot.napcat.client.send_group_msg", _mock_send_group))
-        stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.send_group_msg", _mock_send_group))
-        stack.enter_context(patch("kouhai_bot.handlers.shared.judge_submission_result", _mock_judge_result))
+    with _all_patches(), patch("kouhai_bot.config._config", lazy):
         from kouhai_bot.handlers.cmd.submit import handle
         asyncio.run(handle(**_kwargs(_make_event("/submit my solution text here"))))
 
-    text = _last_text()
-    assert "将机会多留给年轻人吧～" in text, f"Expected dynamic wait reminder, got: {text}"
-    assert "请等待 9 分钟后再提交" in text, f"Expected extended dynamic wait, got: {text}"
-    assert not _deepseek_calls, f"Judge should not run for blocked submit: {_deepseek_calls}"
+    assert _deleted == ["msg_001"], f"Expected original group submit to be recalled: {_deleted}"
+    private_text = "\n".join(
+        " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
+        for item in _private_sent
+    )
+    assert "刚才被撤回的提交内容" in private_text, private_text
+    assert _deepseek_calls, "Private judge should run for redirected submit"
     _cleanup()
-    print("✅ submit: user group blocked by dynamic wait")
+    print("✅ submit: dynamic wait redirects to private")
+
+
+def test_parse_problem_ref_accepts_loose_codeforces_links():
+    from kouhai_bot.private_judge import parse_problem_ref, problem_id_from_ref
+
+    cases = {
+        "CF2234B": "2234B",
+        "2234B": "2234B",
+        "https://codeforces.com/contest/2233/problem/F": "2233F",
+        "codeforces.com/contest/2233/problem/F": "2233F",
+        "/contest/2233/problem/F": "2233F",
+        "contest/2233/problem/F": "2233F",
+        "https://codeforces.com/problemset/problem/2234/B": "2234B",
+        "codeforces.com/problemset/problem/2234/B": "2234B",
+        "/problemset/problem/2234/B": "2234B",
+        "problem/2230/F": "2230F",
+        "problem/2230/F?locale=en": "2230F",
+    }
+    for raw, expected in cases.items():
+        parsed = parse_problem_ref(raw)
+        assert parsed is not None, raw
+        assert problem_id_from_ref(*parsed) == expected, (raw, parsed)
+
+    assert parse_problem_ref("contest/abc/problem/F") is None
+    print("✅ private setproblem: accepts loose Codeforces links")
+
+
+def test_private_setproblem_current_copies_empty_private_history():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    group_record = {
+        "timestamp": "2026-05-14T12:00:00+08:00",
+        "type": "clarify",
+        "content": "n 是多少？",
+        "result": "clarify",
+        "reply": "n ≤ 1e5",
+        "problem": PID,
+    }
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {str(UID): [group_record]}})
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.setproblem import handle
+        from kouhai_bot.private_judge import get_private_current_problem, load_private_problem_history
+
+        asyncio.run(handle(**_kwargs(_make_private_event("/setproblem"))))
+        current = get_private_current_problem(UID)
+        history = load_private_problem_history(UID, PID)
+
+    assert current and current["today"] == PID, current
+    assert history and history[0]["content"] == "n 是多少？", history
+    private_text = "\n".join(
+        " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
+        for item in _private_sent
+    )
+    assert "来自群聊的历史记录" in private_text, private_text
+    _cleanup()
+    print("✅ private setproblem: copies empty private history")
+
+
+def test_resolve_problem_by_pid_revalidates_cached_statement():
+    _reset_state()
+    _write_statement(PID, {
+        "name": "stale cache",
+        "description": "old statement without VL marker",
+    })
+    problem = {
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+    }
+
+    with _all_patches(), \
+        patch("kouhai_bot.private_judge._cached_problem_by_pid", return_value=problem), \
+        patch("kouhai_bot.private_judge._ensure_statement", return_value={"name": "validated"}) as ensure:
+        from kouhai_bot.private_judge import resolve_problem_by_pid
+
+        state = resolve_problem_by_pid(PID)
+
+    ensure.assert_called_once_with(problem)
+    assert state["today"] == PID, state
+    assert state["name"] == "Superhero's Job", state
+    _cleanup()
+    print("✅ private setproblem: revalidates cached statements")
+
+
+def test_resolve_random_problem_revalidates_cached_statement():
+    _reset_state()
+    _write_statement(PID, {
+        "name": "stale cache",
+        "description": "old statement without VL marker",
+    })
+    problem = {
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+    }
+
+    with _all_patches(), \
+        patch("kouhai_bot.private_judge._fetch_problemset", return_value=[problem]), \
+        patch("kouhai_bot.private_judge.random.shuffle", lambda items: None), \
+        patch("kouhai_bot.private_judge._ensure_statement", return_value={"name": "validated"}) as ensure:
+        from kouhai_bot.private_judge import resolve_random_problem
+
+        state = resolve_random_problem(GID)
+
+    ensure.assert_called_once_with(problem)
+    assert state["today"] == PID, state
+    _cleanup()
+    print("✅ private setproblem random: revalidates cached statements")
+
+
+def test_private_setproblem_non_formula_image_hint():
+    _reset_state()
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.setproblem import handle
+        from kouhai_bot.private_judge import NonFormulaImageProblem
+
+        with patch(
+            "kouhai_bot.handlers.cmd.setproblem.resolve_problem_by_pid",
+            side_effect=NonFormulaImageProblem("1065C"),
+        ):
+            asyncio.run(handle(**_kwargs(_make_private_event("/setproblem 1065C"))))
+
+    private_text = "\n".join(
+        " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
+        for item in _private_sent
+    )
+    assert "非公式图片" in private_text, private_text
+    assert "处理能力有限" in private_text, private_text
+    assert "换一道题" in private_text, private_text
+    _cleanup()
+    print("✅ private setproblem: explains non-formula image limitation")
+
+
+def test_build_problem_card_payload_revalidates_cached_statement():
+    _reset_state()
+    _write_statement(PID, {
+        "name": "stale cache",
+        "description": "old statement without VL marker",
+    })
+    statement = {
+        "name": "validated",
+        "time_limit": "2s",
+        "memory_limit": "256MB",
+        "description": "validated statement",
+        "input": "n",
+        "samples": [],
+        "notes": "",
+    }
+
+    with _all_patches(), \
+        patch("kouhai_bot.private_judge._ensure_statement", return_value=statement) as ensure:
+        from kouhai_bot.private_judge import build_problem_card_payload
+
+        payload = asyncio.run(build_problem_card_payload(GID, {
+            "today": PID,
+            "contestId": 542,
+            "index": "D",
+            "name": "Superhero's Job",
+            "rating": 2600,
+            "tags": [],
+        }))
+
+    ensure.assert_called_once()
+    assert payload["post_msg"].startswith("private judge 题目"), payload
+    _cleanup()
+    print("✅ private problem card: revalidates cached statements")
+
+
+def test_private_problem_card_hides_original_problem_identity():
+    _reset_state()
+    _write_statement(PID, {
+        "name": "D. Superhero's Job",
+        "time_limit": "2s",
+        "memory_limit": "256MB",
+        "description": "Statement text",
+        "input": "n",
+        "output": "answer",
+        "samples": [{"input": "1", "output": "1"}],
+    })
+    _write_group_file(GID, "problem_summaries.json", {
+        PID: {"summary_zh": "SUMMARY_ONLY"},
+    })
+
+    with _all_patches():
+        from kouhai_bot.private_judge import build_problem_card_payload
+
+        payload = asyncio.run(build_problem_card_payload(GID, {
+            "today": PID,
+            "contestId": 542,
+            "index": "D",
+            "name": "Superhero's Job",
+            "rating": 2600,
+            "tags": [],
+        }))
+
+    post_msg = payload["post_msg"]
+    assert post_msg.startswith("private judge 题目"), post_msg
+    assert "SUMMARY_ONLY" in post_msg, post_msg
+    assert PID not in post_msg, post_msg
+    assert "CF" not in post_msg, post_msg
+    assert "Superhero" not in post_msg, post_msg
+    assert "2600" not in post_msg and "rating" not in post_msg, post_msg
+    _cleanup()
+    print("✅ private problem card: hides original identity")
+
+
+def test_private_problem_card_high_difficulty_warns_after_card():
+    _reset_state()
+    _write_group_file(GID, "daily_msg.json", {
+        "msg_id": 1111,
+        "pid": PID,
+    })
+    problem = {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2901,
+        "tags": [],
+    }
+
+    with _all_patches(), patch("kouhai_bot.private_judge.asyncio.sleep", AsyncMock()):
+        from kouhai_bot.private_judge import send_problem_card_private
+
+        ok = asyncio.run(send_problem_card_private(UID, GID, problem, prefer_group_card=True))
+
+    assert ok
+    assert len(_private_forwarded) == 1, f"Expected private problem card, got: {_private_forwarded}"
+    private_text = "\n".join(
+        " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
+        for item in _private_sent
+    )
+    assert "难度较高" in private_text, private_text
+    assert "题解" in private_text, private_text
+    _cleanup()
+    print("✅ private problem card: high difficulty warns after card")
+
+
+def test_private_problem_card_falls_back_when_main_self_send_fails():
+    _reset_state()
+    problem = {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": [],
+    }
+    payload = {
+        "post_msg": "MAIN CARD",
+        "sample_messages": ["SAMPLE CARD"],
+        "notes_message": "NOTE CARD",
+    }
+
+    async def _send_private_with_main_self_send_failure(user_id, message):
+        text = _last_text_item({"message": message})
+        if user_id == 1 and text == "MAIN CARD":
+            return None
+        return await _mock_send_private(user_id, message)
+
+    with _all_patches(), \
+        patch("kouhai_bot.private_judge.asyncio.sleep", AsyncMock()), \
+        patch("kouhai_bot.private_judge.build_problem_card_payload", AsyncMock(return_value=payload)), \
+        patch("kouhai_bot.private_judge.send_private_msg", _send_private_with_main_self_send_failure):
+        from kouhai_bot.private_judge import send_problem_card_private
+
+        ok = asyncio.run(send_problem_card_private(UID, GID, problem, prefer_group_card=False))
+
+    assert ok
+    assert _private_forwarded == [], f"Should not forward without main card node: {_private_forwarded}"
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "MAIN CARD" in private_text, private_text
+    assert "SAMPLE CARD" in private_text, private_text
+    assert "NOTE CARD" in private_text, private_text
+    _cleanup()
+    print("✅ private problem card: falls back when main node self-send fails")
+
+
+def test_private_state_load_logs_corrupt_json_once(caplog):
+    _reset_state()
+    state_dir = os.path.join(_data_dir(), "private_judge", "users")
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, f"{UID}.json"), "w") as f:
+        f.write("{bad json")
+
+    with _all_patches():
+        from kouhai_bot.private_judge import _PRIVATE_STATE_LOAD_WARNED, load_private_state
+
+        _PRIVATE_STATE_LOAD_WARNED.clear()
+        caplog.set_level("WARNING", logger="kouhai-bot.private_judge")
+        state = load_private_state(UID)
+        state_again = load_private_state(UID)
+
+    assert state["user_submissions"] == []
+    assert state_again["user_submissions"] == []
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("failed to load private judge state" in message for message in messages) == 1
+    _cleanup()
+    print("✅ private state: corrupt JSON logs once")
+
+
+def test_private_state_save_writes_complete_json_without_temp_leftovers():
+    _reset_state()
+    with _all_patches():
+        from kouhai_bot.private_judge import load_private_state, save_private_state
+
+        save_private_state(UID, {
+            "current_problem": {"today": PID},
+            "user_submissions": [{"problem": PID, "content": "x"}],
+            "solved_problems": {},
+            "last_solved_problem": "",
+            "notified_group_problem_private": {},
+            "problem_cards": {},
+        })
+        loaded = load_private_state(UID)
+
+    assert loaded["current_problem"]["today"] == PID
+    assert loaded["user_submissions"][0]["content"] == "x"
+    state_dir = os.path.join(_data_dir(), "private_judge", "users")
+    leftovers = [name for name in os.listdir(state_dir) if name.endswith(".tmp")]
+    assert leftovers == []
+    _cleanup()
+    print("✅ private state: atomic save writes complete JSON")
+
+
+def test_private_review_allowed_after_group_solves_current_problem():
+    _reset_state()
+    global _deepseek_response
+    _deepseek_response = "可以复盘这题。"
+    _setup_problem_for(GID, PID)
+    _write_scoreboard(GID, {
+        "solves": [{"user_id": OTHER_UID, "nickname": "Bob", "problem": PID, "timestamp": time.time()}],
+        "user_submissions": {},
+    })
+
+    with _all_patches():
+        from kouhai_bot.private_judge import set_private_current_problem
+        from kouhai_bot.handlers.cmd.review import handle
+
+        set_private_current_problem(UID, {
+            "today": PID,
+            "contestId": 542,
+            "index": "D",
+            "name": "Superhero's Job",
+            "rating": 2600,
+            "tags": [],
+        })
+        asyncio.run(handle(**_kwargs(_make_private_event("/review 为什么这样做？"))))
+
+    review_calls = [call for call in _deepseek_calls if call.get("task") == "review"]
+    assert review_calls, _deepseek_calls
+    private_text = "\n".join(
+        " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
+        for item in _private_sent
+    )
+    assert "可以复盘" in private_text, private_text
+    _cleanup()
+    print("✅ private review: group solve unlocks current problem")
+
+
+def test_sync_aborts_when_source_has_no_history_without_clearing_target():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    target_record = {
+        "timestamp": "2026-05-14T12:00:00+08:00",
+        "type": "clarify",
+        "content": "group keep",
+        "result": "clarify",
+        "reply": "keep",
+        "problem": PID,
+    }
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {str(UID): [target_record]}})
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.sync import handle
+        asyncio.run(handle(**_kwargs(_make_event("/sync"))))
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    assert saved["user_submissions"][str(UID)][0]["content"] == "group keep"
+    assert "已取消" in _last_text(), _last_text()
+    _cleanup()
+    print("✅ sync: empty source aborts without clearing target")
+
+
+def test_sync_private_correct_current_problem_scores_for_normal_user():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    private_record = {
+        "timestamp": "2026-05-14T12:00:00+08:00",
+        "type": "submit",
+        "content": "private ac",
+        "result": "correct",
+        "reason": "ok",
+        "reply": "",
+        "problem": PID,
+    }
+
+    with _all_patches(), patch(
+        "kouhai_bot.handlers.cmd.sync._reveal_problem_source",
+        AsyncMock(return_value="本题来自 CF542D✨"),
+    ):
+        from kouhai_bot.private_judge import save_private_submission
+        from kouhai_bot.handlers.cmd.sync import handle
+        from kouhai_bot.eventlog import EVENT_META_KEY, load_events, log_command_received
+
+        save_private_submission(UID, private_record)
+        event = _make_event("/sync")
+        event[EVENT_META_KEY] = log_command_received(
+            group_id=GID,
+            user_id=UID,
+            sender=event["sender"],
+            command="sync",
+            message_id=event["message_id"],
+            raw_text=event["raw_message"],
+        )
+        asyncio.run(handle(**_kwargs(event)))
+        logged_events = load_events(GID, event[EVENT_META_KEY]["date"])
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    assert saved["solves"] and str(saved["solves"][0]["user_id"]) == str(UID), saved
+    assert saved["user_submissions"][str(UID)][0]["content"] == "private ac"
+    text = "\n".join(_last_text_item(item) for item in _sent)
+    assert "本题 +" in text, _sent
+    assert "本题来自 CF542D" in text, text
+    assert "已同步完成" not in text, text
+    assert ("msg_001", "128076") in _reacted, _reacted
+    finished = [item for item in logged_events if item.get("type") == "finished"]
+    assert finished and finished[-1]["status"] == "correct", finished
+    assert finished[-1]["synced_submit_count"] == 1, finished[-1]
+    assert finished[-1]["synced_correct_count"] == 1, finished[-1]
+    _cleanup()
+    print("✅ sync: private AC scores current group problem for normal user")
+
+
+def test_sync_history_card_uses_friendly_visible_format():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _group_members[GID][0]["card"] = "AliceCard"
+    private_records = [
+        {
+            "timestamp": "2026-05-14T12:00:00+08:00",
+            "type": "submit",
+            "content": "first line\nsecond line",
+            "result": "incorrect",
+            "reason": "secret reason",
+            "reply": "bot reply\nvisible",
+            "problem": PID,
+        },
+        {
+            "timestamp": "2026-05-14T12:01:00+08:00",
+            "type": "clarify",
+            "content": "what is n?",
+            "result": "clarify",
+            "reason": "hidden clarify reason",
+            "reply": "n is input",
+            "problem": PID,
+        },
+    ]
+
+    with _all_patches():
+        from kouhai_bot.private_judge import save_private_submission
+        from kouhai_bot.handlers.cmd.sync import handle
+
+        for record in private_records:
+            save_private_submission(UID, record)
+        asyncio.run(handle(**_kwargs(_make_event("/sync"))))
+
+    history_text = "\n".join(
+        _last_text_item(item)
+        for item in _private_sent
+        if item["user_id"] == 1
+    )
+    assert "AliceCard在当前的历史记录如下：" in history_text, history_text
+    assert "👤：first line second line\n🤖：bot reply visible" in history_text, history_text
+    assert "👤：what is n?\n🤖：n is input" in history_text, history_text
+    assert "secret reason" not in history_text and "hidden clarify reason" not in history_text
+    assert "submit" not in history_text and "incorrect" not in history_text
+    assert _forwarded, "Expected history to be forwarded to group"
+    assert not any("已同步完成" in _last_text_item(item) for item in _sent), _sent
+    assert ("msg_001", "128076") in _reacted, _reacted
+    _cleanup()
+    print("✅ sync: history card uses friendly visible format")
+
+
+def test_sync_history_card_chunks_long_history():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    long_text = "x" * 6500
+
+    with _all_patches():
+        from kouhai_bot.private_judge import save_private_submission
+        from kouhai_bot.handlers.cmd.sync import handle
+
+        save_private_submission(UID, {
+            "timestamp": "2026-05-14T12:00:00+08:00",
+            "type": "submit",
+            "content": long_text,
+            "result": "incorrect",
+            "reason": "hidden",
+            "reply": "try again",
+            "problem": PID,
+        })
+        asyncio.run(handle(**_kwargs(_make_event("/sync"))))
+
+    assert _forwarded, "Expected history forward card"
+    assert len(_forwarded[0]["messages"]) >= 3, _forwarded
+    chunk_text = "".join(
+        _last_text_item(item)
+        for item in _private_sent
+        if item["user_id"] == 1
+    )
+    assert long_text in chunk_text, "Long history should not be truncated"
+    _cleanup()
+    print("✅ sync: long history card is chunked")
+
+
+def test_private_sync_from_solved_group_marks_private_review_state():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    group_record = {
+        "timestamp": "2026-05-14T12:00:00+08:00",
+        "type": "clarify",
+        "content": "group clarify",
+        "result": "clarify",
+        "reply": "group reply",
+        "problem": PID,
+    }
+    _write_scoreboard(GID, {
+        "solves": [{"user_id": OTHER_UID, "nickname": "Bob", "problem": PID, "timestamp": time.time()}],
+        "user_submissions": {str(UID): [group_record]},
+    })
+
+    with _all_patches():
+        from kouhai_bot.private_judge import get_private_review_pid, set_private_current_problem
+        from kouhai_bot.handlers.cmd.sync import handle
+
+        set_private_current_problem(UID, {
+            "today": PID,
+            "contestId": 542,
+            "index": "D",
+            "name": "Superhero's Job",
+            "rating": 2600,
+            "tags": [],
+        })
+        asyncio.run(handle(**_kwargs(_make_private_event("/sync"))))
+        set_private_current_problem(UID, {
+            "today": PID2,
+            "contestId": 100,
+            "index": "A",
+            "name": "Other Problem",
+            "rating": 2000,
+            "tags": [],
+        })
+        review_pid = get_private_review_pid(UID, GID)
+
+    assert review_pid == PID
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "已同步完成" not in private_text, private_text
+    _cleanup()
+    print("✅ sync: solved group state is persisted for private review")
+
+
+def _last_text_item(item: dict) -> str:
+    msg = item.get("message", [])
+    if isinstance(msg, list):
+        return " ".join(
+            seg.get("data", {}).get("text", "")
+            for seg in msg if isinstance(seg, dict) and seg.get("type") == "text"
+        )
+    return str(msg)
 
 
 if __name__ == "__main__":
@@ -3212,6 +4077,7 @@ if __name__ == "__main__":
     test_review_after_pending_submit_uses_snapshotted_solved_problem()
     test_submit_off_topic()
     test_submit_operation_not_blocked()
+    test_private_submit_sends_ack_face_instead_of_reaction()
     test_submit_no_problem()
     test_clarify_with_problem()
     test_clarify_no_problem()
@@ -3221,11 +4087,13 @@ if __name__ == "__main__":
     test_problem_ignores_stale_daily_msg_pid()
     test_problem_solved_resend_shows_next_problem_hint()
     test_problem_unsolved_resend_does_not_show_next_problem_hint()
+    test_problem_high_difficulty_resend_warns_after_card()
     test_problem_alias_dispatches_to_problem_handler()
     test_tag_with_tags()
     test_scoreboard_with_data()
     test_scoreboard_splits_default_and_starred_groups()
     test_help_shows_short_aliases_and_configured_newproblem_cooldown()
+    test_private_help_only_shows_private_judge_commands()
     test_newproblem_cooldown()
     test_newproblem_busy_rejects_concurrent_force()
     test_newproblem_unsolved_rejects()
@@ -3247,9 +4115,11 @@ if __name__ == "__main__":
     test_review_history_formats_types_and_submit_numbers()
     test_user_submission_history_is_unbounded_and_upserts_by_request_id()
     test_clarify_prompt_hides_original_problem_identity()
+    test_private_problem_card_high_difficulty_warns_after_card()
     test_submit_same_user_includes_previous_clarify_history()
     test_submit_parallel_different_groups_do_not_block()
     test_submit_starred_user_shows_own_group_top5()
     test_submit_alias_dispatches_to_submit_handler()
     test_submit_user_group_blocked_within_window()
+    test_parse_problem_ref_accepts_loose_codeforces_links()
     print(f"\n🎉 E2E tests passed")

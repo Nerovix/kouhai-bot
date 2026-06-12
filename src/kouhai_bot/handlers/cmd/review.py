@@ -13,9 +13,10 @@ from ..shared import (
     get_today_problem,
     is_already_solved,
 )
-from ...napcat.client import build_plain_message, send_group_msg
+from ...napcat.client import build_plain_message, send_group_msg, send_private_msg
 from ...context import get_display_name
 from ...eventlog import EVENT_META_KEY
+from ...private_judge import GROUP_SCOPE, PRIVATE_SCOPE, get_private_review_pid
 from .submit import enqueue_review_request
 
 logger = logging.getLogger("kouhai-bot.cmd.review")
@@ -50,20 +51,27 @@ async def handle(group_id: int, user_id: int, sender: dict,
                  message_id: str, raw_text: str, segments: list,
                  event: dict) -> None:
     nickname = get_display_name(sender)
+    scope = PRIVATE_SCOPE if event.get("message_type") == "private" else GROUP_SCOPE
 
     stripped = raw_text.lstrip()
     match = re.match(r'/review\s+', stripped)
     if not match:
-        await send_group_msg(group_id, build_plain_message(
-            f"@{nickname} 用法：/review 你的问题～"
-        ))
+        if scope == PRIVATE_SCOPE:
+            await send_private_msg(user_id, build_plain_message("用法：/review 你的问题～"))
+        else:
+            await send_group_msg(group_id, build_plain_message(
+                f"@{nickname} 用法：/review 你的问题～"
+            ))
         return
 
     question = stripped[match.end():].strip()
     if not question:
-        await send_group_msg(group_id, build_plain_message(
-            f"@{nickname} /review 后面要写你的问题呀，想聊什么直接说～"
-        ))
+        if scope == PRIVATE_SCOPE:
+            await send_private_msg(user_id, build_plain_message("/review 后面要写你的问题呀，想聊什么直接说～"))
+        else:
+            await send_group_msg(group_id, build_plain_message(
+                f"@{nickname} /review 后面要写你的问题呀，想聊什么直接说～"
+            ))
         return
 
     reply_to = ""
@@ -73,7 +81,9 @@ async def handle(group_id: int, user_id: int, sender: dict,
             break
 
     review_pid = ""
-    if reply_to:
+    if scope == PRIVATE_SCOPE:
+        review_pid = get_private_review_pid(user_id, group_id)
+    elif reply_to:
         review_pid = get_problem_card_ref_pid(group_id, reply_to)
         if not review_pid:
             await send_group_msg(group_id, build_plain_message(
@@ -98,6 +108,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
         review_pid=review_pid,
         mentioned_user_ids=_mentioned_user_ids(segments, requester_id=user_id),
         event_log=event.get(EVENT_META_KEY),
+        scope=scope,
     )
 
 

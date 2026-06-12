@@ -86,6 +86,19 @@ async def send_private_msg(user_id: int, message: list[dict]) -> int | None:
         return None
 
 
+async def send_private_forward_msg(user_id: int, messages: list[dict]) -> int | None:
+    """Forward messages as a merged card to a private chat."""
+    try:
+        result = await _http_post("send_private_forward_msg", {
+            "user_id": user_id,
+            "messages": messages,
+        })
+        return _extract_message_id("send_private_forward_msg", result)
+    except Exception as e:
+        logger.error(f"send_private_forward_msg failed: {e}", exc_info=True)
+        return None
+
+
 async def react_emoji(message_id: str, emoji_id: str) -> None:
     """React with an emoji to a message."""
     try:
@@ -130,6 +143,10 @@ def build_text(text: str) -> dict:
 
 def build_at(qq: int) -> dict:
     return {"type": "at", "data": {"qq": str(qq)}}
+
+
+def build_face(emoji_id: str | int) -> dict:
+    return {"type": "face", "data": {"id": str(emoji_id)}}
 
 
 def build_plain_message(text: str) -> list[dict]:

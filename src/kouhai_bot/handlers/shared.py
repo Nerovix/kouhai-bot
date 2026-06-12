@@ -20,6 +20,12 @@ from ..llm import ChatCompletionResult, chat_completion
 
 logger = logging.getLogger("kouhai-bot.shared")
 
+HIGH_DIFFICULTY_RATING_THRESHOLD = 2800
+HIGH_DIFFICULTY_NOTICE = (
+    "这道题的难度较高，bot 的推理能力可能受限。"
+    "如果你觉得 bot 说得不对，请查看题解～"
+)
+
 # ── LLM API ─────────────────────────────────────────────────────────────
 
 
@@ -402,6 +408,15 @@ def _coerce_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def high_difficulty_notice(problem: dict | None) -> str:
+    if not isinstance(problem, dict):
+        return ""
+    rating = _coerce_int(problem.get("rating"))
+    if rating is not None and rating > HIGH_DIFFICULTY_RATING_THRESHOLD:
+        return HIGH_DIFFICULTY_NOTICE
+    return ""
 
 
 def load_problem_ratings(group_id: int) -> dict[str, int]:

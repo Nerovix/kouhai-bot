@@ -25,6 +25,19 @@ from ..napcat.client import (
 
 logger = logging.getLogger("kouhai-bot.handlers")
 
+_PRIVATE_ALLOWED_COMMANDS = {
+    "setproblem",
+    "problem",
+    "submit",
+    "clarify",
+    "review",
+    "clear",
+    "sync",
+    "status",
+    "help",
+    "tag",
+}
+
 
 # ── Message parsing ─────────────────────────────────────────────────────
 
@@ -56,6 +69,26 @@ def should_respond(msg_type: str, was_mentioned: bool) -> bool:
         return True
     # Group: only respond when mentioned
     return was_mentioned
+
+
+async def _is_service_group_member(group_id: int, user_id: int) -> bool:
+    from ..napcat import client as napcat_client
+
+    try:
+        resp = await napcat_client._http_post(
+            "get_group_member_info",
+            {"group_id": group_id, "user_id": user_id, "no_cache": True},
+        )
+        if isinstance(resp, dict) and resp.get("status") == "ok" and isinstance(resp.get("data"), dict):
+            return bool(resp["data"])
+    except Exception:
+        pass
+    try:
+        resp = await napcat_client._http_post("get_group_member_list", {"group_id": group_id})
+        members = resp.get("data", []) if isinstance(resp, dict) and resp.get("status") == "ok" else []
+        return any(str(item.get("user_id", "")) == str(user_id) for item in members if isinstance(item, dict))
+    except Exception:
+        return False
 
 
 def _normalize_leading_command_junk(text: str) -> str:
@@ -111,6 +144,8 @@ async def process_event(
     # The bot serves exactly one configured group.
     if msg_type == "group" and group_id != cfg.current_group:
         return
+    if msg_type == "private":
+        group_id = cfg.current_group
 
     raw_text, was_mentioned = extract_text(segments)
     raw_text = _normalize_leading_command_junk(raw_text)
@@ -130,7 +165,23 @@ async def process_event(
     cmd_def: CommandDef | None = registry.get(cmd_name)
 
     if cmd_def is None:
+        if msg_type == "private":
+            await send_private_msg(user_id, build_plain_message(
+                "这个 private judge 指令我还不会哦～可用 /help 看支持的命令。"
+            ))
         return  # Unknown command, silently ignore
+
+    if msg_type == "private":
+        if cmd_def.name not in _PRIVATE_ALLOWED_COMMANDS:
+            await send_private_msg(user_id, build_plain_message(
+                "这个命令暂时只能在服务群里使用～private judge 可用 /help 查看支持的命令。"
+            ))
+            return
+        if not await _is_service_group_member(group_id, user_id):
+            await send_private_msg(user_id, build_plain_message(
+                "private judge 目前只服务当前服务群成员。如果你已经在群里，稍后再试试。"
+            ))
+            return
 
     if cmd_def.handler is None:
         logger.warning(f"Command '{cmd_name}' has no handler")
@@ -147,14 +198,15 @@ async def process_event(
         handler_raw_text = f"/{cmd_def.name}{raw_text[len(cmd_token):]}"
 
     try:
-        event[EVENT_META_KEY] = log_command_received(
-            group_id=group_id,
-            user_id=user_id,
-            sender=sender,
-            command=cmd_def.name,
-            message_id=message_id,
-            raw_text=raw_text,
-        )
+        if msg_type == "group":
+            event[EVENT_META_KEY] = log_command_received(
+                group_id=group_id,
+                user_id=user_id,
+                sender=sender,
+                command=cmd_def.name,
+                message_id=message_id,
+                raw_text=raw_text,
+            )
     except Exception as e:
         logger.warning(f"Failed to write received event for /{cmd_name}: {e}")
 

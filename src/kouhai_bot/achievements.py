@@ -29,6 +29,10 @@ class CommandRecord:
     received_at: datetime
     problem: str = ""
     status: str = ""
+    synced_submit_count: int = 0
+    synced_clarify_count: int = 0
+    synced_review_count: int = 0
+    synced_correct_count: int = 0
 
 
 def achievement_window(now: datetime | None = None) -> AchievementWindow:
@@ -105,6 +109,18 @@ def _command_records(
 def _apply_finished(record: CommandRecord, item: dict[str, Any]) -> None:
     record.status = str(item.get("status", ""))
     record.problem = str(item.get("problem", "")) or record.problem
+    record.synced_submit_count = _non_negative_int(item.get("synced_submit_count"))
+    record.synced_clarify_count = _non_negative_int(item.get("synced_clarify_count"))
+    record.synced_review_count = _non_negative_int(item.get("synced_review_count"))
+    record.synced_correct_count = _non_negative_int(item.get("synced_correct_count"))
+
+
+def _non_negative_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(parsed, 0)
 
 
 def _name(record: CommandRecord) -> str:
@@ -142,17 +158,35 @@ def build_achievement_report(
     names = {record.user_id: _name(record) for record in records}
 
     submits = [record for record in records if record.command == "submit"]
+    submit_like_records = [
+        record for record in records
+        if record.command == "submit"
+        or (record.command == "sync" and record.synced_submit_count > 0)
+    ]
     clarifies = [record for record in records if record.command == "clarify"]
     reviews = [record for record in records if record.command == "review"]
 
     submit_attempts = Counter(record.user_id for record in submits)
+    for record in records:
+        if record.command != "sync":
+            continue
+        submit_attempts[record.user_id] += record.synced_submit_count
     solves = Counter(
         record.user_id
         for record in submits
         if record.status == "correct"
     )
+    for record in records:
+        if record.command == "sync":
+            solves[record.user_id] += record.synced_correct_count
     clarify_counts = Counter(record.user_id for record in clarifies)
+    for record in records:
+        if record.command == "sync":
+            clarify_counts[record.user_id] += record.synced_clarify_count
     review_counts = Counter(record.user_id for record in reviews)
+    for record in records:
+        if record.command == "sync":
+            review_counts[record.user_id] += record.synced_review_count
 
     title_date = window.start.strftime("%Y-%m-%d")
     lines = [
@@ -165,9 +199,9 @@ def build_achievement_report(
         lines.append("昨日还没有可统计的指令记录。")
         return "\n".join(lines)
 
-    if submits:
-        first = submits[0]
-        last = submits[-1]
+    if submit_like_records:
+        first = submit_like_records[0]
+        last = submit_like_records[-1]
         lines.append(f"最早 submit：{_name(first)}（{_format_time(first.received_at)}）")
         lines.append(f"最晚 submit：{_name(last)}（{_format_time(last.received_at)}）")
     else:

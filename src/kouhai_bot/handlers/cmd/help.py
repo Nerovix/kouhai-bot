@@ -3,6 +3,20 @@
 from .. import registry
 from ..registry import CommandDef, all_commands
 
+_PRIVATE_HELP_COMMANDS = {
+    "setproblem",
+    "problem",
+    "tag",
+    "submit",
+    "clarify",
+    "review",
+    "clear",
+    "sync",
+    "status",
+    "help",
+}
+_GROUP_HELP_HIDDEN_COMMANDS = {"setproblem", "sync"}
+
 
 def _format_command_name(cmd: CommandDef) -> str:
     if not cmd.aliases:
@@ -28,6 +42,15 @@ def _description_for_help(cmd: CommandDef, newproblem_cooldown: int) -> str:
     return cmd.description
 
 
+def _command_lines(cmds: list[CommandDef], newproblem_cooldown: int) -> list[str]:
+    lines: list[str] = []
+    for cmd in cmds:
+        args = f" {cmd.usage}" if cmd.usage else ""
+        description = _description_for_help(cmd, newproblem_cooldown)
+        lines.append(f"{_format_command_name(cmd)}{args} — {description}")
+    return lines
+
+
 async def handle(group_id: int, user_id: int, sender: dict,
                  message_id: str, raw_text: str, segments: list,
                  event: dict) -> None:
@@ -38,19 +61,46 @@ async def handle(group_id: int, user_id: int, sender: dict,
         build_plain_message,
         send_group_msg,
         send_private_msg,
+        send_private_forward_msg,
         send_group_forward_msg,
     )
     cfg = get_config()
     cmds = all_commands()
-    lines = ["可用指令："]
-    for cmd in cmds:
-        args = f" {cmd.usage}" if cmd.usage else ""
-        description = _description_for_help(cmd, cfg.newproblem_cooldown)
-        lines.append(f"{_format_command_name(cmd)}{args} — {description}")
-    lines.append("")
-    lines.append("💡 每天中午12点，如果当前题还没人做出来会提醒大家继续肝；做出来了就自动刷新一道新题～")
+    is_private = event.get("message_type") == "private"
+    if is_private:
+        visible = [cmd for cmd in cmds if cmd.name in _PRIVATE_HELP_COMMANDS]
+        lines = ["private judge 可用指令："]
+        lines.extend(_command_lines(visible, cfg.newproblem_cooldown))
+        lines.append("")
+        lines.append(
+            "🔒 private judge：私聊可用 /setproblem(/sp) 选当前群题、CF题号/链接或 random；"
+            "private 通过不自动加分，只有当前群题可在群里 /sync 同步。"
+            "/sync 会用另一侧记录覆盖当前侧，可能丢掉当前侧这题交流历史；打星用户只同步 clarify。"
+        )
+    else:
+        visible = [cmd for cmd in cmds if cmd.name not in _GROUP_HELP_HIDDEN_COMMANDS]
+        lines = ["可用指令："]
+        lines.extend(_command_lines(visible, cfg.newproblem_cooldown))
+        lines.append("")
+        lines.append(
+            "🔒 private judge：可以私聊我单独选题、提交和复盘；当前群题可同步回来，详细用法请私聊发 /help。"
+        )
+        lines.append("")
+        lines.append("💡 每天中午12点，如果当前题还没人做出来会提醒大家继续肝；做出来了就自动刷新一道新题～")
     text = "\n".join(lines)
     msg = build_plain_message(text)
+
+    if is_private:
+        self_resp = await send_private_msg(cfg.bot_qq, msg)
+        if self_resp:
+            await asyncio.sleep(0.5)
+            fwd_resp = await send_private_forward_msg(user_id, [
+                {"type": "node", "data": {"id": str(self_resp)}},
+            ])
+            if fwd_resp:
+                return
+        await send_private_msg(user_id, msg)
+        return
 
     # Send to self → forward to group (merged-forward card)
     self_resp = await send_private_msg(cfg.bot_qq, msg)

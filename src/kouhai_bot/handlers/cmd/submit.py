@@ -1615,10 +1615,7 @@ async def _redirect_blocked_group_submit_to_private(
                 build_text(" 我想把这次提交转到 private judge，但私聊发送失败了；这次先不撤回也不判题，检查一下是否能接收临时会话？"),
             ])
             return True
-        mark_group_problem_private_notified(user_id, pid)
         await send_problem_card_private(user_id, group_id, problem, prefer_group_card=True)
-    else:
-        mark_group_problem_private_notified(user_id, pid)
 
     repeated = await send_private_msg(user_id, build_plain_message(
         f"刚才被撤回的提交内容：\n{submission}\n\n开始 judge～"
@@ -1629,6 +1626,8 @@ async def _redirect_blocked_group_submit_to_private(
             build_text(" 私聊复述提交失败了；这次先不撤回也不判题，联系管理员看一下私聊权限吧。"),
         ])
         return True
+
+    mark_group_problem_private_notified(user_id, pid)
 
     try:
         await delete_msg(message_id)

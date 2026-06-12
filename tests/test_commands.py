@@ -87,8 +87,10 @@ def _write_state(group_id: int, data: dict):
 def _write_statement(pid: str, data: dict):
     d = os.path.join(_data_dir(), "statements")
     os.makedirs(d, exist_ok=True)
+    payload = dict(data)
+    payload.setdefault("_vl_processed", True)
     with open(os.path.join(d, f"{pid}.json"), "w") as f:
-        json.dump(data, f)
+        json.dump(payload, f)
 
 
 def _write_scoreboard(group_id: int, data: dict):
@@ -3364,6 +3366,60 @@ def test_starred_redirect_does_not_mark_first_notice_when_private_intro_fails():
     print("✅ submit: failed private redirect does not consume first notice")
 
 
+def test_starred_redirect_does_not_mark_first_notice_when_private_repeat_fails():
+    """If repeat DM fails after intro/card, retry should still send intro/card later."""
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_state(GID, {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+        "date": "2026-05-14",
+        "posted_at": int(time.time()),
+    })
+
+    lazy = _LazyConfig()
+    lazy._config = {
+        **_config_dict(),
+        "user_groups": [
+            UserGroupConfig(
+                name="starred",
+                display_name="打星",
+                user_ids=[UID],
+                submit_delay_sec=300,
+                submit_delay_message="将机会多留给年轻人吧～{wait}",
+            )
+        ],
+    }
+
+    async def _fail_repeat_send(user_id, message):
+        text = _last_text_item({"message": message})
+        if "刚才被撤回的提交内容" in text:
+            return None
+        return await _mock_send_private(user_id, message)
+
+    with _all_patches(), patch("kouhai_bot.config._config", lazy):
+        from kouhai_bot.handlers.cmd.submit import handle
+        from kouhai_bot.private_judge import has_group_problem_private_notified
+
+        with patch("kouhai_bot.handlers.cmd.submit.send_private_msg", _fail_repeat_send):
+            asyncio.run(handle(**_kwargs(_make_event("/submit my solution text here"))))
+
+        notified = has_group_problem_private_notified(UID, PID)
+
+    assert not notified
+    assert _deleted == [], f"Submit should not be recalled when private repeat failed: {_deleted}"
+    assert not any(call.get("task") == "judge" for call in _deepseek_calls), (
+        f"Judge should not run when private repeat failed: {_deepseek_calls}"
+    )
+    assert any("私聊复述提交失败" in _last_text_item(item) for item in _sent), _sent
+    _cleanup()
+    print("✅ submit: failed private repeat does not consume first notice")
+
+
 def test_submit_user_group_blocked_uses_dynamic_wait():
     """Dynamic wait still redirects starred submits to private judge."""
     _reset_state()
@@ -3480,6 +3536,62 @@ def test_private_setproblem_current_copies_empty_private_history():
     print("✅ private setproblem: copies empty private history")
 
 
+def test_resolve_problem_by_pid_revalidates_cached_statement():
+    _reset_state()
+    _write_statement(PID, {
+        "name": "stale cache",
+        "description": "old statement without VL marker",
+    })
+    problem = {
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+    }
+
+    with _all_patches(), \
+        patch("kouhai_bot.private_judge._cached_problem_by_pid", return_value=problem), \
+        patch("kouhai_bot.private_judge._ensure_statement", return_value={"name": "validated"}) as ensure:
+        from kouhai_bot.private_judge import resolve_problem_by_pid
+
+        state = resolve_problem_by_pid(PID)
+
+    ensure.assert_called_once_with(problem)
+    assert state["today"] == PID, state
+    assert state["name"] == "Superhero's Job", state
+    _cleanup()
+    print("✅ private setproblem: revalidates cached statements")
+
+
+def test_resolve_random_problem_revalidates_cached_statement():
+    _reset_state()
+    _write_statement(PID, {
+        "name": "stale cache",
+        "description": "old statement without VL marker",
+    })
+    problem = {
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": ["number theory", "dp"],
+    }
+
+    with _all_patches(), \
+        patch("kouhai_bot.private_judge._fetch_problemset", return_value=[problem]), \
+        patch("kouhai_bot.private_judge.random.shuffle", lambda items: None), \
+        patch("kouhai_bot.private_judge._ensure_statement", return_value={"name": "validated"}) as ensure:
+        from kouhai_bot.private_judge import resolve_random_problem
+
+        state = resolve_random_problem(GID)
+
+    ensure.assert_called_once_with(problem)
+    assert state["today"] == PID, state
+    _cleanup()
+    print("✅ private setproblem random: revalidates cached statements")
+
+
 def test_private_setproblem_non_formula_image_hint():
     _reset_state()
 
@@ -3502,6 +3614,41 @@ def test_private_setproblem_non_formula_image_hint():
     assert "换一道题" in private_text, private_text
     _cleanup()
     print("✅ private setproblem: explains non-formula image limitation")
+
+
+def test_build_problem_card_payload_revalidates_cached_statement():
+    _reset_state()
+    _write_statement(PID, {
+        "name": "stale cache",
+        "description": "old statement without VL marker",
+    })
+    statement = {
+        "name": "validated",
+        "time_limit": "2s",
+        "memory_limit": "256MB",
+        "description": "validated statement",
+        "input": "n",
+        "samples": [],
+        "notes": "",
+    }
+
+    with _all_patches(), \
+        patch("kouhai_bot.private_judge._ensure_statement", return_value=statement) as ensure:
+        from kouhai_bot.private_judge import build_problem_card_payload
+
+        payload = asyncio.run(build_problem_card_payload(GID, {
+            "today": PID,
+            "contestId": 542,
+            "index": "D",
+            "name": "Superhero's Job",
+            "rating": 2600,
+            "tags": [],
+        }))
+
+    ensure.assert_called_once()
+    assert payload["post_msg"].startswith("private judge 题目"), payload
+    _cleanup()
+    print("✅ private problem card: revalidates cached statements")
 
 
 def test_private_problem_card_hides_original_problem_identity():
@@ -3572,6 +3719,46 @@ def test_private_problem_card_high_difficulty_warns_after_card():
     assert "题解" in private_text, private_text
     _cleanup()
     print("✅ private problem card: high difficulty warns after card")
+
+
+def test_private_problem_card_falls_back_when_main_self_send_fails():
+    _reset_state()
+    problem = {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": [],
+    }
+    payload = {
+        "post_msg": "MAIN CARD",
+        "sample_messages": ["SAMPLE CARD"],
+        "notes_message": "NOTE CARD",
+    }
+
+    async def _send_private_with_main_self_send_failure(user_id, message):
+        text = _last_text_item({"message": message})
+        if user_id == 1 and text == "MAIN CARD":
+            return None
+        return await _mock_send_private(user_id, message)
+
+    with _all_patches(), \
+        patch("kouhai_bot.private_judge.asyncio.sleep", AsyncMock()), \
+        patch("kouhai_bot.private_judge.build_problem_card_payload", AsyncMock(return_value=payload)), \
+        patch("kouhai_bot.private_judge.send_private_msg", _send_private_with_main_self_send_failure):
+        from kouhai_bot.private_judge import send_problem_card_private
+
+        ok = asyncio.run(send_problem_card_private(UID, GID, problem, prefer_group_card=False))
+
+    assert ok
+    assert _private_forwarded == [], f"Should not forward without main card node: {_private_forwarded}"
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "MAIN CARD" in private_text, private_text
+    assert "SAMPLE CARD" in private_text, private_text
+    assert "NOTE CARD" in private_text, private_text
+    _cleanup()
+    print("✅ private problem card: falls back when main node self-send fails")
 
 
 def test_private_state_load_logs_corrupt_json_once(caplog):

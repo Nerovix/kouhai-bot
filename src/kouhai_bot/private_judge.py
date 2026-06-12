@@ -455,9 +455,7 @@ def resolve_problem_by_pid(pid: str) -> dict:
             "tags": [],
         }
 
-    stmt = load_statement_json(normalized_pid)
-    if not stmt:
-        stmt = _ensure_statement(problem)
+    stmt = _ensure_statement(problem)
     if not stmt:
         raise RuntimeError("statement unavailable")
 
@@ -496,7 +494,7 @@ def resolve_random_problem(group_id: int) -> dict:
     for problem in candidates[:20]:
         pid = _problem_id(problem)
         try:
-            stmt = load_statement_json(pid) or _ensure_statement(problem)
+            stmt = _ensure_statement(problem)
             if stmt:
                 return {
                     "today": pid,
@@ -564,9 +562,7 @@ async def _problem_summary(group_id: int, pid: str, stmt: dict) -> str:
 
 async def build_problem_card_payload(group_id: int, problem: dict, *, greeting: str = "private judge 题目") -> dict:
     pid = str(problem.get("today", "") or "")
-    stmt = load_statement_json(pid)
-    if not stmt:
-        stmt = _ensure_statement(problem)
+    stmt = _ensure_statement(problem)
     summary = await _problem_summary(group_id, pid, stmt) if stmt else ""
     post_msg = greeting
     if summary:
@@ -667,14 +663,16 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
     if not isinstance(notes_message, str):
         notes_message = ""
 
-    node_ids = []
-    for text in [post_msg, *[str(item) for item in sample_messages], notes_message]:
-        if not text:
-            continue
-        resp = await send_private_msg(cfg.bot_qq, build_plain_message(text))
-        if resp:
-            node_ids.append(str(resp))
-    if await _send_forward_nodes_private(user_id, node_ids):
+    main_node_id = await send_private_msg(cfg.bot_qq, build_plain_message(post_msg))
+    node_ids = [str(main_node_id)] if main_node_id else []
+    if main_node_id:
+        for text in [*[str(item) for item in sample_messages], notes_message]:
+            if not text:
+                continue
+            resp = await send_private_msg(cfg.bot_qq, build_plain_message(text))
+            if resp:
+                node_ids.append(str(resp))
+    if main_node_id and await _send_forward_nodes_private(user_id, node_ids):
         await _send_high_difficulty_notice_private(user_id, problem)
         return True
 

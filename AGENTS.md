@@ -26,7 +26,7 @@ NapCat (QQ) ──WS──> worker.py
 - **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before VL pipeline via `_vl_processed` flag. Stale caches with images are re-fetched with Qwen-VL. Problems with non-formula images (tex-graphics / diagrams) are skipped.
 - **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
 - **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection, dispatches commands, and owns the scheduler in one process. There is no SQLite event queue, ingress supervisor, worker hot-swap, or auto-update loop.
-- **Friend request auto-approval**: Normal OneBot `post_type="request"` / `request_type="friend"` events are parsed by `napcat/client.py`, routed by `handlers.process_event()`, and approved via `set_friend_add_request`. QQ/NapCat "doubtful" friend requests are not reliably pushed as request events, so `worker.py` also runs `friend_requests.doubt_friend_request_loop()`, which polls `get_doubt_friends_add_request` and approves with `set_doubt_friends_add_request`. Both paths approve only after the requester is confirmed to be a member of `CURRENT_GROUP`; lookup failure, malformed events, non-friend requests, and non-members are ignored without approving.
+- **Friend request auto-approval**: Normal OneBot `post_type="request"` / `request_type="friend"` events are parsed by `napcat/client.py`, routed by `handlers.process_event()`, and approved via `set_friend_add_request`. QQ/NapCat "doubtful" friend requests are not reliably pushed as request events, so `worker.py` also runs `friend_requests.doubt_friend_request_loop()`, which polls `get_doubt_friends_add_request` every 60 seconds and approves with `set_doubt_friends_add_request`. Both paths approve only after the requester is confirmed to be a member of `CURRENT_GROUP`; lookup failure, malformed events, non-friend requests, and non-members are ignored without approving. Requests that were already consumed by another QQ client may not appear in the doubtful-request poll.
 - **User groups**: `user_groups.py` — all users default to `default`; `USER_GROUPS` configures
   non-default groups such as `starred`/`打星`, their members, submit delay, and rejection
   message. `submit_delay_sec > 0` enables dynamic per-user submit waits for that group:
@@ -161,8 +161,9 @@ This bot is a **reverse WebSocket server** plus a **NapCat HTTP API client**:
   NapCat must connect to it through a OneBot11 `websocketClients` entry.
 - Message sending uses `napcat_http_host:napcat_http_port` and calls NapCat OneBot11
   HTTP actions such as `send_group_msg`, `send_private_msg`,
-  `get_group_member_info`, and `set_friend_add_request`; NapCat must expose an
-  enabled OneBot11 `httpServers` entry on that port.
+  `get_group_member_info`, `set_friend_add_request`,
+  `get_doubt_friends_add_request`, and `set_doubt_friends_add_request`; NapCat
+  must expose an enabled OneBot11 `httpServers` entry on that port.
 
 When NapCat is deployed with Docker Compose, prefer this pattern:
 
@@ -417,8 +418,9 @@ Status helpers used by `/status`:
 - Runs through the state scheduler and records a clear watermark so earlier in-flight
   requests for that user/problem cannot write history after clear
 - On group success it reacts to the triggering message with the typed `👌` emoji payload
-  (`type=2`, `id=128076`) and sends no extra text. In private chats it sends the same
-  face instead of a message reaction.
+  (`type=2`, `id=128076`) and sends no extra text. In private chats it cannot use
+  message reactions, so it sends a plain text `👌` private message instead of a
+  `face` segment.
 
 ### Dispatch Pattern
 
@@ -436,8 +438,10 @@ Private commands do not require @mentions and should not send @ segments back.
 Friend request events are not commands and are not logged to command event logs.
 `process_event()` handles normal `type="request"` friend requests before message
 dispatch. `worker.py` separately polls NapCat's doubtful friend request list because
-those requests may only appear through `get_doubt_friends_add_request`. Both paths
-accept only confirmed `CURRENT_GROUP` members and otherwise return silently.
+those requests may only appear through `get_doubt_friends_add_request`. The poller
+runs every 60 seconds. Both paths accept only confirmed `CURRENT_GROUP` members and
+otherwise return silently; requests already consumed by another QQ client may not be
+visible to the poller.
 
 ### Command Event Log
 
@@ -514,9 +518,12 @@ achievement reports.
    pending archive record is excluded by `request_id`; superseded unanswered `/submit`
    text is visible as `result="superseded"` context.
 6. If `SUBMIT_AC_BACKDOOR` is non-empty and the submission contains that string, return a correct verdict before calling the judge LLM
-7. Otherwise load user history, react with 👀/[睁眼] ack, and call `judge_submission()`
-   `[睁眼]` is a QQ special emoji reaction (emoji id), not plain message text. In private
-   judge, send face messages instead of group message reactions.
+7. Otherwise load user history, react with 👀/[睁眼] ack, and call `judge_submission()`.
+   `[睁眼]` is a QQ special emoji reaction (group emoji id `128064` / face id `289`),
+   not plain message text. In private judge, send `face` id `289` instead of group
+   message reactions or literal `[睁眼]` text. If the judge returns
+   `reaction="123"` for spam/off-topic, private judge sends `face` id `123` instead
+   of text.
 8. Incorrect/off-topic/failure results finalize immediately when compute finishes
 9. If the problem was already solved when this `/submit` entered the queue: reply
    "已经有人解出..." without calling the judge.
@@ -538,9 +545,11 @@ achievement reports.
 
 Private `/submit` uses the same judge path and private history, but a correct result
 only marks the problem solved in `private_judge/users/<uid>.json`; it does not update
-the group scoreboard or daily achievements. If the private problem is the current group
-problem, the success message tells the user they can `/sync` in the service group to
-score it if the group has not already solved it.
+the group scoreboard or daily achievements. The private success message includes the
+problem id (for example `做对了 1234A！`) so users can tell which private problem was
+accepted. If the private problem is the current group problem, the success message
+tells the user they can `/sync` in the service group to score it if the group has not
+already solved it.
 
 ### `/clarify` — Anti-Spoiler Clarification
 
@@ -915,7 +924,8 @@ commands from queuing behind locked operations.
 
 ### 14. Off-topic submissions are NOT saved
 If the judge returns `reaction: "123"`, the submission is marked as troll and
-NOT recorded to scoreboard. The save happens AFTER the reaction check.
+NOT recorded to scoreboard. The save happens AFTER the reaction check. In private
+judge this reaction is delivered as QQ `face` id `123`, not the fallback text `😵`.
 
 ### 15. Do not add local off-topic blacklists for `/submit` or `/clarify`
 Off-topic handling belongs to the model output (`reaction="123"`), not substring

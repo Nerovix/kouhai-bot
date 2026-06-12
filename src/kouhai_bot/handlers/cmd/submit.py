@@ -907,11 +907,11 @@ class GroupCoordinator:
             current_pid = str(current.get("today", "") or "")
         if current_pid and current_pid == pid:
             text = (
-                "做对了！🎉 private judge 不直接加分。"
+                f"做对了 {pid}！🎉 private judge 不直接加分。"
                 "如果群里还没人通过这题，可以到服务群发 /sync，把这次通过同步到群榜。"
             )
         else:
-            text = "做对了！🎉 这次通过只记录在 private judge，不计入群榜。"
+            text = f"做对了 {pid}！🎉 这次通过只记录在 private judge，不计入群榜。"
         if model_tag:
             text = text.rstrip() + model_tag
         self._log_finished(req, "correct", problem=pid, extra={"scope": PRIVATE_SCOPE})

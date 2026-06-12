@@ -1620,7 +1620,8 @@ def test_private_submit_off_topic_sends_face_123():
         for item in _private_sent if item["user_id"] == UID
         for seg in item["message"] if isinstance(seg, dict) and seg.get("type") == "face"
     ]
-    assert {seg.get("data", {}).get("id") for seg in face_segments} == {"123"}, _private_sent
+    face_ids = {seg.get("data", {}).get("id") for seg in face_segments}
+    assert "123" in face_ids, _private_sent
     private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
     assert "😵" not in private_text, private_text
     _cleanup()
@@ -1650,7 +1651,7 @@ def test_submit_operation_not_blocked():
     print("✅ submit: 操作 not blocked")
 
 
-def test_private_submit_sends_text_ack_instead_of_face_or_reaction():
+def test_private_submit_sends_face_ack_instead_of_text_or_reaction():
     _reset_state()
     _setup_problem()
     global _deepseek_response
@@ -1674,13 +1675,13 @@ def test_private_submit_sends_text_ack_instead_of_face_or_reaction():
         for item in _private_sent if item["user_id"] == UID
         for seg in item["message"] if isinstance(seg, dict) and seg.get("type") == "face"
     ]
-    assert not face_segments, f"Private ack should avoid face segments NapCat may reject: {_private_sent}"
+    assert {seg.get("data", {}).get("id") for seg in face_segments} == {"289"}, _private_sent
     assert not _reacted, f"Private submit should not use group reactions: {_reacted}"
     private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
-    assert any(token in private_text for token in ("👀", "[睁眼]")), private_text
+    assert "[睁眼]" not in private_text, private_text
     assert "关键证明" in private_text, private_text
     _cleanup()
-    print("✅ private submit: ack uses safe text message")
+    print("✅ private submit: ack uses face message")
 
 
 def test_private_clear_invalid_usage_sends_text_ack_instead_of_face():
@@ -1740,6 +1741,27 @@ def test_clarify_with_problem():
         f"Expected clarification, got: {_last_text()}"
     _cleanup()
     print("✅ clarify: with problem")
+
+
+def test_private_submit_correct_message_includes_problem_id():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    global _deepseek_response
+    _deepseek_response = {"correct": True, "reason": "ok", "reply": ""}
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.submit import handle
+        from kouhai_bot.handlers.shared import get_today_problem
+        from kouhai_bot.private_judge import set_private_current_problem
+
+        set_private_current_problem(UID, get_today_problem(GID))
+        asyncio.run(handle(**_kwargs(_make_private_event("/submit valid private solution"))))
+
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
+    assert f"做对了 {PID}" in private_text, private_text
+    assert "/sync" in private_text, private_text
+    _cleanup()
+    print("✅ private submit: correct message includes pid")
 
 
 def test_private_clarify_uses_private_problem_summary():
@@ -4125,10 +4147,11 @@ if __name__ == "__main__":
     test_submit_off_topic()
     test_submit_operation_not_blocked()
     test_private_submit_off_topic_sends_face_123()
-    test_private_submit_sends_text_ack_instead_of_face_or_reaction()
+    test_private_submit_sends_face_ack_instead_of_text_or_reaction()
     test_private_clear_invalid_usage_sends_text_ack_instead_of_face()
     test_submit_no_problem()
     test_clarify_with_problem()
+    test_private_submit_correct_message_includes_problem_id()
     test_clarify_no_problem()
     test_clarify_alias_dispatches_to_clarify_handler()
     test_problem_with_data()

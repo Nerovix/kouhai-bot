@@ -1601,6 +1601,32 @@ def test_submit_off_topic():
     print("✅ submit: off-topic")
 
 
+def test_private_submit_off_topic_sends_face_123():
+    _reset_state()
+    _setup_problem()
+    global _deepseek_response
+    _deepseek_response = {"correct": False, "reason": "", "reply": "", "reaction": "123"}
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.submit import handle
+        from kouhai_bot.handlers.shared import get_today_problem
+        from kouhai_bot.private_judge import set_private_current_problem
+
+        set_private_current_problem(UID, get_today_problem(GID))
+        asyncio.run(handle(**_kwargs(_make_private_event("/submit 傻逼"))))
+
+    face_segments = [
+        seg
+        for item in _private_sent if item["user_id"] == UID
+        for seg in item["message"] if isinstance(seg, dict) and seg.get("type") == "face"
+    ]
+    assert {seg.get("data", {}).get("id") for seg in face_segments} == {"123"}, _private_sent
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
+    assert "😵" not in private_text, private_text
+    _cleanup()
+    print("✅ private submit: off-topic uses face 123")
+
+
 def test_submit_operation_not_blocked():
     """Normal text containing 操作 should not be blocked by a local blacklist."""
     _reset_state()
@@ -4098,6 +4124,7 @@ if __name__ == "__main__":
     test_review_after_pending_submit_uses_snapshotted_solved_problem()
     test_submit_off_topic()
     test_submit_operation_not_blocked()
+    test_private_submit_off_topic_sends_face_123()
     test_private_submit_sends_text_ack_instead_of_face_or_reaction()
     test_private_clear_invalid_usage_sends_text_ack_instead_of_face()
     test_submit_no_problem()

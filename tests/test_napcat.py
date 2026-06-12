@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kouhai_bot.napcat.client import (
     build_plain_message,
+    build_private_reaction_message,
     build_text,
     get_doubt_friends_add_requests,
     parse_event,
@@ -43,6 +44,10 @@ def test_build_text():
     seg = build_text("hi")
     assert seg["type"] == "text"
     assert seg["data"]["text"] == "hi"
+
+
+def test_build_private_troll_reaction_uses_face_123():
+    assert build_private_reaction_message("123") == [{"type": "face", "data": {"id": "123"}}]
 
 
 def test_parse_friend_request_event():

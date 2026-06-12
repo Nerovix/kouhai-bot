@@ -199,12 +199,14 @@ def build_face(emoji_id: str | int) -> dict:
 
 
 def build_private_reaction_message(emoji_id: str | int) -> list[dict]:
+    emoji = str(emoji_id)
+    if emoji == "123":
+        return [build_face("123")]
     text = {
         "128064": "👀",
         "289": "[睁眼]",
         "10060": "👌",
-        "123": "😵",
-    }.get(str(emoji_id), "收到～")
+    }.get(emoji, "收到～")
     return build_plain_message(text)
 
 

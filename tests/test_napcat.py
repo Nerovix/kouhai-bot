@@ -46,8 +46,19 @@ def test_build_text():
     assert seg["data"]["text"] == "hi"
 
 
+def test_build_private_submit_ack_uses_face_289():
+    for emoji_id in ("128064", "289"):
+        msg = build_private_reaction_message(emoji_id)
+        assert msg == [{"type": "face", "data": {"id": "289"}}]
+
+
 def test_build_private_troll_reaction_uses_face_123():
     assert build_private_reaction_message("123") == [{"type": "face", "data": {"id": "123"}}]
+
+
+def test_build_private_clear_ack_uses_text():
+    msg = build_private_reaction_message("10060")
+    assert msg == [{"type": "text", "data": {"text": "👌"}}]
 
 
 def test_parse_friend_request_event():

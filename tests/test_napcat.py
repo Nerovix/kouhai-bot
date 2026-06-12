@@ -39,5 +39,16 @@ def test_build_text():
     assert seg["data"]["text"] == "hi"
 
 
+def test_parse_friend_request_event():
+    raw = '{"post_type":"request","request_type":"friend","user_id":456,"comment":"hi","flag":"flag-123"}'
+    event = parse_event(raw)
+    assert event is not None
+    assert event["type"] == "request"
+    assert event["request_type"] == "friend"
+    assert event["user_id"] == 456
+    assert event["comment"] == "hi"
+    assert event["flag"] == "flag-123"
+
+
 def test_parse_invalid_json():
     assert parse_event("not json") is None

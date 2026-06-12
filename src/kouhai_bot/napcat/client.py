@@ -99,6 +99,23 @@ async def send_private_forward_msg(user_id: int, messages: list[dict]) -> int | 
         return None
 
 
+async def set_friend_add_request(flag: str, *, approve: bool = True, remark: str = "") -> bool:
+    """Approve or reject a friend request by OneBot request flag."""
+    try:
+        result = await _http_post("set_friend_add_request", {
+            "flag": str(flag),
+            "approve": bool(approve),
+            "remark": str(remark or ""),
+        })
+        if isinstance(result, dict) and str(result.get("status", "") or "").lower() in {"", "ok"}:
+            return True
+        logger.warning("set_friend_add_request returned unexpected payload: %s", result)
+        return False
+    except Exception as e:
+        logger.error("set_friend_add_request failed: %s", e, exc_info=True)
+        return False
+
+
 async def react_emoji(message_id: str, emoji_id: str) -> None:
     """React with an emoji to a message."""
     try:
@@ -186,6 +203,8 @@ def parse_event(raw: str) -> dict | None:
         return _parse_message(event)
     elif post_type == "notice":
         return _parse_notice(event)
+    elif post_type == "request":
+        return _parse_request(event)
     return None
 
 
@@ -221,6 +240,17 @@ def _parse_notice(event: dict) -> dict:
     return {
         "type": "notice",
         "notice_type": event.get("notice_type", ""),
+        "raw": event,
+    }
+
+
+def _parse_request(event: dict) -> dict:
+    return {
+        "type": "request",
+        "request_type": event.get("request_type", ""),
+        "user_id": event.get("user_id", 0),
+        "comment": event.get("comment", ""),
+        "flag": event.get("flag", ""),
         "raw": event,
     }
 

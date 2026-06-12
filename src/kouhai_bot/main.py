@@ -30,16 +30,29 @@ def main() -> None:
     asyncio.run(main_async())
 
 
-def _listener_pids(port: int) -> set[int]:
+def _listener_lines(port: int) -> list[str]:
     try:
         result = subprocess.run(
             ["ss", "-ltnp", f"( sport = :{port} )"],
             capture_output=True, text=True, check=False,
         )
     except Exception:
-        return set()
+        return []
 
-    return {int(pid) for pid in re.findall(r"pid=(\d+)", result.stdout)}
+    return [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith("LISTEN")
+    ]
+
+
+def _listener_pids(port: int) -> set[int]:
+    lines = _listener_lines(port)
+    return {int(pid) for line in lines for pid in re.findall(r"pid=(\d+)", line)}
+
+
+def _port_has_listener(port: int) -> bool:
+    return bool(_listener_lines(port))
 
 
 def _kill_pids(pids: set[int], sig: int) -> None:
@@ -60,7 +73,7 @@ def _wait_for_port_release(port: int, timeout_sec: float) -> set[int]:
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
         remaining = _current_port_listeners(port)
-        if not remaining:
+        if not _port_has_listener(port):
             return set()
         time.sleep(0.1)
     return _current_port_listeners(port)
@@ -69,16 +82,20 @@ def _wait_for_port_release(port: int, timeout_sec: float) -> set[int]:
 def _stop_existing_instance_on_port(port: int) -> bool:
     pids = _current_port_listeners(port)
     if not pids:
+        if _port_has_listener(port):
+            raise RuntimeError(
+                f"NapCat WS port {port} is occupied, but the listener PID is unavailable"
+            )
         return False
 
     _kill_pids(pids, signal.SIGTERM)
     remaining = _wait_for_port_release(port, timeout_sec=_PORT_WAIT_TIMEOUT_SEC)
-    if not remaining:
+    if not _port_has_listener(port):
         return True
 
     _kill_pids(remaining, signal.SIGKILL)
     remaining = _wait_for_port_release(port, timeout_sec=_PORT_WAIT_TIMEOUT_SEC)
-    if remaining:
+    if _port_has_listener(port):
         raise RuntimeError(
             f"Could not release NapCat WS port {port}; still listening: {sorted(remaining)}"
         )
@@ -116,10 +133,10 @@ def _current_worktree_listener_state(port: int) -> str:
 def _wait_for_port_bind(port: int, timeout_sec: float) -> bool:
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
-        if _current_port_listeners(port):
+        if _port_has_listener(port):
             return True
         time.sleep(0.1)
-    return bool(_current_port_listeners(port))
+    return _port_has_listener(port)
 
 
 def _spawn_detached_bot(port: int, group_id: int, data_dir: str) -> tuple[int, Path]:
@@ -165,8 +182,7 @@ def start() -> None:
     """Start the bot instance in the background if its WS port is free."""
     cfg = get_config()
     port = cfg.napcat_ws_port
-    existing = _current_port_listeners(port)
-    if existing:
+    if _port_has_listener(port):
         _print_start_status(
             port=port,
             action="start",
@@ -232,12 +248,15 @@ def status() -> None:
     cfg = get_config()
     port = cfg.napcat_ws_port
     listeners = sorted(_current_port_listeners(port))
+    occupied = _port_has_listener(port)
     print("action=status")
     print(f"port={port}")
-    print(f"occupied={'yes' if listeners else 'no'}")
-    print(f"current_worktree_running={_current_worktree_listener_state(port) if listeners else 'no'}")
+    print(f"occupied={'yes' if occupied else 'no'}")
+    print(f"current_worktree_running={_current_worktree_listener_state(port) if occupied else 'no'}")
     if listeners:
         print("pids=" + ",".join(str(pid) for pid in listeners))
+    elif occupied:
+        print("pids=unknown")
 
 
 if __name__ == "__main__":

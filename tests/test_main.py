@@ -24,7 +24,7 @@ def test_start_reports_already_running_without_spawning():
     printed = []
 
     with patch("kouhai_bot.main.get_config", return_value=cfg), \
-            patch("kouhai_bot.main._current_port_listeners", return_value={1111}), \
+            patch("kouhai_bot.main._port_has_listener", return_value=True), \
             patch("builtins.print", side_effect=printed.append):
         main.start()
 
@@ -80,6 +80,7 @@ def test_status_reports_idle_when_port_is_free():
 
     with patch("kouhai_bot.main.get_config", return_value=cfg), \
             patch("kouhai_bot.main._current_port_listeners", return_value=set()), \
+            patch("kouhai_bot.main._port_has_listener", return_value=False), \
             patch("builtins.print", side_effect=printed.append):
         main.status()
 
@@ -98,6 +99,7 @@ def test_status_reports_current_worktree_listener():
 
     with patch("kouhai_bot.main.get_config", return_value=cfg), \
             patch("kouhai_bot.main._current_port_listeners", return_value={2201}), \
+            patch("kouhai_bot.main._port_has_listener", return_value=True), \
             patch("kouhai_bot.main._repo_root", return_value=repo_root), \
             patch("kouhai_bot.main._pid_cwd", return_value=repo_root), \
             patch("builtins.print", side_effect=printed.append):
@@ -118,6 +120,7 @@ def test_status_reports_other_listener_when_worktree_differs():
 
     with patch("kouhai_bot.main.get_config", return_value=cfg), \
             patch("kouhai_bot.main._current_port_listeners", return_value={3311, 3312}), \
+            patch("kouhai_bot.main._port_has_listener", return_value=True), \
             patch("kouhai_bot.main._repo_root", return_value=Path("/repo/current")), \
             patch("kouhai_bot.main._pid_cwd", side_effect=[Path("/repo/other"), Path("/repo/elsewhere")]), \
             patch("builtins.print", side_effect=printed.append):
@@ -131,6 +134,25 @@ def test_status_reports_other_listener_when_worktree_differs():
         "pids=3311,3312",
     ]
 
+
+
+def test_status_reports_pidless_listener_as_occupied():
+    cfg = SimpleNamespace(napcat_ws_port=8103, current_group=123456, data_dir="/tmp/data")
+    printed = []
+
+    with patch("kouhai_bot.main.get_config", return_value=cfg), \
+            patch("kouhai_bot.main._current_port_listeners", return_value=set()), \
+            patch("kouhai_bot.main._port_has_listener", return_value=True), \
+            patch("builtins.print", side_effect=printed.append):
+        main.status()
+
+    assert printed == [
+        "action=status",
+        "port=8103",
+        "occupied=yes",
+        "current_worktree_running=no",
+        "pids=unknown",
+    ]
 
 def test_spawn_detached_bot_uses_nohup_and_group_daily_log(tmp_path):
     fake_proc = SimpleNamespace(pid=2468)

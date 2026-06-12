@@ -116,6 +116,38 @@ async def set_friend_add_request(flag: str, *, approve: bool = True, remark: str
         return False
 
 
+async def get_doubt_friends_add_requests(*, count: int = 50) -> list[dict]:
+    """Return QQ/NapCat's pending doubtful friend requests."""
+    try:
+        result = await _http_post("get_doubt_friends_add_request", {
+            "count": int(count),
+        })
+        if isinstance(result, dict) and str(result.get("status", "") or "").lower() in {"", "ok"}:
+            data = result.get("data", [])
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+        logger.warning("get_doubt_friends_add_request returned unexpected payload: %s", result)
+    except Exception as e:
+        logger.error("get_doubt_friends_add_request failed: %s", e, exc_info=True)
+    return []
+
+
+async def set_doubt_friends_add_request(flag: str, *, approve: bool = True) -> bool:
+    """Approve or reject a doubtful friend request by NapCat doubt-request flag."""
+    try:
+        result = await _http_post("set_doubt_friends_add_request", {
+            "flag": str(flag),
+            "approve": bool(approve),
+        })
+        if isinstance(result, dict) and str(result.get("status", "") or "").lower() in {"", "ok"}:
+            return True
+        logger.warning("set_doubt_friends_add_request returned unexpected payload: %s", result)
+        return False
+    except Exception as e:
+        logger.error("set_doubt_friends_add_request failed: %s", e, exc_info=True)
+        return False
+
+
 async def react_emoji(message_id: str, emoji_id: str) -> None:
     """React with an emoji to a message."""
     try:

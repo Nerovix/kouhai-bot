@@ -149,6 +149,16 @@ def build_face(emoji_id: str | int) -> dict:
     return {"type": "face", "data": {"id": str(emoji_id)}}
 
 
+def build_private_reaction_message(emoji_id: str | int) -> list[dict]:
+    text = {
+        "128064": "👀",
+        "289": "[睁眼]",
+        "10060": "👌",
+        "123": "😵",
+    }.get(str(emoji_id), "收到～")
+    return build_plain_message(text)
+
+
 def build_plain_message(text: str) -> list[dict]:
     return [build_text(text)]
 

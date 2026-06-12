@@ -26,7 +26,7 @@ NapCat (QQ) ──WS──> worker.py
 - **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before VL pipeline via `_vl_processed` flag. Stale caches with images are re-fetched with Qwen-VL. Problems with non-formula images (tex-graphics / diagrams) are skipped.
 - **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
 - **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection, dispatches commands, and owns the scheduler in one process. There is no SQLite event queue, ingress supervisor, worker hot-swap, or auto-update loop.
-- **Friend request auto-approval**: OneBot `post_type="request"` events are parsed by `napcat/client.py` and handled in `handlers.process_event()`. Only `request_type="friend"` is considered. The bot calls `set_friend_add_request` only when the requester is confirmed to be a member of `CURRENT_GROUP` via NapCat member lookup; lookup failure, malformed events, non-friend requests, and non-members are ignored without approving.
+- **Friend request auto-approval**: Normal OneBot `post_type="request"` / `request_type="friend"` events are parsed by `napcat/client.py`, routed by `handlers.process_event()`, and approved via `set_friend_add_request`. QQ/NapCat "doubtful" friend requests are not reliably pushed as request events, so `worker.py` also runs `friend_requests.doubt_friend_request_loop()`, which polls `get_doubt_friends_add_request` and approves with `set_doubt_friends_add_request`. Both paths approve only after the requester is confirmed to be a member of `CURRENT_GROUP`; lookup failure, malformed events, non-friend requests, and non-members are ignored without approving.
 - **User groups**: `user_groups.py` — all users default to `default`; `USER_GROUPS` configures
   non-default groups such as `starred`/`打星`, their members, submit delay, and rejection
   message. `submit_delay_sec > 0` enables dynamic per-user submit waits for that group:
@@ -434,8 +434,10 @@ service group, and only allows the private command whitelist: `/setproblem`, `/p
 Private commands do not require @mentions and should not send @ segments back.
 
 Friend request events are not commands and are not logged to command event logs.
-`process_event()` handles `type="request"` before message dispatch: it accepts only
-friend requests from confirmed `CURRENT_GROUP` members and otherwise returns silently.
+`process_event()` handles normal `type="request"` friend requests before message
+dispatch. `worker.py` separately polls NapCat's doubtful friend request list because
+those requests may only appear through `get_doubt_friends_add_request`. Both paths
+accept only confirmed `CURRENT_GROUP` members and otherwise return silently.
 
 ### Command Event Log
 
@@ -880,9 +882,9 @@ NapCat's `set_msg_emoji_like` API expects `message_id` as int. Pass string and i
 silently fails.
 
 ### 8. Friend requests require confirmed service-group membership
-Auto-approval must remain fail-closed. Do not call `set_friend_add_request` unless
-NapCat confirms the requester is in `CURRENT_GROUP`; if member lookup fails, ignore
-the request rather than approving it.
+Auto-approval must remain fail-closed. Do not call `set_friend_add_request` or
+`set_doubt_friends_add_request` unless NapCat confirms the requester is in
+`CURRENT_GROUP`; if member lookup fails, ignore the request rather than approving it.
 
 ### 9. save_scoreboard needs indent=2
 Must pass `json.dump(sb, f, ensure_ascii=False, indent=2)` for backward compatibility

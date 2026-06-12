@@ -15,13 +15,13 @@ from ..eventlog import (
     log_command_finished,
     log_command_received,
 )
+from ..friend_requests import handle_friend_request_event
 from ..napcat.client import (
     build_plain_message,
     build_reply,
     send_group_msg,
     send_private_msg,
     react_emoji,
-    set_friend_add_request,
 )
 
 logger = logging.getLogger("kouhai-bot.handlers")
@@ -72,63 +72,6 @@ def should_respond(msg_type: str, was_mentioned: bool) -> bool:
     return was_mentioned
 
 
-async def _is_service_group_member(group_id: int, user_id: int) -> bool:
-    from ..napcat import client as napcat_client
-
-    try:
-        resp = await napcat_client._http_post(
-            "get_group_member_info",
-            {"group_id": group_id, "user_id": user_id, "no_cache": True},
-        )
-        if isinstance(resp, dict) and resp.get("status") == "ok" and isinstance(resp.get("data"), dict):
-            return bool(resp["data"])
-    except Exception:
-        pass
-    try:
-        resp = await napcat_client._http_post("get_group_member_list", {"group_id": group_id})
-        members = resp.get("data", []) if isinstance(resp, dict) and resp.get("status") == "ok" else []
-        return any(str(item.get("user_id", "")) == str(user_id) for item in members if isinstance(item, dict))
-    except Exception:
-        return False
-
-
-async def _handle_request_event(event: dict) -> None:
-    if event.get("request_type") != "friend":
-        return
-
-    cfg = get_config()
-    flag = str(event.get("flag", "") or "")
-    try:
-        user_id = int(event.get("user_id", 0) or 0)
-    except (TypeError, ValueError):
-        user_id = 0
-
-    if not flag or user_id <= 0:
-        logger.warning("ignoring malformed friend request event: %s", event.get("raw", event))
-        return
-    if str(user_id) == str(cfg.bot_qq):
-        return
-
-    if not await _is_service_group_member(cfg.current_group, user_id):
-        logger.info(
-            "friend request from user_%s ignored: not a confirmed member of group_%s",
-            user_id,
-            cfg.current_group,
-        )
-        return
-
-    if await set_friend_add_request(flag, approve=True):
-        logger.info(
-            "approved friend request from service group member user_%s",
-            user_id,
-        )
-    else:
-        logger.warning(
-            "failed to approve friend request from service group member user_%s",
-            user_id,
-        )
-
-
 def _normalize_leading_command_junk(text: str) -> str:
     """Strip invisible leading junk only when it prefixes a slash command.
 
@@ -167,10 +110,10 @@ async def process_event(
     if event["type"] == "request":
         if spawn_handlers:
             return asyncio.create_task(
-                _handle_request_event(event),
+                handle_friend_request_event(event),
                 name=f"request_{event.get('request_type', 'unknown')}_{event.get('user_id', 0)}",
             )
-        await _handle_request_event(event)
+        await handle_friend_request_event(event)
         return None
 
     if event["type"] != "message":

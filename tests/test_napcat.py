@@ -3,7 +3,13 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from kouhai_bot.napcat.client import parse_event, build_plain_message, build_text
+from kouhai_bot.napcat.client import (
+    build_plain_message,
+    build_text,
+    get_doubt_friends_add_requests,
+    parse_event,
+    set_doubt_friends_add_request,
+)
 
 
 def test_parse_group_message():
@@ -52,3 +58,35 @@ def test_parse_friend_request_event():
 
 def test_parse_invalid_json():
     assert parse_event("not json") is None
+
+
+def test_get_doubt_friends_add_requests(monkeypatch):
+    calls = []
+
+    async def fake_http_post(action, data):
+        calls.append((action, data))
+        return {"status": "ok", "data": [{"flag": "uid-flag", "uin": "456"}]}
+
+    monkeypatch.setattr("kouhai_bot.napcat.client._http_post", fake_http_post)
+
+    import asyncio
+
+    result = asyncio.run(get_doubt_friends_add_requests(count=3))
+
+    assert calls == [("get_doubt_friends_add_request", {"count": 3})]
+    assert result == [{"flag": "uid-flag", "uin": "456"}]
+
+
+def test_set_doubt_friends_add_request(monkeypatch):
+    calls = []
+
+    async def fake_http_post(action, data):
+        calls.append((action, data))
+        return {"status": "ok", "data": None}
+
+    monkeypatch.setattr("kouhai_bot.napcat.client._http_post", fake_http_post)
+
+    import asyncio
+
+    assert asyncio.run(set_doubt_friends_add_request("uid-flag", approve=True)) is True
+    assert calls == [("set_doubt_friends_add_request", {"flag": "uid-flag", "approve": True})]

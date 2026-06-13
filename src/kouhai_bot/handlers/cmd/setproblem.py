@@ -73,6 +73,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
     arg = _strip_command(raw_text)
     problem: dict | None = None
     prefer_group_card = False
+    from_quoted_card = False
     reply_to = _reply_to_message_id(segments)
 
     if reply_to and not arg:
@@ -81,6 +82,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
             await send_private_msg(user_id, build_plain_message(_UNKNOWN_CARD_REPLY))
             return
         arg = pid
+        from_quoted_card = True
 
     if not arg:
         problem = get_today_problem(group_id)
@@ -109,20 +111,34 @@ async def handle(group_id: int, user_id: int, sender: dict,
             ))
             return
         pid = problem_id_from_ref(*parsed)
-        await send_private_msg(user_id, build_plain_message(f"正在设置 CF{pid}，稍等一下～"))
+        if from_quoted_card:
+            await send_private_msg(user_id, build_plain_message("正在设置引用的题目，稍等一下～"))
+        else:
+            await send_private_msg(user_id, build_plain_message(f"正在设置 CF{pid}，稍等一下～"))
         try:
             problem = await asyncio.to_thread(resolve_problem_by_pid, pid)
         except NonFormulaImageProblem:
-            await send_private_msg(user_id, build_plain_message(
-                f"CF{pid} 的题面里包含非公式图片，我现在对这类题目的处理能力有限，"
-                "可能看不完整题意。建议先换一道题～"
-            ))
+            if from_quoted_card:
+                await send_private_msg(user_id, build_plain_message(
+                    "这道题的题面里包含非公式图片，我现在对这类题目的处理能力有限，"
+                    "可能看不完整题意。建议先换一道题～"
+                ))
+            else:
+                await send_private_msg(user_id, build_plain_message(
+                    f"CF{pid} 的题面里包含非公式图片，我现在对这类题目的处理能力有限，"
+                    "可能看不完整题意。建议先换一道题～"
+                ))
             return
         except Exception as e:
             logger.warning("private setproblem resolve failed for %s: %s", pid, e, exc_info=True)
-            await send_private_msg(user_id, build_plain_message(
-                f"CF{pid} 的题面暂时拉不到，稍后再试试？"
-            ))
+            if from_quoted_card:
+                await send_private_msg(user_id, build_plain_message(
+                    "这道题的题面暂时拉不到，稍后再试试？"
+                ))
+            else:
+                await send_private_msg(user_id, build_plain_message(
+                    f"CF{pid} 的题面暂时拉不到，稍后再试试？"
+                ))
             return
 
     if not problem:

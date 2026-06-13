@@ -3761,7 +3761,8 @@ def test_private_setproblem_uses_referenced_problem_card():
         " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
         for item in _private_sent
     )
-    assert f"正在设置 CF{PID2}" in private_text, private_text
+    assert "正在设置引用的题目" in private_text, private_text
+    assert PID2 not in private_text and f"CF{PID2}" not in private_text, private_text
     _cleanup()
     print("✅ private setproblem: referenced problem card works")
 
@@ -3804,6 +3805,35 @@ def test_private_setproblem_unknown_referenced_card_is_friendly():
     print("✅ private setproblem: unknown referenced card is friendly")
 
 
+def test_private_setproblem_referenced_card_resolve_error_hides_problem_id():
+    _reset_state()
+    _write_group_file(GID, "problem_card_refs.json", {
+        "card_old": {"problem": PID2, "source": "private_card", "created_at": 1},
+    })
+
+    with _all_patches(), \
+        patch("kouhai_bot.handlers.cmd.setproblem.resolve_problem_by_pid", side_effect=RuntimeError("boom")):
+        from kouhai_bot.handlers.cmd.setproblem import handle
+
+        event = _make_private_event(
+            "/sp",
+            message=[
+                {"type": "reply", "data": {"id": "card_old"}},
+                {"type": "text", "data": {"text": "/sp"}},
+            ],
+        )
+        asyncio.run(handle(**_kwargs(event)))
+
+    private_text = "\n".join(
+        " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
+        for item in _private_sent
+    )
+    assert "这道题的题面暂时拉不到" in private_text, private_text
+    assert PID2 not in private_text and f"CF{PID2}" not in private_text, private_text
+    _cleanup()
+    print("✅ private setproblem: referenced card resolve error hides problem id")
+
+
 def test_private_setproblem_explicit_arg_wins_over_referenced_card():
     _reset_state()
     _write_group_file(GID, "problem_card_refs.json", {
@@ -3836,6 +3866,11 @@ def test_private_setproblem_explicit_arg_wins_over_referenced_card():
 
     resolve.assert_called_once_with(PID)
     assert current and current["today"] == PID, current
+    private_text = "\n".join(
+        " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
+        for item in _private_sent
+    )
+    assert f"正在设置 CF{PID}" in private_text, private_text
     _cleanup()
     print("✅ private setproblem: explicit arg wins over referenced card")
 
@@ -4598,5 +4633,6 @@ if __name__ == "__main__":
     test_private_setproblem_current_copies_empty_private_history()
     test_private_setproblem_uses_referenced_problem_card()
     test_private_setproblem_unknown_referenced_card_is_friendly()
+    test_private_setproblem_referenced_card_resolve_error_hides_problem_id()
     test_private_setproblem_explicit_arg_wins_over_referenced_card()
     print(f"\n🎉 E2E tests passed")

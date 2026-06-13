@@ -25,19 +25,30 @@ from ...private_judge import (
     send_problem_card_private,
     set_private_current_problem,
 )
-from ..shared import get_today_problem
+from ..shared import get_problem_card_ref_pid, get_today_problem
 
 logger = logging.getLogger("kouhai-bot.cmd.setproblem")
 
 _RANDOM_ARGS = {"random", "rand", "r"}
+_UNKNOWN_CARD_REPLY = (
+    "这条引用我认不出对应哪道题哦，可能不是题目卡片，"
+    "也可能卡片太久了～你可以直接发 /sp 当前群题、/sp random，或者发 CF 题号/链接。"
+)
 
 
 def _strip_command(raw_text: str) -> str:
     text = raw_text.lstrip()
-    match = re.match(r"/setproblem(?:\s+|$)", text)
+    match = re.match(r"/(?:setproblem|sp)(?:\s+|$)", text)
     if not match:
         return ""
     return text[match.end():].strip()
+
+
+def _reply_to_message_id(segments: list) -> str:
+    for seg in segments:
+        if seg.get("type") == "reply":
+            return str(seg.get("data", {}).get("id", "") or "")
+    return ""
 
 
 def _history_message(*, private_count: int, group_count: int, copied: bool) -> str:
@@ -62,6 +73,14 @@ async def handle(group_id: int, user_id: int, sender: dict,
     arg = _strip_command(raw_text)
     problem: dict | None = None
     prefer_group_card = False
+    reply_to = _reply_to_message_id(segments)
+
+    if reply_to and not arg:
+        pid = get_problem_card_ref_pid(group_id, reply_to)
+        if not pid:
+            await send_private_msg(user_id, build_plain_message(_UNKNOWN_CARD_REPLY))
+            return
+        arg = pid
 
     if not arg:
         problem = get_today_problem(group_id)
@@ -142,7 +161,7 @@ def register() -> None:
     registry.register(CommandDef(
         name="setproblem",
         aliases=["sp"],
-        description="设置 private judge 当前题（题号/链接/random；空参数使用当前群题）",
+        description="设置 private judge 当前题（题号/链接/random；空参数或引用题目卡片）",
         usage="[题号|链接|random]",
         handler=handle,
         cooldown=3,

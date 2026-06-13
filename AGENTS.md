@@ -342,7 +342,7 @@ No repository-local runtime queue is used.
 | `/help` | help.py | `handle` | ❌ | — | Auto-generated help (forward card) |
 | `/review` (`/rv`) | review.py | `handle` | ✅ state scheduler | per-provider `review_model` | Discuss the latest solved group/private problem by default; quoted group problem cards can target older problems |
 | `/status` | stubs.py | `handle_status` | ❌ | — | Check whether this group or private judge has active stateful work |
-| `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, or `random` |
+| `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, `random`, or a quoted problem card |
 | `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite |
 | `/testcd` | testcd.py | `handle` | ❌ | — | Private-only; show whether this user can submit the current group problem or how long remains in dynamic submit CD |
 
@@ -610,7 +610,8 @@ commands are rejected in private with a friendly message.
 - Private and group contexts are independent by default. `copy_records()` is used when
   copying history between sides so later writes do not share dict instances.
 - `/setproblem` (`/sp`) is private-only. Empty args select the current group problem;
-  `CF2234B`, `2234B`, Codeforces problemset/contest links, path fragments such as
+  replying to a known problem card with `/sp` selects that card's pid. `CF2234B`,
+  `2234B`, Codeforces problemset/contest links, path fragments such as
   `/contest/2233/problem/F` and `problem/2230/F`, and `random` are supported.
   If private history is empty and group history exists for the selected pid, it copies
   group history into private. If the group has already solved that pid, it marks private

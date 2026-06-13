@@ -3724,6 +3724,122 @@ def test_private_setproblem_current_copies_empty_private_history():
     print("✅ private setproblem: copies empty private history")
 
 
+def test_private_setproblem_uses_referenced_problem_card():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_group_file(GID, "problem_card_refs.json", {
+        "card_old": {"problem": PID2, "source": "private_card", "created_at": 1},
+    })
+    quoted_problem = {
+        "today": PID2,
+        "contestId": 100,
+        "index": "A",
+        "name": "Old Problem",
+        "rating": 2200,
+        "tags": ["dp"],
+    }
+
+    with _all_patches(), \
+        patch("kouhai_bot.handlers.cmd.setproblem.resolve_problem_by_pid", return_value=quoted_problem) as resolve, \
+        patch("kouhai_bot.handlers.cmd.setproblem.send_problem_card_private", new=AsyncMock(return_value=True)):
+        from kouhai_bot.handlers.cmd.setproblem import handle
+        from kouhai_bot.private_judge import get_private_current_problem
+
+        event = _make_private_event(
+            "/sp",
+            message=[
+                {"type": "reply", "data": {"id": "card_old"}},
+                {"type": "text", "data": {"text": "/sp"}},
+            ],
+        )
+        asyncio.run(handle(**_kwargs(event)))
+        current = get_private_current_problem(UID)
+
+    resolve.assert_called_once_with(PID2)
+    assert current and current["today"] == PID2, current
+    private_text = "\n".join(
+        " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
+        for item in _private_sent
+    )
+    assert f"正在设置 CF{PID2}" in private_text, private_text
+    _cleanup()
+    print("✅ private setproblem: referenced problem card works")
+
+
+def test_private_setproblem_unknown_referenced_card_is_friendly():
+    _reset_state()
+    existing_problem = {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Existing Problem",
+        "rating": 2600,
+        "tags": [],
+    }
+
+    with _all_patches(), \
+        patch("kouhai_bot.handlers.cmd.setproblem.resolve_problem_by_pid") as resolve:
+        from kouhai_bot.handlers.cmd.setproblem import handle
+        from kouhai_bot.private_judge import get_private_current_problem, set_private_current_problem
+
+        set_private_current_problem(UID, existing_problem)
+        event = _make_private_event(
+            "/sp",
+            message=[
+                {"type": "reply", "data": {"id": "missing_card"}},
+                {"type": "text", "data": {"text": "/sp"}},
+            ],
+        )
+        asyncio.run(handle(**_kwargs(event)))
+        current = get_private_current_problem(UID)
+
+    resolve.assert_not_called()
+    assert current and current["today"] == PID, current
+    private_text = "\n".join(
+        " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
+        for item in _private_sent
+    )
+    assert "认不出对应哪道题" in private_text and "可能不是题目卡片" in private_text, private_text
+    _cleanup()
+    print("✅ private setproblem: unknown referenced card is friendly")
+
+
+def test_private_setproblem_explicit_arg_wins_over_referenced_card():
+    _reset_state()
+    _write_group_file(GID, "problem_card_refs.json", {
+        "card_old": {"problem": PID2, "source": "private_card", "created_at": 1},
+    })
+    explicit_problem = {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Explicit Problem",
+        "rating": 2600,
+        "tags": ["math"],
+    }
+
+    with _all_patches(), \
+        patch("kouhai_bot.handlers.cmd.setproblem.resolve_problem_by_pid", return_value=explicit_problem) as resolve, \
+        patch("kouhai_bot.handlers.cmd.setproblem.send_problem_card_private", new=AsyncMock(return_value=True)):
+        from kouhai_bot.handlers.cmd.setproblem import handle
+        from kouhai_bot.private_judge import get_private_current_problem
+
+        event = _make_private_event(
+            f"/sp {PID}",
+            message=[
+                {"type": "reply", "data": {"id": "card_old"}},
+                {"type": "text", "data": {"text": f"/sp {PID}"}},
+            ],
+        )
+        asyncio.run(handle(**_kwargs(event)))
+        current = get_private_current_problem(UID)
+
+    resolve.assert_called_once_with(PID)
+    assert current and current["today"] == PID, current
+    _cleanup()
+    print("✅ private setproblem: explicit arg wins over referenced card")
+
+
 def test_resolve_problem_by_pid_revalidates_cached_statement():
     _reset_state()
     _write_statement(PID, {
@@ -4471,4 +4587,8 @@ if __name__ == "__main__":
     test_sync_history_card_chunks_long_history()
     test_private_sync_from_solved_group_marks_private_review_state()
     test_parse_problem_ref_accepts_loose_codeforces_links()
+    test_private_setproblem_current_copies_empty_private_history()
+    test_private_setproblem_uses_referenced_problem_card()
+    test_private_setproblem_unknown_referenced_card_is_friendly()
+    test_private_setproblem_explicit_arg_wins_over_referenced_card()
     print(f"\n🎉 E2E tests passed")

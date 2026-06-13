@@ -34,7 +34,7 @@ _PRIVATE_ALLOWED_COMMANDS = {
     "review",
     "clear",
     "sync",
-    "cd",
+    "testcd",
     "status",
     "help",
     "tag",

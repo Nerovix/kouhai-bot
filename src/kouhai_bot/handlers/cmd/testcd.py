@@ -1,4 +1,4 @@
-"""/cd — check private judge submit cooldown for the current group problem."""
+"""/testcd — check private judge submit cooldown for the current group problem."""
 
 from __future__ import annotations
 
@@ -27,15 +27,15 @@ def _format_friendly_duration(seconds: int) -> str:
 async def handle(group_id: int, user_id: int, sender: dict,
                  message_id: str, raw_text: str, segments: list,
                  event: dict) -> None:
-    if raw_text.strip() != "/cd":
+    if raw_text.strip() != "/testcd":
         if event.get("message_type") == "private":
-            await send_private_msg(user_id, build_plain_message("用法：/cd"))
+            await send_private_msg(user_id, build_plain_message("用法：/testcd"))
         else:
-            await send_group_msg(group_id, build_plain_message("/cd 请在私聊里使用～"))
+            await send_group_msg(group_id, build_plain_message("/testcd 请在私聊里使用～"))
         return
 
     if event.get("message_type") != "private":
-        await send_group_msg(group_id, build_plain_message("/cd 请在私聊里使用～"))
+        await send_group_msg(group_id, build_plain_message("/testcd 请在私聊里使用～"))
         return
 
     remaining = submit_remaining_sec(user_id, group_id)
@@ -48,7 +48,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
 
 def register() -> None:
     registry.register(CommandDef(
-        name="cd",
+        name="testcd",
         aliases=[],
         description="查看当前群题提交 CD",
         usage="",

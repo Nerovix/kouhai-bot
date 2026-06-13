@@ -17,7 +17,7 @@ NapCat (QQ) ──WS──> worker.py
 - **Command auto-discovery**: Each command in `handlers/cmd/*.py` calls `register()` at module load. The `registry.discover_commands()` scans with `pkgutil.iter_modules`. Adding a new command = create a `.py` file with a `register()` function.
 - **Limited aliases**: Only six short aliases are supported: `/newproblem`→`/np`, `/problem`→`/pb`, `/submit`→`/sbm`, `/review`→`/rv`, `/clarify`→`/clrf`, `/setproblem`→`/sp`. Old aliases such as `/sb`, `/排名`, and Chinese aliases remain unsupported. New commands default to `aliases=[]` unless explicitly approved.
 - **Help auto-generation**: `handlers/cmd/help.py` reads `registry.all_commands()` and builds the help text dynamically. Descriptions must match old bridge.py wording.
-  `usage` field = args suffix in /help display (e.g. `usage="你的做法"` → `/submit 你的做法`). Group help hides private-only details for `/setproblem`, `/sync`, and `/cd` and only briefly mentions private judge; private help lists the private-judge command set.
+  `usage` field = args suffix in /help display (e.g. `usage="你的做法"` → `/submit 你的做法`). Group help hides private-only details for `/setproblem`, `/sync`, and `/testcd` and only briefly mentions private judge; private help lists the private-judge command set.
   Group and private help are both delivered as merged-forward cards, with direct text
   only as fallback.
 - **Scheduler current-group config**: `~/.kouhai-bot/scheduler_config.json` stores job list + time overrides for `CURRENT_GROUP`. Jobs are defined in `scheduler/jobs.py`.
@@ -344,7 +344,7 @@ No repository-local runtime queue is used.
 | `/status` | stubs.py | `handle_status` | ❌ | — | Check whether this group or private judge has active stateful work |
 | `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, or `random` |
 | `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite |
-| `/cd` | cd.py | `handle` | ❌ | — | Private-only; show whether this user can submit the current group problem or how long remains in dynamic submit CD |
+| `/testcd` | testcd.py | `handle` | ❌ | — | Private-only; show whether this user can submit the current group problem or how long remains in dynamic submit CD |
 
 ### Stateful Command Runtime
 
@@ -433,7 +433,7 @@ Read-only commands (`/problem`, `/tag`, `/scoreboard`, `/help`, `/status`) still
 not enter the state scheduler.
 Private dispatch maps DMs to `CURRENT_GROUP`, requires the sender to be a member of that
 service group, and only allows the private command whitelist: `/setproblem`, `/problem`,
-`/tag`, `/submit`, `/clarify`, `/review`, `/clear`, `/sync`, `/cd`, `/status`, and `/help`.
+`/tag`, `/submit`, `/clarify`, `/review`, `/clear`, `/sync`, `/testcd`, `/status`, and `/help`.
 Private commands do not require @mentions and should not send @ segments back.
 
 Friend request events are not commands and are not logged to command event logs.
@@ -622,7 +622,7 @@ commands are rejected in private with a friendly message.
   ability on image-dependent statements and suggest choosing another problem.
 - `/problem` in private resends the selected private problem card. `/tag`, `/status`,
   `/clear`, `/submit`, `/clarify`, and `/review` all operate on private state and do
-  not emit group @mentions. `/cd` is private-only and reports the current service-group
+  not emit group @mentions. `/testcd` is private-only and reports the current service-group
   submit CD: it says the user can submit now when `submit_remaining_sec()` is zero,
   otherwise it formats the remaining time as days/hours/minutes/seconds.
 - `/sync` copies the **current group problem only** between group and private judge.

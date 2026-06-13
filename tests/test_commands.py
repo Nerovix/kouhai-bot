@@ -4015,6 +4015,10 @@ def test_private_problem_card_high_difficulty_warns_after_card():
 
     assert ok
     assert len(_private_forwarded) == 1, f"Expected private problem card, got: {_private_forwarded}"
+    with open(os.path.join(_data_dir(), "groups", str(GID), "problem_card_refs.json"), encoding="utf-8") as f:
+        refs = json.load(f)
+    assert refs[str(3001)]["problem"] == PID
+    assert refs[str(3001)]["source"] == "private_problem_card"
     private_text = "\n".join(
         " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
         for item in _private_sent
@@ -4057,6 +4061,10 @@ def test_private_problem_card_falls_back_when_main_self_send_fails():
 
     assert ok
     assert _private_forwarded == [], f"Should not forward without main card node: {_private_forwarded}"
+    with open(os.path.join(_data_dir(), "groups", str(GID), "problem_card_refs.json"), encoding="utf-8") as f:
+        refs = json.load(f)
+    saved_pids = [item["problem"] for item in refs.values() if item.get("source") == "private_problem_card"]
+    assert saved_pids == [PID, PID, PID], refs
     private_text = "\n".join(_last_text_item(item) for item in _private_sent)
     assert "MAIN CARD" in private_text, private_text
     assert "SAMPLE CARD" in private_text, private_text

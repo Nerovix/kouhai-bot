@@ -23,6 +23,7 @@ from .handlers.shared import (
     high_difficulty_notice,
     load_scoreboard,
     save_problem_summary,
+    save_problem_card_ref,
     summarize_problem,
     translate_sample_notes,
 )
@@ -624,6 +625,15 @@ async def _send_high_difficulty_notice_private(user_id: int, problem: dict) -> N
         logger.warning("failed to send private high-difficulty notice: %s", e)
 
 
+def _save_private_problem_card_ref(group_id: int, message_id: int | None, pid: str) -> None:
+    if not message_id or not pid:
+        return
+    try:
+        save_problem_card_ref(group_id, message_id, pid, "private_problem_card")
+    except Exception as e:
+        logger.warning("failed to save private problem card ref for %s: %s", pid, e)
+
+
 async def send_problem_card_private(user_id: int, group_id: int, problem: dict, *, prefer_group_card: bool = True) -> bool:
     cfg = get_config()
     pid = str(problem.get("today", "") or "")
@@ -649,7 +659,9 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
             value = payload.get(key)
             if value:
                 node_ids.append(str(value))
-        if await _send_forward_nodes_private(user_id, node_ids):
+        fwd_resp = await _send_forward_nodes_private(user_id, node_ids)
+        if fwd_resp:
+            _save_private_problem_card_ref(group_id, fwd_resp, pid)
             await _send_high_difficulty_notice_private(user_id, problem)
             return True
 
@@ -672,15 +684,21 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
             resp = await send_private_msg(cfg.bot_qq, build_plain_message(text))
             if resp:
                 node_ids.append(str(resp))
-    if main_node_id and await _send_forward_nodes_private(user_id, node_ids):
-        await _send_high_difficulty_notice_private(user_id, problem)
-        return True
+    if main_node_id:
+        fwd_resp = await _send_forward_nodes_private(user_id, node_ids)
+        if fwd_resp:
+            _save_private_problem_card_ref(group_id, fwd_resp, pid)
+            await _send_high_difficulty_notice_private(user_id, problem)
+            return True
 
-    await send_private_msg(user_id, build_plain_message(post_msg))
+    direct_id = await send_private_msg(user_id, build_plain_message(post_msg))
+    _save_private_problem_card_ref(group_id, direct_id, pid)
     for sample in sample_messages:
-        await send_private_msg(user_id, build_plain_message(str(sample)))
+        sample_id = await send_private_msg(user_id, build_plain_message(str(sample)))
+        _save_private_problem_card_ref(group_id, sample_id, pid)
     if notes_message:
-        await send_private_msg(user_id, build_plain_message(notes_message))
+        notes_id = await send_private_msg(user_id, build_plain_message(notes_message))
+        _save_private_problem_card_ref(group_id, notes_id, pid)
     await _send_high_difficulty_notice_private(user_id, problem)
     return True
 

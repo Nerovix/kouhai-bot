@@ -82,7 +82,13 @@ async def handle(group_id: int, user_id: int, sender: dict,
 
     review_pid = ""
     if scope == PRIVATE_SCOPE:
-        review_pid = get_private_review_pid(user_id, group_id)
+        if reply_to:
+            review_pid = get_problem_card_ref_pid(group_id, reply_to)
+            if not review_pid:
+                await send_private_msg(user_id, build_plain_message(_UNKNOWN_CARD_REPLY))
+                return
+        else:
+            review_pid = get_private_review_pid(user_id, group_id)
     elif reply_to:
         review_pid = get_problem_card_ref_pid(group_id, reply_to)
         if not review_pid:

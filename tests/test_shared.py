@@ -251,6 +251,27 @@ def test_streaming_chat_completion_reads_sse_delta_chunks():
     assert session.calls[0][1]["json"] == {"stream": True}
 
 
+def test_streaming_chat_completion_eof_without_done_is_retryable():
+    response = _DummyResponse(lines=[
+        'data: {"choices":[{"delta":{"content":"partial"}}]}\n',
+        '\n',
+    ])
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="qwen",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        headers={},
+        payload={"stream": True},
+        timeout=120,
+    ))
+
+    assert result.text is None
+    assert result.retryable is True
+    assert result.failure_kind == "service_unavailable"
+
+
 def test_streaming_chat_completion_malformed_sse_is_retryable():
     response = _DummyResponse(lines=[
         'data: not-json\n',

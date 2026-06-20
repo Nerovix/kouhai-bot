@@ -158,8 +158,8 @@ async def _read_streaming_chat_completion(
             failure_kind=None if text else "service_unavailable",
         )
 
-    def malformed(reason: str) -> _ChatCompletionAttempt:
-        logger.warning("%s API returned malformed SSE data: %s", provider_name, reason)
+    def stream_failure(reason: str) -> _ChatCompletionAttempt:
+        logger.warning("%s API stream failed: %s", provider_name, reason)
         return _ChatCompletionAttempt(
             text=None,
             retryable=True,
@@ -176,13 +176,13 @@ async def _read_streaming_chat_completion(
         try:
             data = json.loads(data_text)
         except json.JSONDecodeError:
-            return False, malformed("invalid json")
+            return False, stream_failure("invalid json")
 
         text, had_choice = _stream_event_text(data)
         if text:
             parts.append(text)
         if not had_choice:
-            return False, malformed("missing choices")
+            return False, stream_failure("missing choices")
         return False, None
 
     try:
@@ -208,11 +208,11 @@ async def _read_streaming_chat_completion(
             if failure is not None:
                 return failure
             if done:
-                event_lines.clear()
+                return finish("".join(parts).strip())
 
-        return finish("".join(parts).strip())
+        return stream_failure("missing done sentinel")
     except UnicodeDecodeError:
-        return malformed("invalid utf-8")
+        return stream_failure("invalid utf-8")
 
 
 async def _post_chat_completion_once(

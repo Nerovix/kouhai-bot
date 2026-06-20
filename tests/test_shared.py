@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from kouhai_bot.config import BotConfig
 from kouhai_bot.llm_config import LlmProviderConfig
 from kouhai_bot.handlers.shared import call_chat_completion, summarize_problem
-from kouhai_bot.llm import _ChatCompletionAttempt
+from kouhai_bot.llm import _ChatCompletionAttempt, _post_chat_completion_once
 
 
 class _DummySession:
@@ -17,6 +17,53 @@ class _DummySession:
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
+
+
+class _AsyncByteLines:
+    def __init__(self, lines):
+        self._lines = [line if isinstance(line, bytes) else line.encode("utf-8") for line in lines]
+        self._index = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._index >= len(self._lines):
+            raise StopAsyncIteration
+        line = self._lines[self._index]
+        self._index += 1
+        return line
+
+
+class _DummyResponse:
+    def __init__(self, *, status=200, headers=None, text="", json_data=None, lines=None):
+        self.status = status
+        self.headers = headers or {}
+        self._text = text
+        self._json_data = json_data or {}
+        self.content = _AsyncByteLines(lines or [])
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def text(self):
+        return self._text
+
+    async def json(self):
+        return self._json_data
+
+
+class _PostSession:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.response
 
 
 def _openai_cfg(**overrides):
@@ -130,3 +177,117 @@ def test_summarize_problem_uses_configured_timeout():
         summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
         assert summary == "summary ok"
         assert tag == "🐳"
+
+
+def test_dashscope_provider_payload_enables_stream():
+    provider = LlmProviderConfig(
+        name="qwen",
+        api_key="sk-test",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="qwen-test",
+    )
+    cfg = _openai_cfg(llm_providers=[provider])
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["payload"].copy())
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion(
+            [{"role": "user", "content": "Reply with exactly OK."}],
+            task="judge",
+        ))
+
+    assert result == "OK"
+    assert calls[0]["stream"] is True
+
+
+def test_non_dashscope_provider_payload_does_not_enable_stream():
+    cfg = _openai_cfg()
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["payload"].copy())
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion(
+            [{"role": "user", "content": "Reply with exactly OK."}],
+            task="judge",
+        ))
+
+    assert result == "OK"
+    assert "stream" not in calls[0]
+
+
+def test_streaming_chat_completion_reads_sse_delta_chunks():
+    response = _DummyResponse(lines=[
+        ': keep-alive\n',
+        'data: {"choices":[{"delta":{"content":"Hello"}}]}\n',
+        '\n',
+        'data: {"choices":[{"delta":{"content":" world"}}]}\n',
+        '\n',
+        'data: [DONE]\n',
+        '\n',
+    ])
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="qwen",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        headers={},
+        payload={"stream": True},
+        timeout=120,
+    ))
+
+    assert result.text == "Hello world"
+    assert result.retryable is False
+    assert session.calls[0][1]["json"] == {"stream": True}
+
+
+def test_streaming_chat_completion_eof_without_done_is_retryable():
+    response = _DummyResponse(lines=[
+        'data: {"choices":[{"delta":{"content":"partial"}}]}\n',
+        '\n',
+    ])
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="qwen",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        headers={},
+        payload={"stream": True},
+        timeout=120,
+    ))
+
+    assert result.text is None
+    assert result.retryable is True
+    assert result.failure_kind == "service_unavailable"
+
+
+def test_streaming_chat_completion_malformed_sse_is_retryable():
+    response = _DummyResponse(lines=[
+        'data: not-json\n',
+        '\n',
+    ])
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="qwen",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        headers={},
+        payload={"stream": True},
+        timeout=120,
+    ))
+
+    assert result.text is None
+    assert result.retryable is True
+    assert result.failure_kind == "service_unavailable"

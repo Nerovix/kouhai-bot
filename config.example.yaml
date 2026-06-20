@@ -36,7 +36,7 @@ llm:
       reasoning_effort: "high"  # minimal/low/medium/high/xhigh
       model_tag: "『֎AI』"        # appended to LLM output; empty to disable
 
-    # ── Fallback: Qwen (supports OpenAI-compatible format) ──
+    # ── Fallback: Qwen/DashScope (auto-uses SSE streaming) ──
     - name: qwen
       api_key: "..."
       base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"

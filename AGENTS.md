@@ -43,10 +43,12 @@ NapCat (QQ) ──WS──> worker.py
 - **LLM fallback**: `llm.py` — providers are tried in list order defined by
   `llm.providers` in `config.yaml`. Each provider is retried internally
   (`llm.max_retries`) before moving to the next. All providers use the
-  OpenAI-compatible `/chat/completions` format. Per-task model overrides
-  (`judge_model`, `clarify_model`, etc.) are defined per provider. `thinking`
-  and `reasoning_effort` are sent unconditionally; unsupported fields are
-  silently ignored by upstream APIs.
+  OpenAI-compatible `/chat/completions` format. DashScope/阿里云百炼 providers
+  are called with HTTP+SSE streaming to avoid the 10-minute synchronous HTTP
+  limit; other providers use the normal JSON response path. Per-task model
+  overrides (`judge_model`, `clarify_model`, etc.) are defined per provider.
+  `thinking` and `reasoning_effort` are sent unconditionally; unsupported
+  fields are silently ignored by upstream APIs.
 - **Official CF tutorials**: Scraped editorials live under `{data_dir}/tutorials/{pid}.json`
   (see `tools/scrape_cf_tutorial.py`). Runtime extraction is in `tutorials.py`. On the
   On **new problem** (`do_daily_post` / `/newproblem`), `schedule_prefetch_editorial(pid)`
@@ -272,17 +274,23 @@ llm:
       model: "deepseek-v4-pro"
 ```
 
-All providers receive the same request payload. Non-applicable fields (e.g.
+All providers receive the same base request payload. Non-applicable fields (e.g.
 `reasoning_effort` on DeepSeek, `thinking` on OpenAI) are silently ignored by the
 upstream API. `thinking={"type": "enabled"}` is always sent when the judge handler
 requests it — it's an OpenAI-compatible extension that DeepSeek supports.
+DashScope/阿里云百炼 providers (detected by `dashscope.aliyuncs.com` base URL or
+`aliyun`/`bailian`/`dashscope` provider name) additionally receive
+`stream=true`; `llm.py` reads the SSE `data:` stream and concatenates
+`choices[].delta.content`. Do not blindly send `stream=true` to every provider:
+some OpenAI-compatible gateways reject unknown or unsupported fields instead of
+ignoring them.
 
 ### Transient failures
 
 Transient LLM failures (timeouts, `aiohttp` client errors, `408/409/429/5xx`,
-malformed empty-choice responses) are retried inside `llm.py` with exponential
-backoff at the per-provider level. Non-retryable errors (4xx besides 408/409/429)
-cause immediate fallback to the next provider.
+malformed empty-choice responses, malformed DashScope SSE responses) are retried
+inside `llm.py` with exponential backoff at the per-provider level. Non-retryable
+errors (4xx besides 408/409/429) cause immediate fallback to the next provider.
 
 If all providers are exhausted, the user-facing reply should suggest contacting
 an administrator rather than claiming the model is "thinking too long".
@@ -554,10 +562,11 @@ already solved it.
 
 ### `/clarify` — Anti-Spoiler Clarification
 
-LLM `timeout=600` (10 minutes per HTTP attempt; retries in `shared.py` can extend total wait).
+LLM timeout comes from `llm.clarify_timeout_sec`; DashScope/阿里云百炼 uses
+HTTP+SSE streaming, while other providers use the normal JSON response path.
 Uses `response_format: json_object`. `thinking: enabled` and `reasoning_effort`
 are sent unconditionally; unsupported fields are ignored by the upstream API.
-Timeout comes from `llm.clarify_timeout_sec`. Output:
+Output:
 `{"reply": "...", "reaction": ""}`.
 - `reaction="123"` for spam/off-topic → react only, no text
 - Normal: reply text only, must not leak solution hints

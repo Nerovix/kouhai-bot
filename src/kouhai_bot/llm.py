@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -59,6 +61,18 @@ def _message_content_text(message: dict) -> str:
     return str(content).strip()
 
 
+def _provider_uses_stream(provider_name: str, base_url: str) -> bool:
+    name = (provider_name or "").strip().lower()
+    if name in {"aliyun", "bailian", "dashscope"}:
+        return True
+
+    parsed = urlparse((base_url or "").strip())
+    host = (parsed.hostname or "").lower()
+    if not host and "://" not in (base_url or ""):
+        host = (base_url or "").split("/", 1)[0].lower()
+    return host == "dashscope.aliyuncs.com" or host.endswith(".dashscope.aliyuncs.com")
+
+
 def _should_retry_status(status: int) -> bool:
     return status in {408, 409, 429} or status >= 500
 
@@ -83,6 +97,122 @@ def _retry_delay_seconds(
         return max(0.0, min(retry_after_sec, max_delay_sec))
     delay = base_delay_sec * (2 ** max(retry_number - 1, 0))
     return max(0.0, min(delay, max_delay_sec))
+
+
+def _stream_content_text(message: dict) -> str:
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text", "")
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _choice_delta_text(choice: dict) -> str:
+    delta = choice.get("delta", {})
+    if isinstance(delta, dict):
+        text = _stream_content_text(delta)
+        if text:
+            return text
+
+    message = choice.get("message", {})
+    if isinstance(message, dict):
+        return _stream_content_text(message)
+    return ""
+
+
+def _stream_event_text(data: dict) -> tuple[str, bool]:
+    choices = data.get("choices", [])
+    if not choices:
+        return "", False
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return "", False
+    return _choice_delta_text(choice), True
+
+
+async def _read_streaming_chat_completion(
+    resp: aiohttp.ClientResponse,
+    *,
+    provider_name: str,
+) -> _ChatCompletionAttempt:
+    parts: list[str] = []
+    event_lines: list[str] = []
+
+    def finish(text: str) -> _ChatCompletionAttempt:
+        if not text:
+            logger.warning("%s API stream returned no text", provider_name)
+        return _ChatCompletionAttempt(
+            text=text or None,
+            retryable=not bool(text),
+            retry_after_sec=None,
+            failure_kind=None if text else "service_unavailable",
+        )
+
+    def malformed(reason: str) -> _ChatCompletionAttempt:
+        logger.warning("%s API returned malformed SSE data: %s", provider_name, reason)
+        return _ChatCompletionAttempt(
+            text=None,
+            retryable=True,
+            retry_after_sec=None,
+            failure_kind="service_unavailable",
+        )
+
+    def handle_event(raw_data: str) -> tuple[bool, _ChatCompletionAttempt | None]:
+        data_text = raw_data.strip()
+        if not data_text:
+            return False, None
+        if data_text == "[DONE]":
+            return True, None
+        try:
+            data = json.loads(data_text)
+        except json.JSONDecodeError:
+            return False, malformed("invalid json")
+
+        text, had_choice = _stream_event_text(data)
+        if text:
+            parts.append(text)
+        if not had_choice:
+            return False, malformed("missing choices")
+        return False, None
+
+    try:
+        async for raw_line in resp.content:
+            line = raw_line.decode("utf-8").strip()
+            if not line:
+                if event_lines:
+                    done, failure = handle_event("\n".join(event_lines))
+                    event_lines.clear()
+                    if failure is not None:
+                        return failure
+                    if done:
+                        return finish("".join(parts).strip())
+                continue
+            if line.startswith(":"):
+                continue
+            if not line.startswith("data:"):
+                continue
+            event_lines.append(line[5:].lstrip())
+
+        if event_lines:
+            done, failure = handle_event("\n".join(event_lines))
+            if failure is not None:
+                return failure
+            if done:
+                event_lines.clear()
+
+        return finish("".join(parts).strip())
+    except UnicodeDecodeError:
+        return malformed("invalid utf-8")
 
 
 async def _post_chat_completion_once(
@@ -115,6 +245,12 @@ async def _post_chat_completion_once(
                         resp.headers.get("Retry-After")
                     ),
                     failure_kind="service_unavailable" if retryable else "error",
+                )
+
+            if payload.get("stream") is True:
+                return await _read_streaming_chat_completion(
+                    resp,
+                    provider_name=provider_name,
                 )
 
             data = await resp.json()
@@ -210,6 +346,8 @@ async def chat_completion(
             reasoning_effort = provider.reasoning_effort.strip().lower()
             if reasoning_effort:
                 payload["reasoning_effort"] = reasoning_effort
+            if _provider_uses_stream(provider.name, provider.base_url):
+                payload["stream"] = True
 
             for attempt in range(max_retries + 1):
                 result = await _post_chat_completion_once(

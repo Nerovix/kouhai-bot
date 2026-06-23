@@ -28,17 +28,31 @@ import cloudscraper
 STATE_DIR = os.path.expanduser("~/.kouhai-bot")
 CACHE_DIR = os.path.join(STATE_DIR, "statements")
 GROUPS_DIR = os.path.join(STATE_DIR, "groups")
-os.makedirs(STATE_DIR, exist_ok=True)
-os.makedirs(CACHE_DIR, exist_ok=True)
-os.makedirs(GROUPS_DIR, exist_ok=True)
 
 # Per-group state: override with --group <id>
 CURRENT_GROUP = "default"
 
 
+def _ensure_state_dirs() -> None:
+    os.makedirs(STATE_DIR, exist_ok=True)
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(GROUPS_DIR, exist_ok=True)
+
+
+def _set_state_dir(data_dir: str):
+    global STATE_DIR, CACHE_DIR, GROUPS_DIR
+    STATE_DIR = os.path.expanduser(str(data_dir))
+    CACHE_DIR = os.path.join(STATE_DIR, "statements")
+    GROUPS_DIR = os.path.join(STATE_DIR, "groups")
+    _ensure_state_dirs()
+
+
 def _set_group(group_id: str):
     global CURRENT_GROUP
     CURRENT_GROUP = str(group_id)
+
+
+_ensure_state_dirs()
 
 
 def _state_file() -> str:
@@ -47,6 +61,10 @@ def _state_file() -> str:
 
 def _used_file() -> str:
     return os.path.join(GROUPS_DIR, CURRENT_GROUP, "used.json")
+
+
+def _scoreboard_file() -> str:
+    return os.path.join(GROUPS_DIR, CURRENT_GROUP, "scoreboard.json")
 
 
 def _set_rating_range(min_rating: int, max_rating: int):
@@ -75,6 +93,26 @@ def _load_used() -> set:
 def _save_used(used: set):
     with open(_used_file(), "w") as f:
         json.dump(sorted(used), f)
+
+
+def _load_solved_problem_ids() -> set[str]:
+    path = _scoreboard_file()
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return set()
+
+    solves = data.get("solves", []) if isinstance(data, dict) else []
+    if not isinstance(solves, list):
+        return set()
+    return {
+        str(item.get("problem", "")).strip()
+        for item in solves
+        if isinstance(item, dict) and str(item.get("problem", "")).strip()
+    }
 
 
 def _problem_id(p: dict) -> str:
@@ -140,14 +178,19 @@ def select_problem() -> dict:
         raise RuntimeError(f"No problems found in range {RATING_MIN}-{RATING_MAX}")
 
     used = _load_used()
+    solved = _load_solved_problem_ids()
 
-    # Filter to unused problems
-    available = [p for p in problems if _problem_id(p) not in used]
+    # Filter to unused and unsolved problems. solved comes from scoreboard.json so
+    # historical solves remain excluded even if used.json is lost or rebuilt.
+    available = [p for p in problems if _problem_id(p) not in used | solved]
     if not available:
-        # All used — reset
+        # All unsolved problems have been used in this cycle - reset only used.
         _save_used(set())
-        used = set()
-        available = problems
+        available = [p for p in problems if _problem_id(p) not in solved]
+        if not available:
+            raise RuntimeError(
+                f"No unsolved problems found in range {RATING_MIN}-{RATING_MAX}"
+            )
 
     return random.choice(available)
 
@@ -448,8 +491,9 @@ def reveal() -> str:
 # ── CLI ─────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Parse --group <id>, --min-rating <n>, --max-rating <n>, or --flag=value
+    # Parse --group <id>, --data-dir <path>, --min-rating <n>, --max-rating <n>, or --flag=value
     group_id = "default"
+    data_dir = STATE_DIR
     min_rating = RATING_MIN
     max_rating = RATING_MAX
     skip_next = False
@@ -463,6 +507,10 @@ if __name__ == "__main__":
             group_id = argv[i + 1]
             skip_next = True
             continue
+        if a == "--data-dir" and i + 1 < len(argv):
+            data_dir = argv[i + 1]
+            skip_next = True
+            continue
         if a == "--min-rating" and i + 1 < len(argv):
             min_rating = int(argv[i + 1])
             skip_next = True
@@ -474,6 +522,9 @@ if __name__ == "__main__":
         if a.startswith("--group="):
             group_id = a.split("=", 1)[1]
             continue
+        if a.startswith("--data-dir="):
+            data_dir = a.split("=", 1)[1]
+            continue
         if a.startswith("--min-rating="):
             min_rating = int(a.split("=", 1)[1])
             continue
@@ -484,12 +535,13 @@ if __name__ == "__main__":
             continue
         cmd_args.append(a)
 
+    _set_state_dir(data_dir)
     _set_group(group_id)
     _set_rating_range(min_rating, max_rating)
     os.makedirs(os.path.join(GROUPS_DIR, group_id), exist_ok=True)
 
     if len(cmd_args) < 1:
-        print("Usage: daily_picker.py [--group <id>] [--min-rating <n>] [--max-rating <n>] pick|post|reveal")
+        print("Usage: daily_picker.py [--group <id>] [--data-dir <path>] [--min-rating <n>] [--max-rating <n>] pick|post|reveal")
         sys.exit(1)
 
     cmd = cmd_args[0]

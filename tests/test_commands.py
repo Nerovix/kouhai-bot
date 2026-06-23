@@ -2783,6 +2783,8 @@ def test_newproblem_picker_args_follow_env_rating_range():
 
         args = _picker_args("pick", GID, "--with-statement")
 
+    assert "--data-dir" in args, f"Missing data_dir flag: {args}"
+    assert args[args.index("--data-dir") + 1] == _data_dir(), f"Wrong data_dir args: {args}"
     assert "--min-rating" in args and "--max-rating" in args, f"Missing rating flags: {args}"
     assert args[args.index("--min-rating") + 1] == "2100", f"Wrong min rating args: {args}"
     assert args[args.index("--max-rating") + 1] == "2900", f"Wrong max rating args: {args}"
@@ -2801,10 +2803,36 @@ def test_newproblem_picker_args_prefer_scheduler_override():
 
         args = _picker_args("pick", GID, "--with-statement")
 
+    assert args[args.index("--data-dir") + 1] == _data_dir(), f"Wrong data_dir args: {args}"
     assert args[args.index("--min-rating") + 1] == "2300", f"Scheduler min override ignored: {args}"
     assert args[args.index("--max-rating") + 1] == "2700", f"Scheduler max override ignored: {args}"
     _cleanup()
     print("✅ newproblem: picker args prefer scheduler override")
+
+
+def test_submit_reveal_passes_configured_data_dir_to_picker():
+    _reset_state()
+    calls = []
+
+    async def _mock_subprocess(*args, **kwargs):
+        calls.append(args)
+        proc = AsyncMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=("上一道题来自 CF542D✨".encode(), b""))
+        return proc
+
+    with _all_patches(), patch("asyncio.create_subprocess_exec", _mock_subprocess):
+        from kouhai_bot.handlers.cmd.submit import _reveal_problem_source
+
+        result = asyncio.run(_reveal_problem_source(GID))
+
+    assert result == "本题来自 CF542D✨"
+    assert calls, "reveal subprocess was not called"
+    args = list(calls[0])
+    assert "--data-dir" in args, f"Missing data_dir flag: {args}"
+    assert args[args.index("--data-dir") + 1] == _data_dir(), f"Wrong data_dir args: {args}"
+    _cleanup()
+    print("✅ submit reveal: passes configured data_dir to picker")
 
 
 def test_status_ignores_other_groups_and_reports_idle():

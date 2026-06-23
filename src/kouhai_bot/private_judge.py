@@ -398,11 +398,7 @@ def _ensure_statement(problem: dict) -> dict:
     from .problems import picker
 
     cfg = get_config()
-    picker.STATE_DIR = cfg.data_dir
-    picker.CACHE_DIR = os.path.join(cfg.data_dir, "statements")
-    picker.GROUPS_DIR = os.path.join(cfg.data_dir, "groups")
-    os.makedirs(picker.CACHE_DIR, exist_ok=True)
-    os.makedirs(picker.GROUPS_DIR, exist_ok=True)
+    picker._set_state_dir(cfg.data_dir)
     stmt = picker.fetch_statement(problem)
     if isinstance(stmt, dict):
         return stmt

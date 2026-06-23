@@ -535,6 +535,7 @@ async def _reveal_problem_source(group_id: int) -> str:
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable, picker_path, "reveal", "--group", str(group_id),
+            "--data-dir", str(get_config().data_dir),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=30)

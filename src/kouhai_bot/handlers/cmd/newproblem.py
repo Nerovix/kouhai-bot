@@ -165,6 +165,8 @@ def _picker_args(command: str, group_id: int, *extra: str) -> list[str]:
         command,
         "--group",
         str(group_id),
+        "--data-dir",
+        str(get_config().data_dir),
         "--min-rating",
         str(min_rating),
         "--max-rating",

@@ -4218,6 +4218,166 @@ def test_private_review_allowed_after_group_solves_current_problem():
     print("✅ private review: group solve unlocks current problem")
 
 
+def test_private_review_rejects_unsolved_referenced_problem_card():
+    _reset_state()
+    global _deepseek_response
+    _deepseek_response = "这是引用卡片题目的复盘。"
+    current_pid = "446B"
+    referenced_pid = "1788E"
+    _write_statement(current_pid, {
+        "name": "B. DZY Loves Chessboard",
+        "time_limit": "2s",
+        "memory_limit": "256MB",
+        "description": "Current private problem statement.",
+        "input": "Input.",
+        "samples": [{"input": "1", "output": "1"}],
+    })
+    _write_statement(referenced_pid, {
+        "name": "E. Sum Over Zero",
+        "time_limit": "2s",
+        "memory_limit": "256MB",
+        "description": "Referenced card problem statement.",
+        "input": "Input.",
+        "samples": [{"input": "1", "output": "1"}],
+    })
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    _write_group_file(GID, "problem_card_refs.json", {
+        "card_1788e": {"problem": referenced_pid, "source": "private_problem_card", "created_at": 1},
+    })
+
+    with _all_patches():
+        from kouhai_bot.private_judge import load_private_state, set_private_current_problem
+        from kouhai_bot.handlers.cmd.review import handle
+
+        set_private_current_problem(UID, {
+            "today": current_pid,
+            "contestId": 446,
+            "index": "B",
+            "name": "DZY Loves Chessboard",
+            "rating": 1600,
+            "tags": [],
+        })
+        event = _make_private_event(
+            "/review 如果只选最小 L 有什么反例？",
+            message=[
+                {"type": "reply", "data": {"id": "card_1788e"}},
+                {"type": "text", "data": {"text": "/review 如果只选最小 L 有什么反例？"}},
+            ],
+        )
+        asyncio.run(handle(**_kwargs(event)))
+        private_state = load_private_state(UID)
+
+    review_calls = [call for call in _deepseek_calls if call.get("task") == "review"]
+    assert not review_calls, _deepseek_calls
+    assert private_state["user_submissions"] == []
+    assert private_state["current_problem"]["today"] == current_pid
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "还没有通过记录" in private_text, private_text
+    _cleanup()
+    print("✅ private review: unsolved referenced card is rejected")
+
+
+def test_private_review_uses_solved_referenced_problem_card_over_current_problem():
+    _reset_state()
+    global _deepseek_response
+    _deepseek_response = "这是引用卡片题目的复盘。"
+    current_pid = "446B"
+    referenced_pid = "1788E"
+    _write_statement(current_pid, {
+        "name": "B. DZY Loves Chessboard",
+        "time_limit": "2s",
+        "memory_limit": "256MB",
+        "description": "Current private problem statement.",
+        "input": "Input.",
+        "samples": [{"input": "1", "output": "1"}],
+    })
+    _write_statement(referenced_pid, {
+        "name": "E. Sum Over Zero",
+        "time_limit": "2s",
+        "memory_limit": "256MB",
+        "description": "Referenced card problem statement.",
+        "input": "Input.",
+        "samples": [{"input": "1", "output": "1"}],
+    })
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    _write_group_file(GID, "problem_card_refs.json", {
+        "card_1788e": {"problem": referenced_pid, "source": "private_problem_card", "created_at": 1},
+    })
+
+    with _all_patches():
+        from kouhai_bot.private_judge import (
+            load_private_state,
+            mark_private_solved,
+            set_private_current_problem,
+        )
+        from kouhai_bot.handlers.cmd.review import handle
+
+        set_private_current_problem(UID, {
+            "today": current_pid,
+            "contestId": 446,
+            "index": "B",
+            "name": "DZY Loves Chessboard",
+            "rating": 1600,
+            "tags": [],
+        })
+        mark_private_solved(UID, referenced_pid)
+        event = _make_private_event(
+            "/review 如果只选最小 L 有什么反例？",
+            message=[
+                {"type": "reply", "data": {"id": "card_1788e"}},
+                {"type": "text", "data": {"text": "/review 如果只选最小 L 有什么反例？"}},
+            ],
+        )
+        asyncio.run(handle(**_kwargs(event)))
+        private_state = load_private_state(UID)
+
+    review_calls = [call for call in _deepseek_calls if call.get("task") == "review"]
+    assert review_calls, _deepseek_calls
+    records = private_state["user_submissions"]
+    assert records[-1]["type"] == "review"
+    assert records[-1]["problem"] == referenced_pid, records[-1]
+    assert private_state["current_problem"]["today"] == current_pid
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "引用卡片题目" in private_text, private_text
+    _cleanup()
+    print("✅ private review: solved referenced card overrides current problem")
+
+
+def test_private_review_unknown_referenced_card_is_friendly_without_llm():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+
+    with _all_patches():
+        from kouhai_bot.private_judge import load_private_state, set_private_current_problem
+        from kouhai_bot.handlers.cmd.review import handle
+
+        set_private_current_problem(UID, {
+            "today": PID,
+            "contestId": 542,
+            "index": "D",
+            "name": "Superhero's Job",
+            "rating": 2600,
+            "tags": [],
+        })
+        event = _make_private_event(
+            "/review 这题呢",
+            message=[
+                {"type": "reply", "data": {"id": "missing_card"}},
+                {"type": "text", "data": {"text": "/review 这题呢"}},
+            ],
+        )
+        asyncio.run(handle(**_kwargs(event)))
+        private_state = load_private_state(UID)
+
+    assert not _deepseek_calls, _deepseek_calls
+    assert private_state["user_submissions"] == []
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "认不出对应哪道题" in private_text and "可能不是题目卡片" in private_text, private_text
+    _cleanup()
+    print("✅ private review: unknown referenced card is friendly")
+
+
 def test_sync_aborts_when_source_has_no_history_without_clearing_target():
     _reset_state()
     _setup_problem_for(GID, PID)
@@ -4657,6 +4817,8 @@ if __name__ == "__main__":
     test_sync_history_card_uses_friendly_visible_format()
     test_sync_history_card_chunks_long_history()
     test_private_sync_from_solved_group_marks_private_review_state()
+    test_private_review_uses_referenced_problem_card_over_current_problem()
+    test_private_review_unknown_referenced_card_is_friendly_without_llm()
     test_parse_problem_ref_accepts_loose_codeforces_links()
     test_private_setproblem_current_copies_empty_private_history()
     test_private_setproblem_uses_referenced_problem_card()

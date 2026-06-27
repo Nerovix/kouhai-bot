@@ -16,13 +16,23 @@ from ..shared import (
 from ...napcat.client import build_plain_message, send_group_msg, send_private_msg
 from ...context import get_display_name
 from ...eventlog import EVENT_META_KEY
-from ...private_judge import GROUP_SCOPE, PRIVATE_SCOPE, get_private_review_pid
+from ...private_judge import (
+    GROUP_SCOPE,
+    PRIVATE_SCOPE,
+    get_private_review_pid,
+    is_group_problem_solved,
+    is_private_solved,
+)
 from .submit import enqueue_review_request
 
 logger = logging.getLogger("kouhai-bot.cmd.review")
 _UNKNOWN_CARD_REPLY = (
     "这条引用我认不出对应哪道题哦，可能不是题目卡片，"
     "也可能卡片太久了～你直接发 /review 的话，我就默认复盘最近一道已通过题目。"
+)
+_UNSOLVED_CARD_REPLY = (
+    "这道题还没有通过记录，暂时不能复盘哦～"
+    "你直接发 /review 的话，我就默认复盘最近一道已通过题目。"
 )
 
 
@@ -86,6 +96,12 @@ async def handle(group_id: int, user_id: int, sender: dict,
             review_pid = get_problem_card_ref_pid(group_id, reply_to)
             if not review_pid:
                 await send_private_msg(user_id, build_plain_message(_UNKNOWN_CARD_REPLY))
+                return
+            if not (
+                is_private_solved(user_id, review_pid)
+                or is_group_problem_solved(group_id, review_pid)
+            ):
+                await send_private_msg(user_id, build_plain_message(_UNSOLVED_CARD_REPLY))
                 return
         else:
             review_pid = get_private_review_pid(user_id, group_id)

@@ -8,23 +8,23 @@ Instructions for AI coding assistants working on this codebase.
 NapCat (QQ) ──WS──> worker.py
                          │
                          ├── process_event(..., spawn_handlers=True)
-                         ├── cmd/*.py  auto-discovered by registry
-                         └── scheduler/ background loop (60s tick)
+                         ├── src/kouhai_bot/handlers/cmd/*.py  auto-discovered by registry
+                         └── src/kouhai_bot/scheduler/ background loop (60s tick)
 ```
 
 ## Key Design Decisions
 
-- **Command auto-discovery**: Each command in `handlers/cmd/*.py` calls `register()` at module load. The `registry.discover_commands()` scans with `pkgutil.iter_modules`. Adding a new command = create a `.py` file with a `register()` function.
+- **Command auto-discovery**: Each command in `src/kouhai_bot/handlers/cmd/*.py` calls `register()` at module load. The `registry.discover_commands()` scans with `pkgutil.iter_modules`. Adding a new command = create a `.py` file with a `register()` function.
 - **Limited aliases**: Only six short aliases are supported: `/newproblem`→`/np`, `/problem`→`/pb`, `/submit`→`/sbm`, `/review`→`/rv`, `/clarify`→`/clrf`, `/setproblem`→`/sp`. Old aliases such as `/sb`, `/排名`, and Chinese aliases remain unsupported. New commands default to `aliases=[]` unless explicitly approved.
-- **Help auto-generation**: `handlers/cmd/help.py` reads `registry.all_commands()` and builds the help text dynamically. Descriptions must match old bridge.py wording.
+- **Help auto-generation**: `src/kouhai_bot/handlers/cmd/help.py` reads `registry.all_commands()` and builds the help text dynamically. Descriptions must match old bridge.py wording.
   `usage` field = args suffix in /help display (e.g. `usage="你的做法"` → `/submit 你的做法`). Group help hides private-only details for `/setproblem`, `/sync`, and `/testcd` and only briefly mentions private judge; private help lists the private-judge command set.
   Group and private help are both delivered as merged-forward cards, with direct text
   only as fallback.
-- **Scheduler current-group config**: `~/.kouhai-bot/scheduler_config.json` stores job list + time overrides for `CURRENT_GROUP`. Jobs are defined in `scheduler/jobs.py`.
+- **Scheduler current-group config**: `~/.kouhai-bot/scheduler_config.json` stores job list + time overrides for `CURRENT_GROUP`. Jobs are defined in `src/kouhai_bot/scheduler/jobs.py`.
 - **Command event log**: `eventlog.py` writes append-only JSONL command events by real local date. `achievements.py` reads those events for the 04:00-to-04:00 daily report. `eventlog_backfill.py` and `tools/backfill_command_events.py` can reconstruct recent saved submit/clarify/review events from `scoreboard.json`.
 - **Formula VL**: `problems/fetcher.py` handles CF formula images → Qwen-VL → inline LaTeX. Has white-bg preprocessing, hallucination detection, retry.
 - **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before VL pipeline via `_vl_processed` flag. Stale caches with images are re-fetched with Qwen-VL. Problems with non-formula images (tex-graphics / diagrams) are skipped.
-- **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
+- **No hermes cron involvement**: The bot runs its own scheduler loop (`src/kouhai_bot/scheduler/engine.py`), not hermes cron jobs.
 - **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection, dispatches commands, and owns the scheduler in one process. There is no SQLite event queue, ingress supervisor, worker hot-swap, or auto-update loop.
 - **Friend request auto-approval**: Normal OneBot `post_type="request"` / `request_type="friend"` events are parsed by `napcat/client.py`, routed by `handlers.process_event()`, and approved via `set_friend_add_request`. QQ/NapCat "doubtful" friend requests are not reliably pushed as request events, so `worker.py` also runs `friend_requests.doubt_friend_request_loop()`, which polls `get_doubt_friends_add_request` every 60 seconds and approves with `set_doubt_friends_add_request`. Both paths approve only after the requester is confirmed to be a member of `CURRENT_GROUP`; lookup failure, malformed events, non-friend requests, and non-members are ignored without approving. Requests that were already consumed by another QQ client may not appear in the doubtful-request poll.
 - **User groups**: `user_groups.py` — all users default to `default`; `USER_GROUPS` configures
@@ -50,13 +50,21 @@ NapCat (QQ) ──WS──> worker.py
   `thinking` and `reasoning_effort` are sent unconditionally; unsupported
   fields are silently ignored by upstream APIs.
 - **Official CF tutorials**: Scraped editorials live under `{data_dir}/tutorials/{pid}.json`
-  (see `tools/scrape_cf_tutorial.py`). Runtime extraction is in `tutorials.py`. On the
-  On **new problem** (`do_daily_post` / `/newproblem`), `schedule_prefetch_editorial(pid)`
+  (see `tools/scrape_cf_tutorial.py`). Runtime extraction is in `tutorials.py`. On
+  **new problem** (`do_daily_post` / `/newproblem`), `schedule_prefetch_editorial(pid)`
   starts background translation (using `summary_model`) into `tutorial_translations/` so first AC
   can deliver without waiting. On **first AC**, congrats is sent in `_finalize_submit`, then
   `schedule_post_solve_editorial_followup()` only **delivers** (awaits in-flight prefetch if
   needed). Neither path uses the state scheduler. `/review` uses English editorial in LLM
   context only.
+
+## Public Documentation
+
+`README.md` is for bot operators and users. Keep it practical: setup steps, commands,
+what users should expect, common NapCat/model problems, and short examples. Avoid
+turning README sections into implementation notes; put scheduler/data-format/edge-case
+rules in this file instead. Preserve the existing casual Chinese voice when adding
+user-facing text.
 
 ## Configuration
 
@@ -67,7 +75,7 @@ The file is **never committed** — `config.yaml` is in `.gitignore`.
 Copy `config.example.yaml` to `config.yaml` and fill in your values.
 
 All providers use the OpenAI-compatible `/chat/completions` endpoint.
-``base_url`` should include any version prefix (e.g. `https://api.openai.com/v1`,
+`base_url` should include any version prefix (e.g. `https://api.openai.com/v1`,
 `https://api.deepseek.com`); `/chat/completions` is appended automatically.
 
 #### Top-level keys
@@ -783,9 +791,9 @@ Local HTML labeling UI:
 
 ## Scheduler
 
-- **Engine**: `scheduler/engine.py` — loop at 60s intervals, runs due jobs per group
+- **Engine**: `src/kouhai_bot/scheduler/engine.py` — loop at 60s intervals, runs due jobs per group
   configured by `CURRENT_GROUP`; accepts `stop_event` so the single worker can stop cleanly
-- **Jobs** (defined in `scheduler/jobs.py`):
+- **Jobs** (defined in `src/kouhai_bot/scheduler/jobs.py`):
   - `daily_achievements` — 12:00: posts yesterday's 04:00-to-04:00 achievement report.
   - `daily_post` — 12:00: checks `should_post_today`. Solved → new problem. Unsolved → reminder.
   - `contest_check` — 12:01: checks CF API for 24h upcoming contests, @all notification with 2s delay.
@@ -808,7 +816,7 @@ Local HTML labeling UI:
 
 ## Adding a Scheduled Job
 
-1. Add an async function in `scheduler/jobs.py`
+1. Add an async function in `src/kouhai_bot/scheduler/jobs.py`
 2. Call `register_job(JobDef(name=..., fn=..., schedule="HH:MM"))`
 3. Enable it for `CURRENT_GROUP` in `scheduler_config.json`
 

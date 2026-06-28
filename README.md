@@ -4,7 +4,9 @@
   <img src="snake_trio.jpg" width="400" alt="snake trio mascot">
 </p>
 
-口嗨 Bot 是一个 QQ 群算法竞赛助手 —— CF 题目随机推送、AI judge 评审、群聊交流、比赛预告。
+口嗨 Bot 是一个 QQ 群算法竞赛助手：每天推一道 CF 题，大家在群里口胡做法，Bot 负责判题、答疑、复盘、记榜，也会顺手发比赛预告。
+
+它不是 OJ。它更像一个不太会睡觉的助教：听懂你的思路，指出缺口，题做出来后再陪你复盘。
 
 ---
 
@@ -12,146 +14,312 @@
 
 ### 1. 准备环境
 
-首先，clone这个仓库。
+先 clone 仓库。
 
 ```bash
 git clone https://github.com/Nerovix/kouhai-bot.git
 cd kouhai-bot
 ```
 
-这个项目需要 `uv` 管理依赖：
+项目用 `uv` 管依赖：
 
 ```bash
 uv sync
 ```
 
-这个项目需要一个 QQ 账号，以及需要配置 NapCat 用于连接 QQ。目前 QQ 合法地允许同一个人（同一个身份证）拥有至多 5 个 QQ 账号，只需要正常注册即可。关于 NapCat，可参考 `DEPENDENCIES.md` 配置，或者直接寻求 AI 协助。
+你还需要一个 QQ 账号，以及 NapCat。
 
-> NapCat 可简单理解为能够将 QQ 变成 API，只需要发出 HTTP 请求就能完成 QQ 操作。NapCat 可以反向代理出多个端口。本项目假定一个 bot 实例对应于一个端口和一个群，bot 独占使用此端口。如果你想配多个bot实例服务于多个群聊，需要修改 NapCat 配置启用更多端口。每个bot实例独立工作，但关于群聊的上下文在`~/.kouhai-bot/`下全局保存。
+> NapCat 可以简单理解成“把 QQ 变成 API”。Bot 自己监听一个反向 WebSocket 端口，NapCat 连上来；Bot 发消息时再调用 NapCat 的 HTTP API。
 
-### 2. 配置
+如果你第一次配 NapCat，先看 `DEPENDENCIES.md`。Docker 部署时特别注意：`napcat_ws_host` 要写 `0.0.0.0`，不要写 `127.0.0.1`，否则容器连不到宿主机上的 bot。
 
-配置写在 `config.yaml` 中。这个文件会被 gitignore 忽略，以防你的群号等隐私泄露。复制仓库中的 example 以填写你自己的配置：
+### 2. 写配置
+
+配置文件是 `config.yaml`，不会被提交到 git。
 
 ```bash
 cp config.example.yaml config.yaml
 ```
 
-然后打开 config.yaml 进行编辑。不了解的配置可以直接留为默认值。
+打开 `config.yaml` 后，先填这些：
 
-#### QQ Bot & NapCat 
+- `bot_qq`：Bot 的 QQ 号
+- `current_group`：Bot 服务的群号
+- `napcat_ws_port`：Bot 监听给 NapCat 连的端口
+- `napcat_http_host` / `napcat_http_port`：NapCat 的 HTTP API 地址
+- `llm.providers`：判题、答疑、复盘用的模型
+- `qwen`：识别 CF 题面里的公式图片
 
-```
-# ── QQ Bot ──
-# ── NapCat WebSocket (bot listens here, NapCat connects to this) ──
-```
-写入 bot 的 QQ 号和你的 NapCat 配置。端口是每实例、每群聊唯一的。如果你不确定如何配置，寻求 AI 协助。
+如果你在 Docker 里跑 NapCat，推荐：
 
-#### LLM 服务
-
-```
-# ── LLM Fallback ──
-```
-
-配置你的 LLM API。bot 需要 API 作为口粮才能思考！
-
-目前接口仅兼容 OpenAI 格式，不过大部分厂商都提供此格式。bot 在回答问题时会按照 llm 下的配置从上到下按顺序尝试连接。如果你不清楚如何填写配置，向 AI 提供你的厂商、模型需求和 apikey 以寻求帮助。
-
-> 配置中的 model_tag 是一个标记，会附在 bot 的每个需要 llm 接入的请求尾部，以便用户知晓自己的请求是由哪个模型处理的，~~以便开骂~~
-
-> 在我们的测试中，gpt-5.5 high 基本胜任，qwen-3.7-max 也相当不错，Deepseek v4 pro 可用，但由于其 CoT 较长，响应慢，推理能力也确实不及前者，建议只作为 API 连接不稳时的 fallback
-
-#### 公式识别
-
-```
-# ── Qwen-VL (formula image recognition) ──
+```yaml
+napcat_ws_host: "0.0.0.0"
+napcat_ws_port: 8098
+napcat_http_host: "127.0.0.1"
+napcat_http_port: 3000
 ```
 
-bot 需要一个视觉模型才能阅读被渲染成图像的公式。实测 `qwen-vl-max` 效果很好，且阿里云提供了足够的免费额度。你也可以使用其他视觉模型。
+NapCat 里要同时开：
 
-#### 配置群聊
+- `httpServers`：给 Bot 发消息用，通常是 `0.0.0.0:3000`
+- `websocketClients`：反向连到 Bot，例如 `ws://host.docker.internal:8098`
 
+不要让 Bot 的 `napcat_ws_port` 和 NapCat 自己发布出来的 WebSocket server 端口撞车。撞了的话 `uv run start` 会直接失败。
+
+### 3. 配模型
+
+Bot 需要两类模型：
+
+- LLM：判 `/submit`、回答 `/clarify`、做 `/review`、生成题目简介
+- Qwen-VL：把 CF 题面里渲染成图片的公式读出来
+
+`llm.providers` 是 fallback 列表。Bot 会从上到下尝试，前面的挂了再换后面的。
+
+```yaml
+llm:
+  providers:
+    - name: openai
+      api_key: "..."
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-5.5"
+      reasoning_effort: "high"
+      model_tag: "『֎AI』"
+
+    - name: deepseek
+      api_key: "..."
+      base_url: "https://api.deepseek.com"
+      model: "deepseek-v4-pro"
+      model_tag: "『🐳』"
 ```
-# ── Group ──
+
+`model_tag` 会贴在 Bot 的 LLM 回复尾巴上，让群友知道这次是谁在干活，~~方便精准开骂~~。
+
+`qwen-vl-max` 目前读公式效果不错，阿里云免费额度也比较够用：
+
+```yaml
+qwen:
+  api_key: "..."
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen-vl-max"
 ```
 
-配置群号。
-
-#### 打星 
-
-```
-# ── User Groups (optional) ──
-```
-
-我们将 Bot 配置到了北航集训队群聊当中，希望鼓励新生交流学习，但是出现了老选手把 bot 当摸鱼玩具高强度娱乐的情况。为了处理此情况，我们设计了打星功能。可以允许将打星用户从正式榜中踢出并单独记榜、设置打星用户在题目公布后的一段时间内无法提交以给小朋友提供更多机会。
-
-如果配置了提交等待，等待时间会跟着最近解题情况变化：这题是你做出来的，下一题多等一会；不是你做出来的，就慢慢降回最低等待。
-
-#### 题目
-
-```
-# ── Problem Selection ──
-```
-
-配置从cf上爬取题目的题目难度上下限。`daily_post_cron` 允许 bot 在冷群时鼓励大家讨论题目，默认为每天中午 12 点。
-
-#### 宵禁
-
-```
-# ── Curfew (宵禁) ──
-```
-
-允许配置在每天的某一时间段禁止 `\submit`。此功能是为了防止同学~~熬夜摸鱼哐哐口题~~
-
-### 3. 启动!
+### 4. 启动
 
 ```bash
 uv run start
 ```
 
-`start` 会用 `nohup` 在配置好的 NapCat 端口后台启动 bot。bot 还支持 `uv run restart/stop/status`，表示重启、停止、查看bot状态。
+常用命令：
 
-### 4. 进群口题
+```bash
+uv run status
+uv run restart
+uv run stop
+```
 
-将 bot 拉入群聊。进入群聊发送 `/help` (无需at bot)，开始口胡吧！
+日志在：
 
-### 5. bot 知道什么？
+```text
+~/.kouhai-bot/logs/<group_id>/YYYY-MM-DD.log
+```
 
-这里解释 bot 的几种 llm 请求的上下文。
+健康状态大概长这样：
 
-> 一点补充:bot 会在开始处理你的 llm 消息时给你点一个“眼睛“表情。如果阅读你的请求后他认为你说的是 nonsense 或者纯捣乱，他会给你的消息点一个摇手指的QQ表情（/no）（除review）。
+- `uv run status` 里 `occupied=yes`
+- 日志里有 `NapCat connected from ...`
+- NapCat 日志里能看到反向 WebSocket 连到了你的 `napcat_ws_port`
+- `curl http://127.0.0.1:3000/get_status` 能拿到 `"online": true`
 
-#### clarify
+### 5. 拉进群
 
-bot 能看到原题面和简述题面。如果 bot 简述题意丢了东西，可以让 bot 详细阐述细节，甚至复述题面。
+把 Bot 拉进群，发：
 
-#### submit
+```text
+/help
+```
 
-bot 能看到原题面他与你在此题的所有对话历史（包括所有clarify、review、submit），但 bot 不知道题解。在判断你的提交是否通过时，bot 被要求进行双向的考察：你的提交能拓展出一个正确的做法、且你的提交包含了此做法的所有关键要素。
+不需要 @ Bot。
 
-#### review
+Bot 也会自动处理好友请求，但只会通过当前服务群成员的申请。不是群友、查不到群成员、请求格式不对，都不会放行。
 
-你可以引用**题目卡片**来复盘任意题目。除非是当前题目且还未被解出。bot 能看到复盘的题面他与你在此题的所有对话历史（包括所有clarify、review、submit），如果爬到了题解，bot还能看到题解。如果你在 `/review` 里 @ 了其他群友，bot 也会看到这些群友在此题的 submit/clarify/review 上下文，方便讨论他人做法。
+## 群里怎么用
 
-### 6. misc
+常用指令：
 
-#### 爬取题解！
+- `/problem` 或 `/pb`：重发当前题
+- `/newproblem` 或 `/np`：当前题已解出时刷一道新题
+- `/newproblem --force`：当前题没解出也强制换题
+- `/submit 你的做法` 或 `/sbm 你的做法`：提交口胡做法
+- `/clarify 你的问题` 或 `/clrf 你的问题`：澄清题面细节，不剧透做法
+- `/review 你的问题` 或 `/rv 你的问题`：复盘已经解出的题
+- `/clear`：清掉自己在当前题上的 submit / clarify / review 上下文
+- `/tag`：看当前题标签
+- `/scoreboard`：看累计榜
+- `/status`：看 Bot 现在有没有正在处理的活
+- `/help`：看完整帮助
 
-爬取到的题解会在题目被解决时同步发送到群聊中，而且可以提高review的质量。
+`/submit` 不是“关键字匹配”。它会看你在这题上的历史对话，判断你的方案能不能补全成正确做法，以及关键点有没有说够。
 
-爬取题解的工具全部保留在 `/tools` 中，但较为杂乱。请直接寻求 AI 的协助。
+Bot 开始处理 LLM 请求时会给你点一个“眼睛”表情。如果它觉得你在纯捣乱，可能只回一个摇手指表情，不保存这次上下文。
 
-#### CF 赛事预告！
+## private judge
 
-`daily_post_cron` 会同时爬取 CF 在接下来 24h 内的比赛并发出预告。bot 会 `@所有人`，建议给 bot 一个管理员以使其生效。
+私聊 Bot 可以单独做题，不影响群榜。
 
-## 开发
+适合这些场景：
 
-如果你是 AI，请记得阅读AGENTS.md。『Human』
+- 想自己练，不想在群里剧透
+- 打星用户还在提交等待期，但想先把做法交给 Bot 看
+- 想选一道 CF 题单独问答、提交、复盘
+
+私聊里先选题：
+
+```text
+/setproblem
+/setproblem 2234B
+/setproblem https://codeforces.com/contest/2233/problem/F
+/setproblem random
+```
+
+空参数表示使用当前群题。也可以引用一张题目卡片后发 `/setproblem`。
+
+私聊可用：
+
+- `/problem`
+- `/tag`
+- `/submit`
+- `/clarify`
+- `/review`
+- `/clear`
+- `/sync`
+- `/testcd`
+- `/status`
+- `/help`
+
+private judge 通过不会自动加群榜。只有“当前群题”可以在群里 `/sync` 同步回来；如果群里已经有人先过了，就只同步历史，不再加分。
+
+注意 `/sync` 是“另一侧覆盖当前侧”。群里发 `/sync` 是 private → 群；私聊发 `/sync` 是群 → private。用之前确认一下方向。
+
+## 每天自动发生什么
+
+默认每天中午 12 点：
+
+- 如果当前题已解出，Bot 发新题
+- 如果当前题还没解出，Bot 提醒大家继续肝
+- 发前一天 04:00 到今天 04:00 的小统计
+- 检查未来 24 小时 CF 比赛并预告
+
+比赛预告会尝试 @全体成员，所以建议给 Bot 管理员。
+
+如果你提前爬好了官方题解，第一位 AC 后 Bot 会把中文题解发到群里。`/review` 也会用官方题解帮你对照思路，但不会在题还没解出时剧透。
+
+## 可选功能
+
+### 打星
+
+`user_groups` 可以把一部分用户放到“打星”组里，单独记榜，或者设置题目发布后的提交等待。
+
+如果开启动态等待：
+
+- 这题是你先做出来的，下一题多等一会
+- 不是你做出来的，等待时间慢慢降回最低值
+- 等待期内的群 `/submit` 会转到 private judge
+
+这是为了让新人有更多上手机会，不是为了惩罚会做题的人。
+
+### 宵禁
+
+`curfew` 可以让 `/submit` 在每天某个时间段暂停。其他命令不受影响。
+
+比如：
+
+```yaml
+curfew:
+  start_hour: 22
+  duration_hours: 6
+```
+
+表示 22:00 到第二天 04:00 不接 `/submit`。该睡觉了，别哐哐口题。
+
+### 题目范围
+
+```yaml
+problem:
+  min_rating: 2600
+  max_rating: 2800
+  daily_post_cron: "0 12 * * *"
+```
+
+题面里依赖非公式图片、图形、复杂 diagram 的题会被跳过。Bot 现在主要擅长读文字和公式。
+
+## 常见问题
+
+### NapCat 连不上 Bot
+
+先查：
+
+```bash
+uv run status
+docker logs --tail 160 napcat
+docker exec napcat getent hosts host.docker.internal
+```
+
+常见原因：
+
+- `napcat_ws_host` 写成了 `127.0.0.1`
+- Docker 没有配置 `host.docker.internal`
+- NapCat 的 `websocketClients[].url` 端口写错
+- Bot 的 WS 端口和 NapCat 自己的端口撞了
+
+### Bot 收得到消息，但发不出去
+
+通常是 NapCat HTTP API 没开，或者端口不对。
+
+```bash
+curl -sS -X POST http://127.0.0.1:3000/get_status \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+如果这里不通，先修 NapCat 的 `httpServers`。
+
+### NapCat 每次重启都要扫码
+
+Docker Compose 里设置：
+
+```yaml
+environment:
+  ACCOUNT: "<bot_qq>"
+```
+
+### 模型经常超时
+
+把 `llm.providers` 配成“主力模型 + 稳定 fallback”。Bot 会自动按顺序重试和切换。
+
+DashScope / 阿里云百炼会走流式接口，长推理更不容易被 10 分钟 HTTP 限制卡死。
+
+## 数据放在哪里
+
+默认在：
+
+```text
+~/.kouhai-bot/
+```
+
+里面会有群状态、榜单、题面缓存、题解缓存、私聊判题历史、日志等。
+
+`config.yaml` 不提交，真实 QQ 号、API key、群号不要写进仓库。
 
 ## 开销
 
-此 bot 是纯 chatbot，token 开销很少。根据我们的测试，每天的消耗不超过 1-2M tokens。若使用 Deepseek V4 Pro，大约开销是每日2-3r。
+这是纯 chatbot，token 开销不大。按我们的使用量，每天大概 1-2M tokens。
+
+如果全走 DeepSeek V4 Pro，大约每日 2-3r。更贵的模型当然会更贵，建议配 fallback。
+
+## 开发
+
+如果你是 AI，请先读 `AGENTS.md`。『Human』
+
+本项目主要入口在 `src/kouhai_bot/`。新增命令通常只需要在 `src/kouhai_bot/handlers/cmd/` 里加一个文件并注册，`/help` 会自动生成。
 
 ## Bot 的诞生
 

@@ -45,7 +45,8 @@ NapCat (QQ) ──WS──> worker.py
   (`llm.max_retries`) before moving to the next. All providers use the
   OpenAI-compatible `/chat/completions` format. DashScope/阿里云百炼 providers
   are called with HTTP+SSE streaming to avoid the 10-minute synchronous HTTP
-  limit; other providers use the normal JSON response path. Per-task model
+  limit; providers with `stream: true` do the same; other providers use the
+  normal JSON response path. Per-task model
   overrides (`judge_model`, `clarify_model`, etc.) are defined per provider.
   `thinking` and `reasoning_effort` are sent unconditionally; unsupported
   fields are silently ignored by upstream APIs.
@@ -108,6 +109,7 @@ Each provider in `llm.providers`:
 | `review_model` | `model` | Per-task override for `/review` |
 | `summary_model` | `model` | Per-task override for `/summary` + editorial translation |
 | `reasoning_effort` | — | OpenAI reasoning effort: `minimal`/`low`/`medium`/`high`/`xhigh` |
+| `stream` | `false` | Send `stream=true` and read SSE chunks for this provider; DashScope/阿里云百炼 streams automatically |
 | `model_tag` | `""` | Short string appended to every LLM-generated user message (judge/clarify/review/summary/editorial); empty means no tag |
 
 #### `qwen` section
@@ -279,7 +281,8 @@ All providers receive the same base request payload. Non-applicable fields (e.g.
 upstream API. `thinking={"type": "enabled"}` is always sent when the judge handler
 requests it — it's an OpenAI-compatible extension that DeepSeek supports.
 DashScope/阿里云百炼 providers (detected by `dashscope.aliyuncs.com` base URL or
-`aliyun`/`bailian`/`dashscope` provider name) additionally receive
+`aliyun`/`bailian`/`dashscope` provider name) and providers with `stream: true`
+additionally receive
 `stream=true`; `llm.py` reads the SSE `data:` stream and concatenates
 `choices[].delta.content`. Do not blindly send `stream=true` to every provider:
 some OpenAI-compatible gateways reject unknown or unsupported fields instead of
@@ -562,8 +565,9 @@ already solved it.
 
 ### `/clarify` — Anti-Spoiler Clarification
 
-LLM timeout comes from `llm.clarify_timeout_sec`; DashScope/阿里云百炼 uses
-HTTP+SSE streaming, while other providers use the normal JSON response path.
+LLM timeout comes from `llm.clarify_timeout_sec`; DashScope/阿里云百炼 and
+providers with `stream: true` use HTTP+SSE streaming, while other providers use
+the normal JSON response path.
 Uses `response_format: json_object`. `thinking: enabled` and `reasoning_effort`
 are sent unconditionally; unsupported fields are ignored by the upstream API.
 Output:

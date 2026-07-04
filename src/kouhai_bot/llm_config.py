@@ -6,6 +6,22 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _parse_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
 @dataclass(frozen=True)
 class LlmProviderConfig:
     """A single LLM provider with its own credentials and per-task model mapping.
@@ -23,6 +39,7 @@ class LlmProviderConfig:
     summary_model: str = ""
     reasoning_effort: str = ""
     model_tag: str = ""
+    stream: bool = False
 
     def model_for(self, task: str = "", explicit_model: str = "") -> str:
         """Resolve the model name for a given task.
@@ -100,6 +117,7 @@ def build_providers_from_yaml(llm_section: dict[str, Any]) -> list[LlmProviderCo
                 summary_model=str(p.get("summary_model", "")).strip(),
                 reasoning_effort=str(p.get("reasoning_effort", "")).strip(),
                 model_tag=str(p.get("model_tag", "")).strip(),
+                stream=_parse_bool(p.get("stream", False)),
             )
         )
     return providers

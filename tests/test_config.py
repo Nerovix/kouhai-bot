@@ -103,6 +103,14 @@ def test_llm_timeouts_load_from_yaml(monkeypatch, tmp_path):
     assert cfg.summary_timeout_sec == 180
 
 
+def test_provider_stream_loads_from_yaml(monkeypatch, tmp_path):
+    data = yaml.safe_load(_make_yaml())
+    data["llm"]["providers"][0]["stream"] = True
+    cfg = _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+
+    assert cfg.llm_providers[0].stream is True
+
+
 def test_current_group_loaded(monkeypatch, tmp_path):
     cfg = _from_yaml(_make_yaml(current_group=123456), monkeypatch, tmp_path)
     assert cfg.current_group == 123456

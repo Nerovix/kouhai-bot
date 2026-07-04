@@ -225,9 +225,38 @@ def test_non_dashscope_provider_payload_does_not_enable_stream():
     assert "stream" not in calls[0]
 
 
+def test_explicit_stream_provider_payload_enables_stream():
+    provider = LlmProviderConfig(
+        name="openai",
+        api_key="sk-test",
+        base_url="http://localhost:8080/v1",
+        model="gpt-5.5",
+        stream=True,
+    )
+    cfg = _openai_cfg(llm_providers=[provider])
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["payload"].copy())
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion(
+            [{"role": "user", "content": "Reply with exactly OK."}],
+            task="judge",
+        ))
+
+    assert result == "OK"
+    assert calls[0]["stream"] is True
+
+
 def test_streaming_chat_completion_reads_sse_delta_chunks():
     response = _DummyResponse(lines=[
         ': keep-alive\n',
+        'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n',
+        '\n',
         'data: {"choices":[{"delta":{"content":"Hello"}}]}\n',
         '\n',
         'data: {"choices":[{"delta":{"content":" world"}}]}\n',
@@ -249,6 +278,79 @@ def test_streaming_chat_completion_reads_sse_delta_chunks():
     assert result.text == "Hello world"
     assert result.retryable is False
     assert session.calls[0][1]["json"] == {"stream": True}
+
+
+def test_streaming_chat_completion_ignores_metadata_events():
+    response = _DummyResponse(lines=[
+        'data: {"id":"evt_1","model":"qwen-test","created":1}\n',
+        '\n',
+        'data: {"choices":[{"delta":{"content":"OK"}}]}\n',
+        '\n',
+        'data: [DONE]\n',
+        '\n',
+    ])
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="qwen",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        headers={},
+        payload={"stream": True},
+        timeout=120,
+    ))
+
+    assert result.text == "OK"
+    assert result.retryable is False
+
+
+def test_streaming_chat_completion_reads_responses_delta_events():
+    response = _DummyResponse(lines=[
+        'data: {"type":"response.created","response":{"id":"resp_1"}}\n',
+        '\n',
+        'data: {"type":"response.output_text.delta","delta":"{\\"correct\\":"}\n',
+        '\n',
+        'data: {"type":"response.output_text.delta","delta":"false}"}\n',
+        '\n',
+        'data: {"type":"response.output_text.done","text":"{\\"correct\\":false}"}\n',
+        '\n',
+        'data: [DONE]\n',
+        '\n',
+    ])
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="openai",
+        base_url="http://localhost:8080/v1",
+        headers={},
+        payload={"stream": True},
+        timeout=120,
+    ))
+
+    assert result.text == '{"correct":false}'
+    assert result.retryable is False
+
+
+def test_streaming_chat_completion_error_event_is_retryable():
+    response = _DummyResponse(lines=[
+        'data: {"error":{"type":"upstream_error","message":"broken"}}\n',
+        '\n',
+    ])
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="openai",
+        base_url="http://localhost:8080/v1",
+        headers={},
+        payload={"stream": True},
+        timeout=120,
+    ))
+
+    assert result.text is None
+    assert result.retryable is True
+    assert result.failure_kind == "service_unavailable"
 
 
 def test_streaming_chat_completion_eof_without_done_is_retryable():

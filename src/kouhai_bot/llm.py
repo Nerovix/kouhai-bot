@@ -61,7 +61,15 @@ def _message_content_text(message: dict) -> str:
     return str(content).strip()
 
 
-def _provider_uses_stream(provider_name: str, base_url: str) -> bool:
+def _provider_uses_stream(
+    provider_name: str,
+    base_url: str,
+    *,
+    explicit_stream: bool = False,
+) -> bool:
+    if explicit_stream:
+        return True
+
     name = (provider_name or "").strip().lower()
     if name in {"aliyun", "bailian", "dashscope"}:
         return True
@@ -130,14 +138,62 @@ def _choice_delta_text(choice: dict) -> str:
     return ""
 
 
-def _stream_event_text(data: dict) -> tuple[str, bool]:
+def _stream_event_text(data: dict) -> tuple[str, bool, str | None]:
+    error = data.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message") or error.get("type") or "error")
+        return "", True, message
+
+    event_type = str(data.get("type") or "").strip()
+    if event_type in {"response.failed", "response.incomplete"}:
+        error_obj = data.get("error") or data.get("response", {}).get("error")
+        if isinstance(error_obj, dict):
+            message = str(error_obj.get("message") or error_obj.get("type") or event_type)
+        else:
+            message = event_type
+        return "", True, message
+
     choices = data.get("choices", [])
-    if not choices:
-        return "", False
-    choice = choices[0]
-    if not isinstance(choice, dict):
-        return "", False
-    return _choice_delta_text(choice), True
+    if choices:
+        choice = choices[0]
+        if isinstance(choice, dict):
+            return _choice_delta_text(choice), True, None
+        return "", True, None
+
+    if event_type == "response.output_text.delta":
+        delta = data.get("delta", "")
+        return delta if isinstance(delta, str) else "", True, None
+
+    if event_type in {"response.output_text.done", "response.completed"}:
+        text = _responses_event_text(data)
+        return text, True, None
+
+    # Streaming APIs often emit lifecycle, usage, or reasoning events with no
+    # chat-completions choice payload. They are valid SSE frames, just not answer text.
+    return "", True, None
+
+
+def _responses_event_text(data: dict) -> str:
+    text = data.get("text", "")
+    if isinstance(text, str):
+        return text
+
+    response = data.get("response")
+    if not isinstance(response, dict):
+        return ""
+
+    parts: list[str] = []
+    for item in response.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content", []) or []:
+            if not isinstance(content, dict):
+                continue
+            if content.get("type") in {"output_text", "text"}:
+                value = content.get("text", "")
+                if isinstance(value, str):
+                    parts.append(value)
+    return "".join(parts)
 
 
 async def _read_streaming_chat_completion(
@@ -178,11 +234,14 @@ async def _read_streaming_chat_completion(
         except json.JSONDecodeError:
             return False, stream_failure("invalid json")
 
-        text, had_choice = _stream_event_text(data)
-        if text:
+        text, valid_event, error_message = _stream_event_text(data)
+        if error_message:
+            return False, stream_failure(error_message)
+        event_type = str(data.get("type") or "").strip()
+        if text and not (parts and event_type in {"response.output_text.done", "response.completed"}):
             parts.append(text)
-        if not had_choice:
-            return False, stream_failure("missing choices")
+        if not valid_event:
+            return False, stream_failure("invalid event")
         return False, None
 
     try:
@@ -346,7 +405,11 @@ async def chat_completion(
             reasoning_effort = provider.reasoning_effort.strip().lower()
             if reasoning_effort:
                 payload["reasoning_effort"] = reasoning_effort
-            if _provider_uses_stream(provider.name, provider.base_url):
+            if _provider_uses_stream(
+                provider.name,
+                provider.base_url,
+                explicit_stream=provider.stream,
+            ):
                 payload["stream"] = True
 
             for attempt in range(max_retries + 1):

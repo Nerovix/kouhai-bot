@@ -33,6 +33,7 @@ llm:
       api_key: "..."
       base_url: "..."
       model: "gpt-5.5"
+      stream: true               # use SSE streaming; recommended for sub2api/OpenAI
       reasoning_effort: "high"  # minimal/low/medium/high/xhigh
       model_tag: "『֎AI』"        # appended to LLM output; empty to disable
 

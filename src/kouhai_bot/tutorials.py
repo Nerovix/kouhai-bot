@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 
 from .config import get_config
-from .handlers.shared import translate_editorial_to_zh
+from .handlers.shared import load_problem_statement, translate_editorial_to_zh
 
 MIN_EDITORIAL_LEN = 80
 _REVIEW_EDITORIAL_MAX_LEN = 12000
@@ -137,6 +137,10 @@ def _no_editorial_marker_path(pid: str) -> str:
     return os.path.join(_translation_cache_dir(), f"{pid}.no_editorial")
 
 
+def _verified_editorial_marker_path(pid: str) -> str:
+    return os.path.join(_translation_cache_dir(), f"{pid}.verified")
+
+
 def _load_cached_translation(pid: str) -> str:
     path = _translation_cache_path(pid)
     if not os.path.isfile(path):
@@ -152,6 +156,9 @@ def _save_cached_translation(pid: str, text: str) -> None:
     path = _translation_cache_path(pid)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
+    verified = _verified_editorial_marker_path(pid)
+    with open(verified, "w", encoding="utf-8"):
+        pass
     marker = _no_editorial_marker_path(pid)
     if os.path.isfile(marker):
         os.remove(marker)
@@ -168,6 +175,9 @@ def mark_no_official_editorial(pid: str) -> None:
     path = _translation_cache_path(pid)
     if os.path.isfile(path):
         os.remove(path)
+    verified = _verified_editorial_marker_path(pid)
+    if os.path.isfile(verified):
+        os.remove(verified)
 
 
 def clear_no_official_editorial_marker(pid: str) -> None:
@@ -177,6 +187,8 @@ def clear_no_official_editorial_marker(pid: str) -> None:
 
 
 def has_cached_editorial_zh(pid: str) -> bool:
+    if not os.path.isfile(_verified_editorial_marker_path(pid)):
+        return False
     return len(_load_cached_translation(pid)) >= MIN_EDITORIAL_LEN
 
 
@@ -204,11 +216,18 @@ async def get_editorial_zh_for_group(editorial: OfficialEditorial, pid: str) -> 
 
     Returns (translated_text, model_tag). model_tag is empty for cache hits.
     """
-    cached = _load_cached_translation(pid)
-    if len(cached) >= MIN_EDITORIAL_LEN:
-        return cached, ""
+    if has_cached_editorial_zh(pid):
+        return _load_cached_translation(pid), ""
 
-    translated, model_tag = await translate_editorial_to_zh(editorial.text, pid=pid)
+    problem_text = load_problem_statement(pid)
+    translated, model_tag, matched = await translate_editorial_to_zh(
+        editorial.text,
+        pid=pid,
+        problem_text=problem_text,
+    )
+    if matched is False:
+        mark_no_official_editorial(pid)
+        return None, ""
     if not translated:
         return None, ""
     translated = translated.strip()

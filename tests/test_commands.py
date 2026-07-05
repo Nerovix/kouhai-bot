@@ -33,13 +33,16 @@ _forwarded: list[dict] = []
 _private_forwarded: list[dict] = []
 _deleted: list[str] = []
 _deepseek_response: dict | None = None
+_SECOND_JUDGE_USE_FIRST = object()
+_second_judge_response = _SECOND_JUDGE_USE_FIRST
+_second_judge_calls: list[dict] = []
 _group_members: dict[int, list[dict]] = {}
 _deepseek_calls: list[dict] = []
 _temp_dir = None
 
 
 def _reset_state():
-    global _sent, _reacted, _private_sent, _forwarded, _private_forwarded, _deleted, _deepseek_response, _group_members, _deepseek_calls, _temp_dir
+    global _sent, _reacted, _private_sent, _forwarded, _private_forwarded, _deleted, _deepseek_response, _second_judge_response, _group_members, _deepseek_calls, _temp_dir
     _sent.clear()
     _reacted.clear()
     _private_sent.clear()
@@ -47,6 +50,8 @@ def _reset_state():
     _private_forwarded.clear()
     _deleted.clear()
     _deepseek_response = None
+    _second_judge_response = _SECOND_JUDGE_USE_FIRST
+    _second_judge_calls.clear()
     _group_members = {
         GID: [
             {"user_id": UID, "nickname": "Alice", "card": ""},
@@ -122,6 +127,15 @@ def _write_tutorial(pid: str, data: dict):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def _write_editorial_translation(pid: str, text: str = "已验证中文题解。"):
+    d = os.path.join(_data_dir(), "tutorial_translations")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, f"{pid}.txt"), "w", encoding="utf-8") as f:
+        f.write(text * 20)
+    with open(os.path.join(d, f"{pid}.verified"), "w", encoding="utf-8"):
+        pass
+
+
 def _has_sent(substring: str) -> bool:
     for s in _sent:
         msg = s.get("message", [])
@@ -194,6 +208,8 @@ async def _mock_deepseek(messages, model="", task="", temperature=0.7, timeout=1
         "model": model,
     })
     if task == "summary":
+        if response_format == {"type": "json_object"}:
+            return json.dumps({"matched": "yes", "result": "官方题解中文翻译。" * 20})
         return "官方题解中文翻译。" * 20
     return json.dumps(_deepseek_response) if isinstance(_deepseek_response, dict) else _deepseek_response
 
@@ -211,7 +227,12 @@ async def _mock_chat_completion_result(messages, model="", task="", temperature=
     )
     if result is None:
         return ChatCompletionResult(text=None, failure_kind="service_unavailable")
-    return ChatCompletionResult(text=result, failure_kind=None)
+    return ChatCompletionResult(
+        text=result,
+        failure_kind=None,
+        provider_name="deepseek",
+        model="deepseek-v4-pro",
+    )
 
 
 async def _mock_judge_result(problem_text, submission, history=None):
@@ -226,6 +247,38 @@ async def _mock_judge_result(problem_text, submission, history=None):
         thinking={"type": "enabled"},
     )
     return result
+
+
+async def _mock_second_judge_result(
+    problem_text,
+    submission,
+    history,
+    first_judge_result,
+    editorial_text,
+    editorial_source="",
+    provider_name="",
+    model="",
+):
+    _second_judge_calls.append({
+        "problem_text": problem_text,
+        "submission": submission,
+        "history": history,
+        "first_judge_result": first_judge_result,
+        "editorial_text": editorial_text,
+        "editorial_source": editorial_source,
+        "provider_name": provider_name,
+        "model": model,
+    })
+    response = _deepseek_response if _second_judge_response is _SECOND_JUDGE_USE_FIRST else _second_judge_response
+    if response is None:
+        return ChatCompletionResult(text=None, failure_kind="service_unavailable")
+    text = json.dumps(response) if isinstance(response, dict) else response
+    return ChatCompletionResult(
+        text=text,
+        failure_kind=None,
+        provider_name=provider_name,
+        model=model,
+    )
 
 
 def _wrap_llm_result(fn, failure_kind="service_unavailable"):
@@ -443,8 +496,10 @@ def _all_patches():
     stack.enter_context(patch("kouhai_bot.private_judge.send_private_forward_msg", _mock_send_private_forward))
     stack.enter_context(patch("kouhai_bot.handlers.shared.call_chat_completion_result", _mock_chat_completion_result))
     stack.enter_context(patch("kouhai_bot.handlers.shared.judge_submission_result", _mock_judge_result))
+    stack.enter_context(patch("kouhai_bot.handlers.shared.second_judge_submission_result", _mock_second_judge_result))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.call_chat_completion_result", _mock_chat_completion_result))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.judge_submission_result", _mock_judge_result))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.second_judge_submission_result", _mock_second_judge_result))
     return stack
 
 
@@ -517,6 +572,7 @@ def test_submit_correct():
 
     asyncio.run(_run_submit())
 
+    assert len(_second_judge_calls) == 0
     assert _has_sent("恭喜") or _has_sent("通过") or _has_sent("solved"), \
         f"No congrats. Messages: {[_last_text()]}"
     assert _forwarded, f"Expected official tutorial forward, got: {_forwarded}"
@@ -538,6 +594,108 @@ def test_submit_correct():
     assert records[-1]["result"] == "correct"
     _cleanup()
     print("✅ submit: correct")
+
+def test_submit_correct_without_editorial_skips_second_judge():
+    _reset_state()
+    _setup_problem()
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    global _deepseek_response
+    _deepseek_response = {"correct": True, "reason": "ok", "reply": ""}
+
+    with _all_patches(), patch("kouhai_bot.handlers.cmd.submit._reveal_problem_source", AsyncMock(return_value="")):
+        from kouhai_bot.handlers.cmd.submit import handle
+        asyncio.run(handle(**_kwargs(_make_event("/submit valid but different idea"))))
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    assert len(_second_judge_calls) == 0
+    assert len(saved["solves"]) == 1
+    assert saved["user_submissions"][str(UID)][-1]["result"] == "correct"
+    _cleanup()
+    print("✅ submit: correct skips second judge without editorial")
+
+
+def test_submit_second_judge_overturns_correct_verdict():
+    _reset_state()
+    _setup_problem()
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    _write_tutorial(PID, {
+        "problem_id": PID,
+        "tutorial_url": "https://codeforces.com/blog/entry/1",
+        "tutorial_title": "Editorial",
+        "sections": [{
+            "label": "D",
+            "title": "Superhero's Job",
+            "hint": "",
+            "solution": "Use multiplicativity and enumerate squarefree divisor partitions correctly." * 3,
+            "code_blocks": [],
+            "raw_text": "Use multiplicativity and enumerate squarefree divisor partitions correctly." * 3,
+        }],
+    })
+    _write_editorial_translation(PID)
+    global _deepseek_response, _second_judge_response
+    _deepseek_response = {"correct": True, "reason": "first pass accepted", "reply": ""}
+    _second_judge_response = {
+        "correct": False,
+        "reason": "misses coprime divisor condition",
+        "reply": "这个做法漏掉了 gcd(k, x/k)=1 的限制，再检查一下 divisor 枚举条件～",
+        "reaction": "",
+    }
+
+    with _all_patches(), patch("kouhai_bot.handlers.cmd.submit._reveal_problem_source", AsyncMock(return_value="")):
+        from kouhai_bot.handlers.cmd.submit import handle
+        asyncio.run(handle(**_kwargs(_make_event("/submit enumerate all divisors without coprime check"))))
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    assert len(_second_judge_calls) == 1
+    assert _second_judge_calls[0]["provider_name"] == "deepseek"
+    assert _second_judge_calls[0]["model"] == "deepseek-v4-pro"
+    assert saved["solves"] == []
+    records = saved["user_submissions"][str(UID)]
+    assert records[-1]["result"] == "incorrect"
+    assert "coprime" in records[-1]["reason"]
+    assert "gcd" in _last_text()
+    _cleanup()
+    print("✅ submit: second judge can overturn correct verdict")
+
+
+def test_submit_second_judge_failure_keeps_first_correct_verdict():
+    _reset_state()
+    _setup_problem()
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    _write_tutorial(PID, {
+        "problem_id": PID,
+        "tutorial_url": "https://codeforces.com/blog/entry/1",
+        "tutorial_title": "Editorial",
+        "sections": [{
+            "label": "D",
+            "title": "Superhero's Job",
+            "hint": "",
+            "solution": "Valid official editorial text. " * 8,
+            "code_blocks": [],
+            "raw_text": "Valid official editorial text. " * 8,
+        }],
+    })
+    _write_editorial_translation(PID)
+    global _deepseek_response, _second_judge_response
+    _deepseek_response = {"correct": True, "reason": "first pass accepted", "reply": ""}
+    _second_judge_response = None
+
+    with _all_patches(), patch("kouhai_bot.handlers.cmd.submit._reveal_problem_source", AsyncMock(return_value="")):
+        from kouhai_bot.handlers.cmd.submit import handle
+        asyncio.run(handle(**_kwargs(_make_event("/submit valid idea"))))
+
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        saved = json.load(f)
+    assert len(_second_judge_calls) == 1
+    assert len(saved["solves"]) == 1
+    records = saved["user_submissions"][str(UID)]
+    assert records[-1]["result"] == "correct"
+    assert "模型服务" not in _last_text()
+    _cleanup()
+    print("✅ submit: second judge failure keeps first correct verdict")
+
 
 def test_submit_correct_uses_fresh_top5_nicknames_and_points():
     _reset_state()

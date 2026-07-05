@@ -37,6 +37,7 @@ async def call_chat_completion_result(
     timeout: int = 120,
     response_format: dict | None = None,
     thinking: dict | None = None,
+    provider_name: str = "",
 ) -> ChatCompletionResult:
     """Call the configured chat-completions provider and keep terminal failure metadata."""
     return await chat_completion(
@@ -47,6 +48,7 @@ async def call_chat_completion_result(
         timeout=timeout,
         response_format=response_format,
         thinking=thinking,
+        provider_name=provider_name,
     )
 
 
@@ -58,6 +60,7 @@ async def call_chat_completion(
     timeout: int = 120,
     response_format: dict | None = None,
     thinking: dict | None = None,
+    provider_name: str = "",
 ) -> str | None:
     """Call the configured chat-completions provider. Returns response text or None."""
     result = await call_chat_completion_result(
@@ -68,6 +71,7 @@ async def call_chat_completion(
         timeout=timeout,
         response_format=response_format,
         thinking=thinking,
+        provider_name=provider_name,
     )
     return result.text
 
@@ -713,6 +717,50 @@ def build_judge_messages(
     ]
 
 
+def build_second_judge_messages(
+    problem_text: str,
+    submission: str,
+    history: list[dict] | None,
+    first_judge_result: dict,
+    editorial_text: str,
+    editorial_source: str = "",
+) -> list[dict]:
+    editorial_body = (editorial_text or "").strip()
+    if len(editorial_body) > 18000:
+        editorial_body = editorial_body[:18000] + "\n...(官方题解已截断)"
+    user_msg = json.dumps({
+        "problem": problem_text,
+        "submission": submission,
+        "history": history,
+        "first_judge_result": first_judge_result,
+        "official_editorial": editorial_body,
+        "official_editorial_source": editorial_source,
+    }, ensure_ascii=False)
+    return [
+        {"role": "system", "content": (
+            "你是算法竞赛做法判定的二审 bot。你会收到题面、用户做法、用户在本题的历史上下文、"
+            "一审 bot 的完整 JSON 判定，以及爬取到的 Codeforces 官方题解。"
+            "一审 bot 做出判定时看不到官方题解，只能基于题面、用户做法和历史上下文独立推理；"
+            "因此一审判为正确并不代表它已被题解验证过。"
+            "你的任务是复核一审判为正确的做法是否真的正确且足够完整。\n\n"
+            "判定原则：\n"
+            "1) 只输出 JSON 对象，字段为 correct、reason、reply、reaction。\n"
+            "2) 如果用户做法正确且完整，即使和官方题解不同，也必须判 correct=true。"
+            "算法题可能有多种完全不同的正确解法，不要把题解做法当成唯一标准。\n"
+            "3) 如果用户做法存在关键漏洞、复杂度不满足、遗漏必要证明或处理不了边界，判 correct=false，"
+            "reason 写清楚技术原因，reply 写给用户看的简短纠错提示。\n"
+            "4) 爬取到的题解可能与本题不对应，或只是不完整片段。若题解和题面明显冲突、题解中的变量/目标/结论"
+            "对不上本题，请忽略题解，改为基于题面、用户做法和历史上下文独立复核。\n"
+            "5) 不要因为用户没有贴代码、没有展开所有实现细节就判错；只要算法思路、关键不变量、复杂度和边界处理"
+            "足以支持 AC，就应判 correct=true。\n"
+            "6) 一审可能被用户错误说法带偏。你必须独立判断，不要默认赞同一审。\n\n"
+            "输出示例："
+            "{\"correct\": true, \"reason\": \"...\", \"reply\": \"\", \"reaction\": \"\"}"
+        )},
+        {"role": "user", "content": user_msg},
+    ]
+
+
 async def judge_submission_result(
     problem_text: str,
     submission: str,
@@ -727,6 +775,37 @@ async def judge_submission_result(
         timeout=cfg.judge_timeout_sec,
         response_format={"type": "json_object"},
         thinking={"type": "enabled"},
+    )
+
+
+async def second_judge_submission_result(
+    problem_text: str,
+    submission: str,
+    history: list[dict] | None,
+    first_judge_result: dict,
+    editorial_text: str,
+    editorial_source: str = "",
+    provider_name: str = "",
+    model: str = "",
+) -> ChatCompletionResult:
+    """Re-check a first-pass correct verdict with official editorial context."""
+    cfg = get_config()
+    return await call_chat_completion_result(
+        build_second_judge_messages(
+            problem_text,
+            submission,
+            history,
+            first_judge_result,
+            editorial_text,
+            editorial_source,
+        ),
+        model=model,
+        task="judge",
+        temperature=0.2,
+        timeout=cfg.judge_timeout_sec,
+        response_format={"type": "json_object"},
+        thinking={"type": "enabled"},
+        provider_name=provider_name,
     )
 
 
@@ -817,31 +896,45 @@ async def translate_sample_notes(notes_text: str) -> tuple[str | None, str]:
     return result.text, result.model_tag
 
 
-async def translate_editorial_to_zh(editorial_text: str, pid: str = "") -> tuple[str | None, str]:
-    """Translate a Codeforces editorial to Chinese for group delivery.
+async def translate_editorial_to_zh(
+    editorial_text: str,
+    pid: str = "",
+    problem_text: str = "",
+) -> tuple[str | None, str, bool | None]:
+    """Validate and translate a Codeforces editorial to Chinese for group delivery.
 
-    Returns (translated_text, model_tag). model_tag is empty if the LLM call failed.
+    Returns (translated_text, model_tag, matched). matched is False only for explicit mismatches.
     """
     body = (editorial_text or "").strip()
     if not body:
-        return None, ""
+        return None, "", None
     if len(body) > 24000:
         body = body[:24000] + "\n...(题解原文已截断)"
+    problem_body = (problem_text or "").strip()
+    if len(problem_body) > 12000:
+        problem_body = problem_body[:12000] + "\n...(题面已截断)"
 
-    prompt = (
-        f"题目编号：{pid or '未知'}\n\n"
-        f"待翻译的官方 Editorial（英文为主，可能含 LaTeX/公式与代码）：\n\n"
-        f"{body}\n\n"
-        "请输出可在 QQ 群直接阅读的中文题解译文（仅思路与算法说明，不要贴代码）。"
-        "公式与符号尽量用中文和简单字符表达，避免 LaTeX。"
-    )
+    prompt_payload = {
+        "pid": pid or "未知",
+        "problem": problem_body,
+        "official_editorial": body,
+    }
     result = await call_chat_completion_result(
         [
             {
                 "role": "system",
                 "content": (
-                    "你是算法竞赛选手，要把 Codeforces 官方 Editorial 忠实译成中文题解，"
-                    "供 QQ 群友阅读。"
+                    "你是算法竞赛选手，要先判断爬取到的 Codeforces 官方 Editorial 是否对应给定题目，"
+                    "再把匹配的题解忠实译成中文，供 QQ 群友阅读。"
+                    "你必须输出 JSON 对象，格式严格为："
+                    "{\"matched\":\"yes\",\"result\":\"中文题解译文\"} 或 "
+                    "{\"matched\":\"no\"}。"
+                    "matched 只能是 yes 或 no。"
+                    "判断匹配时比较题面目标、输入输出、关键变量/约束、核心算法对象和题解讨论的问题；"
+                    "如果题解明显在讲另一道题，或题解内容与题面目标/变量/结论对不上，输出 matched=no，"
+                    "不要翻译、不要解释。"
+                    "如果只是题解使用了不同记号、只覆盖核心思路、或题面与题解能合理对应，输出 matched=yes。"
+                    "matched=yes 时，result 是可在 QQ 群直接阅读的中文题解译文（仅思路与算法说明，不要贴代码）。"
                     "只翻译思路、做法、复杂度等文字说明；原文中的代码、伪代码、"
                     "以反引号或代码块形式出现的程序片段一律不要输出，可用一句「实现见官方代码」带过。"
                     "不要增删关键算法步骤，不要添加原文没有的内容。"
@@ -850,16 +943,29 @@ async def translate_editorial_to_zh(editorial_text: str, pid: str = "") -> tuple
                     "\\{a,b\\} 写成集合 {a,b}；"
                     "O(n^2) 写成 O(n²) 或 O(n^2)；\\le \\lt 写成 ≤ <。"
                     "仅当不用 LaTeX 会产生歧义、且无法用中文说清楚时，才保留最少量的 LaTeX 片段。"
-                    "输出连贯纯文本，不要 Markdown 标题、列表语法。"
-                    "不要写「以下是翻译」等套话，直接输出译文。"
+                    "result 输出连贯纯文本，不要 Markdown 标题、列表语法。"
+                    "不要写「以下是翻译」等套话。"
                 ),
             },
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)},
         ],
         task="summary",
         timeout=600,
+        response_format={"type": "json_object"},
+        thinking={"type": "enabled"},
     )
-    return result.text, result.model_tag
+    if not result.text:
+        return None, "", None
+    parsed = robust_json_parse(result.text)
+    matched = str(parsed.get("matched", "")).strip().lower()
+    if matched == "no":
+        return None, "", False
+    if matched != "yes":
+        return None, "", None
+    translated = str(parsed.get("result", "") or "").strip()
+    if not translated:
+        return None, "", None
+    return translated, result.model_tag, True
 
 
 # ── Contest checking ────────────────────────────────────────────────────

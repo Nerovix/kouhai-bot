@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 from unittest.mock import AsyncMock, patch
@@ -7,8 +8,62 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kouhai_bot.config import BotConfig
 from kouhai_bot.llm_config import LlmProviderConfig
-from kouhai_bot.handlers.shared import call_chat_completion, summarize_problem
-from kouhai_bot.llm import _ChatCompletionAttempt, _post_chat_completion_once
+from kouhai_bot.handlers.shared import build_second_judge_messages, call_chat_completion, call_chat_completion_result, summarize_problem, translate_editorial_to_zh
+from kouhai_bot.llm import ChatCompletionResult, _ChatCompletionAttempt, _post_chat_completion_once
+
+
+def test_translate_editorial_to_zh_uses_structured_match_output():
+    calls = []
+
+    async def fake_call(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        return ChatCompletionResult(
+            text=json.dumps({"matched": "yes", "result": "中文题解译文"}),
+            model_tag="🐳",
+        )
+
+    with patch("kouhai_bot.handlers.shared.call_chat_completion_result", fake_call):
+        translated, tag, matched = asyncio.run(translate_editorial_to_zh(
+            "Official editorial",
+            pid="542D",
+            problem_text="Problem statement",
+        ))
+
+    assert translated == "中文题解译文"
+    assert tag == "🐳"
+    assert matched is True
+    call = calls[0]
+    assert call["task"] == "summary"
+    assert call["response_format"] == {"type": "json_object"}
+    assert call["thinking"] == {"type": "enabled"}
+    assert "matched" in call["messages"][0]["content"]
+    payload = json.loads(call["messages"][1]["content"])
+    assert payload["pid"] == "542D"
+    assert payload["problem"] == "Problem statement"
+    assert payload["official_editorial"] == "Official editorial"
+
+
+def test_build_second_judge_messages_contains_review_contract():
+    messages = build_second_judge_messages(
+        "Problem statement",
+        "User solution",
+        [{"type": "clarify", "content": "history"}],
+        {"correct": True, "reason": "first pass"},
+        "Official editorial text",
+        "https://codeforces.com/blog/entry/1",
+    )
+
+    system_text = messages[0]["content"]
+    payload = json.loads(messages[1]["content"])
+    assert "一审 bot 做出判定时看不到官方题解" in system_text
+    assert "即使和官方题解不同" in system_text
+    assert "题解可能与本题不对应" in system_text
+    assert payload["problem"] == "Problem statement"
+    assert payload["submission"] == "User solution"
+    assert payload["history"][0]["content"] == "history"
+    assert payload["first_judge_result"]["reason"] == "first pass"
+    assert payload["official_editorial"] == "Official editorial text"
+    assert payload["official_editorial_source"] == "https://codeforces.com/blog/entry/1"
 
 
 class _DummySession:
@@ -110,6 +165,50 @@ def test_call_chat_completion_retries_transient_failures_then_succeeds():
     assert calls == ["gpt-5.5", "gpt-5.5"]
     assert once_mock.call_count == 2
     sleep_mock.assert_awaited_once_with(0.25)
+
+
+def test_call_chat_completion_pinned_provider_does_not_fallback():
+    openai = LlmProviderConfig(
+        name="openai",
+        api_key="sk-openai",
+        base_url="http://openai.local/v1",
+        model="gpt-5.5",
+    )
+    deepseek = LlmProviderConfig(
+        name="deepseek",
+        api_key="sk-deepseek",
+        base_url="http://deepseek.local/v1",
+        model="deepseek-v4-pro",
+    )
+    cfg = BotConfig(
+        llm_providers=[openai, deepseek],
+        llm_max_retries=0,
+        llm_retry_base_delay_sec=0.0,
+        llm_retry_max_delay_sec=0.0,
+    )
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["provider_name"])
+        return _ChatCompletionAttempt(
+            text=None,
+            retryable=False,
+            retry_after_sec=None,
+            failure_kind="service_unavailable",
+        )
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion_result(
+            [{"role": "user", "content": "Reply with exactly OK."}],
+            task="judge",
+            provider_name="openai",
+        ))
+
+    assert result.text is None
+    assert result.failure_kind == "service_unavailable"
+    assert calls == ["openai"]
 
 
 def test_call_chat_completion_stops_on_non_retryable_failure():

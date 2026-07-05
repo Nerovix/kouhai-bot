@@ -40,6 +40,7 @@ from ..shared import (
     robust_json_parse,
     save_scoreboard,
     save_user_submission,
+    second_judge_submission_result,
 )
 from ...config import get_config
 from ...context import get_display_name, load_group_ctx
@@ -71,7 +72,7 @@ from ...private_judge import (
     send_problem_card_private,
     set_private_current_problem,
 )
-from ...tutorials import format_editorial_for_review, get_official_editorial
+from ...tutorials import format_editorial_for_review, get_official_editorial, has_cached_editorial_zh
 from ...napcat.client import (
     build_at,
     build_private_reaction_message,
@@ -273,6 +274,29 @@ async def _judge_llm_limited(
 ):
     async with _compute_limit():
         return await judge_submission_result(problem_text, submission, history)
+
+
+async def _second_judge_llm_limited(
+    problem_text: str,
+    submission: str,
+    history: list[dict] | None,
+    first_judge_result: dict,
+    editorial_text: str,
+    editorial_source: str = "",
+    provider_name: str = "",
+    model: str = "",
+):
+    async with _compute_limit():
+        return await second_judge_submission_result(
+            problem_text,
+            submission,
+            history,
+            first_judge_result,
+            editorial_text,
+            editorial_source,
+            provider_name=provider_name,
+            model=model,
+        )
 
 
 async def _send_req_plain(req: PendingRequest, text: str, *, mention: bool = True) -> int | None:
@@ -757,7 +781,46 @@ class GroupCoordinator:
         result = await _judge_llm_limited(problem_text, req.payload, history)
         if not result.text:
             return {"kind": result.failure_kind or "error", "pid": pid}
-        return {"kind": "judge", "pid": pid, "result": robust_json_parse(result.text), "model_tag": result.model_tag}
+        parsed = robust_json_parse(result.text)
+        if parsed.get("correct", False) and parsed.get("reaction", "") != "123":
+            editorial = get_official_editorial(pid) if has_cached_editorial_zh(pid) else None
+            first_provider = result.provider_name
+            first_model = result.model
+            if editorial and first_provider and first_model:
+                source = "\n".join(
+                    part for part in [editorial.tutorial_title, editorial.tutorial_url]
+                    if part
+                )
+                second = await _second_judge_llm_limited(
+                    problem_text,
+                    req.payload,
+                    history,
+                    parsed,
+                    editorial.text,
+                    source,
+                    provider_name=first_provider,
+                    model=first_model,
+                )
+                if second.text:
+                    second_parsed = robust_json_parse(second.text)
+                    if "correct" in second_parsed:
+                        return {
+                            "kind": "judge",
+                            "pid": pid,
+                            "result": second_parsed,
+                            "model_tag": second.model_tag,
+                            "first_judge_result": parsed,
+                            "second_judge": True,
+                        }
+                logger.warning(
+                    "[group_%s] second judge unavailable or malformed for %s via provider=%s model=%s; keeping first verdict",
+                    req.group_id,
+                    pid,
+                    first_provider,
+                    first_model,
+                )
+        return {"kind": "judge", "pid": pid, "result": parsed, "model_tag": result.model_tag}
+
 
     async def _compute_clarify(self, req: PendingRequest) -> dict:
         pid = req.target_pid

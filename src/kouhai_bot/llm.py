@@ -20,6 +20,8 @@ class ChatCompletionResult:
     text: str | None
     failure_kind: str | None = None
     model_tag: str = ""
+    provider_name: str = ""
+    model: str = ""
 
 
 @dataclass(frozen=True)
@@ -363,6 +365,7 @@ async def chat_completion(
     timeout: int = 120,
     response_format: dict | None = None,
     thinking: dict | None = None,
+    provider_name: str = "",
 ) -> ChatCompletionResult:
     """Call providers in fallback order; first success wins.
 
@@ -371,6 +374,8 @@ async def chat_completion(
     """
     cfg = get_config()
     providers = cfg.llm_providers
+    if provider_name:
+        providers = [p for p in providers if p.name == provider_name]
     if not providers:
         return ChatCompletionResult(text=None, failure_kind="error")
 
@@ -429,8 +434,11 @@ async def chat_completion(
                             last_failed_provider,
                         )
                     return ChatCompletionResult(
-                        text=result.text, failure_kind=None,
+                        text=result.text,
+                        failure_kind=None,
                         model_tag=provider.model_tag,
+                        provider_name=provider.name,
+                        model=model_name,
                     )
 
                 last_failure_kind = result.failure_kind
@@ -451,11 +459,18 @@ async def chat_completion(
                 await asyncio.sleep(delay)
 
             last_failed_provider = provider.name
-            logger.warning(
-                "LLM provider '%s' exhausted (max_retries=%s), "
-                "moving to next fallback",
-                provider.name,
-                max_retries,
-            )
+            if provider_name:
+                logger.warning(
+                    "Pinned LLM provider '%s' exhausted (max_retries=%s)",
+                    provider.name,
+                    max_retries,
+                )
+            else:
+                logger.warning(
+                    "LLM provider '%s' exhausted (max_retries=%s), "
+                    "moving to next fallback",
+                    provider.name,
+                    max_retries,
+                )
 
     return ChatCompletionResult(text=None, failure_kind=last_failure_kind)

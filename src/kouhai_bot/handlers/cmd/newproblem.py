@@ -235,6 +235,7 @@ def _save_daily_msg(
     post_msg: str,
     sample_messages: list[str],
     notes_message: str,
+    diagram_messages: list[dict] | None,
     snake_enabled: bool,
     node_payload: dict | None = None,
     fwd_message_id: int | None = None,
@@ -245,6 +246,7 @@ def _save_daily_msg(
         "post_msg": post_msg,
         "sample_messages": sample_messages,
         "notes_message": notes_message,
+        "diagram_messages": diagram_messages or [],
         "snake_enabled": snake_enabled,
     }
     if fwd_message_id is not None:
@@ -298,6 +300,36 @@ def _build_sample_messages(stmt: dict) -> list[str]:
     return lines
 
 
+def _build_diagram_messages(stmt: dict) -> list[dict]:
+    diagrams = stmt.get("diagrams")
+    if not isinstance(diagrams, list):
+        return []
+    messages: list[dict] = []
+    for idx, item in enumerate(diagrams, 1):
+        if not isinstance(item, dict):
+            continue
+        src = str(item.get("src", "") or "").strip()
+        description = str(item.get("description", "") or "").strip()
+        label = str(item.get("label", "") or f"图 {idx}").strip()
+        if not src and not description:
+            continue
+        messages.append({"label": label, "src": src, "description": description})
+    return messages
+
+
+def _build_diagram_segments(diagram: dict) -> list[dict]:
+    label = str(diagram.get("label", "示意图") or "示意图").strip()
+    description = str(diagram.get("description", "") or "").strip()
+    src = str(diagram.get("src", "") or "").strip()
+    caption = f"题面示意图：{label}"
+    if description and not description.startswith("("):
+        caption += f"\n{description}"
+    segments = build_plain_message(caption)
+    if src:
+        segments.append({"type": "image", "data": {"file": src}})
+    return segments
+
+
 async def _build_notes_message(stmt: dict) -> str:
     raw_notes = stmt.get("notes")
     normalized_notes = _normalize_sample_block(raw_notes)
@@ -319,6 +351,7 @@ async def _send_problem_forward_card(
     post_msg: str,
     sample_messages: list[str],
     notes_message: str = "",
+    diagram_messages: list[dict] | None = None,
     snake_enabled: bool = True,
 ) -> tuple[int | None, dict]:
     cfg = get_config()
@@ -342,6 +375,14 @@ async def _send_problem_forward_card(
             except Exception as e:
                 logger.warning(f"[group_{group_id}] Snake image self-send failed: {e}")
 
+    diagram_msg_ids: list[int] = []
+    for i, diagram in enumerate(diagram_messages or [], 1):
+        diagram_resp = await send_private_msg(cfg.bot_qq, _build_diagram_segments(diagram))
+        if diagram_resp:
+            diagram_msg_ids.append(diagram_resp)
+        else:
+            logger.warning(f"[group_{group_id}] Diagram {i} self-send failed")
+
     sample_msg_ids: list[int] = []
     for i, sample_msg in enumerate(sample_messages, 1):
         sample_resp = await send_private_msg(cfg.bot_qq, build_plain_message(sample_msg))
@@ -360,6 +401,8 @@ async def _send_problem_forward_card(
 
     await asyncio.sleep(0.5)
     fwd_nodes = [{"type": "node", "data": {"id": str(self_resp)}}]
+    for diagram_msg_id in diagram_msg_ids:
+        fwd_nodes.append({"type": "node", "data": {"id": str(diagram_msg_id)}})
     for sample_msg_id in sample_msg_ids:
         fwd_nodes.append({"type": "node", "data": {"id": str(sample_msg_id)}})
     if note_msg_id:
@@ -369,6 +412,7 @@ async def _send_problem_forward_card(
     fwd_resp = await send_group_forward_msg(group_id, fwd_nodes)
     payload = {
         "msg_id": self_resp,
+        "diagram_msg_ids": diagram_msg_ids,
         "sample_msg_ids": sample_msg_ids,
         "note_msg_id": note_msg_id,
         "snake_msg_id": snake_msg_id,
@@ -467,6 +511,7 @@ async def _do_daily_post_locked(
     pid = str(picked_state.get("today", "") or "")
     sample_messages: list[str] = []
     notes_message = ""
+    diagram_messages: list[dict] = []
     try:
         if pid:
             schedule_prefetch_editorial(pid)
@@ -484,6 +529,7 @@ async def _do_daily_post_locked(
             ml = stmt.get("memory_limit", "?")
             limits_text = f"Time: {tl}, Memory: {ml}"
             sample_messages = _build_sample_messages(stmt)
+            diagram_messages = _build_diagram_messages(stmt)
             notes_message = await _build_notes_message(stmt)
 
         summary, model_tag = await summarize_problem(stmt_text, input_text, limits_text)
@@ -514,6 +560,7 @@ async def _do_daily_post_locked(
         post_msg=post_msg,
         sample_messages=sample_messages,
         notes_message=notes_message,
+        diagram_messages=diagram_messages,
         snake_enabled=True,
     )
     if not fwd_resp:
@@ -529,6 +576,7 @@ async def _do_daily_post_locked(
                     post_msg=post_msg,
                     sample_messages=sample_messages,
                     notes_message=notes_message,
+                    diagram_messages=diagram_messages,
                     snake_enabled=True,
                     node_payload=node_payload,
                 )
@@ -543,7 +591,7 @@ async def _do_daily_post_locked(
     append_group_ctx(group_id, {"role": "assistant", "content": post_msg})
     logger.info(
         f"[group_{group_id}] Daily post forwarded ✓ "
-        f"({1 + len(sample_messages) + (1 if node_payload.get('note_msg_id') else 0) + (1 if node_payload.get('snake_msg_id') else 0)} msgs)"
+        f"({1 + len(diagram_messages) + len(sample_messages) + (1 if node_payload.get('note_msg_id') else 0) + (1 if node_payload.get('snake_msg_id') else 0)} msgs)"
     )
     await _commit_problem_state(group_id, picked_state)
     if pid:
@@ -557,6 +605,7 @@ async def _do_daily_post_locked(
             post_msg=post_msg,
             sample_messages=sample_messages,
             notes_message=notes_message,
+            diagram_messages=diagram_messages,
             snake_enabled=True,
             node_payload=node_payload,
             fwd_message_id=fwd_resp,

@@ -492,3 +492,95 @@ def test_streaming_chat_completion_malformed_sse_is_retryable():
     assert result.text is None
     assert result.retryable is True
     assert result.failure_kind == "service_unavailable"
+
+
+
+def test_summarize_problem_with_diagram_images_requires_vision():
+    calls = []
+
+    async def fake_call(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        return ChatCompletionResult(text="图题中文摘要", model_tag="V")
+
+    cfg = _openai_cfg(summary_timeout_sec=123)
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", fake_call):
+        summary, tag = asyncio.run(summarize_problem(
+            "Statement has [Diagram 1].",
+            "n",
+            "Time: 1s",
+            diagram_images=[{"label": "Diagram 1", "src": "https://img.example/d.png"}],
+        ))
+
+    assert summary == "图题中文摘要"
+    assert tag == "V"
+    call = calls[0]
+    assert call["task"] == "summary"
+    assert call["timeout"] == 123
+    assert call["require_vision"] is True
+    content = call["messages"][1]["content"]
+    assert isinstance(content, list)
+    assert content[0]["type"] == "text"
+    assert content[1] == {
+        "type": "image_url",
+        "image_url": {"url": "https://img.example/d.png"},
+    }
+
+
+def test_vision_required_skips_unsupported_provider_then_fallback():
+    from kouhai_bot.llm import _vision_support_cache
+
+    openai = LlmProviderConfig(
+        name="openai",
+        api_key="sk-openai",
+        base_url="http://openai.local/v1",
+        model="text-only",
+    )
+    qwen = LlmProviderConfig(
+        name="qwen",
+        api_key="sk-qwen",
+        base_url="http://qwen.local/v1",
+        model="vision-model",
+    )
+    cfg = BotConfig(
+        llm_providers=[openai, qwen],
+        llm_max_retries=0,
+        llm_retry_base_delay_sec=0.0,
+        llm_retry_max_delay_sec=0.0,
+    )
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append((kwargs["provider_name"], kwargs["payload"]))
+        if kwargs["provider_name"] == "openai":
+            return _ChatCompletionAttempt(
+                text=None,
+                retryable=False,
+                retry_after_sec=None,
+                failure_kind="vision_unsupported",
+            )
+        if len(calls) == 2:
+            return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+        return _ChatCompletionAttempt(text="summary ok", retryable=False, retry_after_sec=None)
+
+    _vision_support_cache.clear()
+    try:
+        with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+                patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+                patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+            result = asyncio.run(call_chat_completion_result(
+                [{"role": "user", "content": [
+                    {"type": "text", "text": "summarize"},
+                    {"type": "image_url", "image_url": {"url": "https://img.example/d.png"}},
+                ]}],
+                task="summary",
+                require_vision=True,
+            ))
+    finally:
+        _vision_support_cache.clear()
+
+    assert result.text == "summary ok"
+    assert result.provider_name == "qwen"
+    assert [name for name, _payload in calls] == ["openai", "qwen", "qwen"]
+    assert calls[0][1]["messages"][0]["content"][1]["type"] == "image_url"
+    assert calls[2][1]["messages"][0]["content"][1]["type"] == "image_url"

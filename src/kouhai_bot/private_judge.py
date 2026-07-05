@@ -578,7 +578,12 @@ async def _problem_summary(group_id: int, pid: str, stmt: dict) -> str:
     input_text = stmt.get("input", "") or ""
     tl = stmt.get("time_limit", "?")
     ml = stmt.get("memory_limit", "?")
-    result, model_tag = await summarize_problem(stmt_text, input_text, f"Time: {tl}, Memory: {ml}")
+    result, model_tag = await summarize_problem(
+        stmt_text,
+        input_text,
+        f"Time: {tl}, Memory: {ml}",
+        diagram_images=_build_diagram_messages(stmt),
+    )
     summary = (result or "").strip()
     if summary:
         if model_tag:

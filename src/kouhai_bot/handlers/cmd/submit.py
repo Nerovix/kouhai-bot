@@ -337,6 +337,18 @@ def _load_latest_group_summary(group_id: int) -> str:
     return ""
 
 
+def _problem_text_with_summary(group_id: int, pid: str, problem_text: str) -> str:
+    summary = (get_problem_summary(group_id, pid) or "").strip()
+    if not summary:
+        return problem_text
+    return (
+        "题目中文简述（发题时生成，已综合题面示意图）：\n"
+        f"{summary}\n\n"
+        "题目原文：\n"
+        f"{problem_text}"
+    )
+
+
 def _build_review_history(history: list[dict]) -> str:
     def record_type(item: dict) -> str:
         explicit = item.get("type", "")
@@ -762,6 +774,7 @@ class GroupCoordinator:
         problem_text = load_problem_statement(pid)
         if not problem_text:
             return {"kind": "no_statement", "pid": pid}
+        problem_text = _problem_text_with_summary(req.group_id, pid, problem_text)
 
         cfg = get_config()
         if cfg.submit_ac_backdoor and cfg.submit_ac_backdoor in req.payload:
@@ -868,6 +881,7 @@ class GroupCoordinator:
         problem_text = load_problem_statement(pid)
         if not problem_text:
             return {"kind": "no_statement", "pid": pid}
+        problem_text = _problem_text_with_summary(req.group_id, pid, problem_text)
 
         history = await self._load_user_problem_history_for_request(req, pid)
         history_str = _build_review_history(history)

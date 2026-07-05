@@ -532,15 +532,27 @@ async def _do_daily_post_locked(
             diagram_messages = _build_diagram_messages(stmt)
             notes_message = await _build_notes_message(stmt)
 
-        summary, model_tag = await summarize_problem(stmt_text, input_text, limits_text)
+        summary, model_tag = await summarize_problem(
+            stmt_text,
+            input_text,
+            limits_text,
+            diagram_images=diagram_messages,
+        )
         if not summary:
             logger.warning(f"[group_{group_id}] Summary 1st attempt failed, retrying...")
-            summary, model_tag = await summarize_problem(stmt_text, input_text, limits_text)
+            summary, model_tag = await summarize_problem(
+                stmt_text,
+                input_text,
+                limits_text,
+                diagram_images=diagram_messages,
+            )
         if summary:
             desc = summary.strip()
             save_problem_summary(group_id, pid, desc)
         else:
             logger.warning(f"[group_{group_id}] Summary failed after retry")
+            if diagram_messages:
+                return False
     except Exception as e:
         logger.warning(f"[group_{group_id}] Summary error: {e}")
 

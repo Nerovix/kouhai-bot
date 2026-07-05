@@ -38,6 +38,7 @@ async def call_chat_completion_result(
     response_format: dict | None = None,
     thinking: dict | None = None,
     provider_name: str = "",
+    require_vision: bool = False,
 ) -> ChatCompletionResult:
     """Call the configured chat-completions provider and keep terminal failure metadata."""
     return await chat_completion(
@@ -49,6 +50,7 @@ async def call_chat_completion_result(
         response_format=response_format,
         thinking=thinking,
         provider_name=provider_name,
+        require_vision=require_vision,
     )
 
 
@@ -61,6 +63,7 @@ async def call_chat_completion(
     response_format: dict | None = None,
     thinking: dict | None = None,
     provider_name: str = "",
+    require_vision: bool = False,
 ) -> str | None:
     """Call the configured chat-completions provider. Returns response text or None."""
     result = await call_chat_completion_result(
@@ -72,6 +75,7 @@ async def call_chat_completion(
         response_format=response_format,
         thinking=thinking,
         provider_name=provider_name,
+        require_vision=require_vision,
     )
     return result.text
 
@@ -161,19 +165,6 @@ def load_problem_statement(pid: str) -> str:
     desc = stmt.get("description", "")
     if desc:
         parts.append(f"\nDescription:\n{desc}")
-
-    diagrams = stmt.get("diagrams", [])
-    if isinstance(diagrams, list) and diagrams:
-        lines = []
-        for idx, item in enumerate(diagrams, 1):
-            if not isinstance(item, dict):
-                continue
-            label = str(item.get("label", "") or f"Diagram {idx}").strip()
-            description = str(item.get("description", "") or "").strip()
-            if description:
-                lines.append(f"{label}: {description}")
-        if lines:
-            parts.append("\nDiagrams:\n" + "\n".join(lines))
 
     inp = stmt.get("input", "")
     if inp:
@@ -836,14 +827,19 @@ async def judge_submission(
 
 # ── Judge ───────────────────────────────────────────────────────────────
 
-async def summarize_problem(stmt_text: str, input_text: str, limits_text: str) -> tuple[str | None, str]:
+async def summarize_problem(
+    stmt_text: str,
+    input_text: str,
+    limits_text: str,
+    diagram_images: list[dict] | None = None,
+) -> tuple[str | None, str]:
     """Generate Chinese summary of a problem via the configured chat provider.
     
     Returns (summary_text, model_tag). model_tag is empty if the LLM call failed.
     """
     cfg = get_config()
     prompt = (
-        f"下面是需要压缩转述的题面素材（可能含英文，以及从公式图识别得到的 LaTeX；勿臆造素材里未出现的事实）：\n\n"
+        f"下面是需要压缩转述的题面素材（可能含英文，以及从公式图识别得到的 LaTeX；若题干中出现 [Diagram N]，必须结合对应图片理解；勿臆造素材里未出现的事实）：\n\n"
         f"【题干主体】\n{stmt_text}\n\n"
         f"【输入说明】（若几乎为空可略写）\n{input_text}\n\n"
         f"【时空限制】\n{limits_text}\n\n"
@@ -863,14 +859,48 @@ async def summarize_problem(stmt_text: str, input_text: str, limits_text: str) -
         "4) 交互题在简述末尾加「交互题」。\n"
         "5) 在保证信息等价、无歧义的前提下尽量短；信息完整优先于「字数减半」类目标。\n"
     )
-    result = await call_chat_completion_result([
-        {"role": "system", "content": (
-            "你是算法竞赛选手，在 QQ 群用中文介绍每日一题。"
-            "输出连贯、可读、信息完整的中文简述；默认少用 LaTeX 以降低阅读成本，但题意所依赖的关键公式与定义必须交代清楚，"
-            "必要时可保留少量 LaTeX。不要使用 Markdown（标题井号、列表语法、代码围栏、粗体斜体）。"
-        )},
-        {"role": "user", "content": prompt},
-    ], task="summary", timeout=cfg.summary_timeout_sec)
+    images = [item for item in (diagram_images or []) if isinstance(item, dict) and item.get("src")]
+    messages: list[dict]
+    if images:
+        image_lines = [
+            f"{str(item.get('label') or f'Diagram {idx}').strip()}: 第 {idx} 张图片"
+            for idx, item in enumerate(images, 1)
+        ]
+        prompt_with_images = (
+            prompt
+            + "\n题面中还包含以下示意图，请直接阅读图片并把图中对题意必要的信息融入中文简述；"
+            + "不要单独写图片说明，不要说‘如图所示’。\n"
+            + "\n".join(image_lines)
+        )
+        content = [{"type": "text", "text": prompt_with_images}]
+        for item in images:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": str(item.get("src") or "")},
+            })
+        messages = [
+            {"role": "system", "content": (
+                "你是算法竞赛选手，在 QQ 群用中文介绍每日一题。"
+                "你可以直接阅读题面示意图；必须把图中影响题意的节点、边、坐标、标签、方向、颜色或示例关系转述进中文简述。"
+                "输出连贯、可读、信息完整的中文简述；默认少用 LaTeX 以降低阅读成本，但题意所依赖的关键公式与定义必须交代清楚，"
+                "必要时可保留少量 LaTeX。不要使用 Markdown（标题井号、列表语法、代码围栏、粗体斜体）。"
+            )},
+            {"role": "user", "content": content},
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": (
+                "你是算法竞赛选手，在 QQ 群用中文介绍每日一题。"
+                "输出连贯、可读、信息完整的中文简述；默认少用 LaTeX 以降低阅读成本，但题意所依赖的关键公式与定义必须交代清楚，"
+                "必要时可保留少量 LaTeX。不要使用 Markdown（标题井号、列表语法、代码围栏、粗体斜体）。"
+            )},
+            {"role": "user", "content": prompt},
+        ]
+
+    call_kwargs = {"task": "summary", "timeout": cfg.summary_timeout_sec}
+    if images:
+        call_kwargs["require_vision"] = True
+    result = await call_chat_completion_result(messages, **call_kwargs)
     return result.text, result.model_tag
 
 

@@ -11,8 +11,16 @@ from urllib.parse import urlparse
 import aiohttp
 
 from .config import get_config
+from .llm_config import LlmProviderConfig
 
 logger = logging.getLogger("kouhai-bot.llm")
+
+# Transparent 1x1 PNG used once per provider/model to verify image input support.
+_VISION_PROBE_IMAGE_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+)
+_vision_support_cache: dict[tuple[str, str, str], bool] = {}
 
 
 @dataclass(frozen=True)
@@ -85,6 +93,23 @@ def _provider_uses_stream(
 
 def _should_retry_status(status: int) -> bool:
     return status in {408, 409, 429} or status >= 500
+
+
+def _looks_like_vision_unsupported_error(text: str) -> bool:
+    normalized = (text or "").lower()
+    if not any(token in normalized for token in ("image", "vision", "modalit", "multimodal", "multi-modal")):
+        return False
+    return any(
+        token in normalized
+        for token in (
+            "not support",
+            "does not support",
+            "unsupported",
+            "invalid content type",
+            "only supported",
+            "cannot accept",
+        )
+    )
 
 
 def _parse_retry_after_seconds(value: str | None) -> float | None:
@@ -299,13 +324,16 @@ async def _post_chat_completion_once(
                 log_fn(
                     "%s API error %s: %s", provider_name, resp.status, text[:300]
                 )
+                failure_kind = "service_unavailable" if retryable else "error"
+                if not retryable and _looks_like_vision_unsupported_error(text):
+                    failure_kind = "vision_unsupported"
                 return _ChatCompletionAttempt(
                     text=None,
                     retryable=retryable,
                     retry_after_sec=_parse_retry_after_seconds(
                         resp.headers.get("Retry-After")
                     ),
-                    failure_kind="service_unavailable" if retryable else "error",
+                    failure_kind=failure_kind,
                 )
 
             if payload.get("stream") is True:
@@ -357,6 +385,74 @@ async def _post_chat_completion_once(
         )
 
 
+def _vision_cache_key(provider: LlmProviderConfig, model_name: str) -> tuple[str, str, str]:
+    return (
+        (provider.name or "").strip().lower(),
+        (provider.base_url or "").rstrip("/"),
+        (model_name or "").strip(),
+    )
+
+
+async def _provider_supports_vision(
+    session: aiohttp.ClientSession,
+    *,
+    provider: LlmProviderConfig,
+    model_name: str,
+    headers: dict[str, str],
+    timeout: int,
+) -> bool:
+    key = _vision_cache_key(provider, model_name)
+    cached = _vision_support_cache.get(key)
+    if cached is not None:
+        return cached
+
+    payload: dict = {
+        "model": model_name,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Reply with exactly OK."},
+                {"type": "image_url", "image_url": {"url": _VISION_PROBE_IMAGE_URL}},
+            ],
+        }],
+        "temperature": 0,
+        "max_tokens": 8,
+    }
+    if _provider_uses_stream(
+        provider.name,
+        provider.base_url,
+        explicit_stream=provider.stream,
+    ):
+        payload["stream"] = True
+
+    probe_timeout = max(5, min(int(timeout or 15), 20))
+    result = await _post_chat_completion_once(
+        session,
+        provider_name=provider.name,
+        base_url=provider.base_url,
+        headers=headers,
+        payload=payload,
+        timeout=probe_timeout,
+    )
+    if result.text is not None:
+        _vision_support_cache[key] = True
+        logger.info(
+            "LLM provider '%s' model '%s' supports image input",
+            provider.name,
+            model_name,
+        )
+        return True
+
+    if result.failure_kind == "vision_unsupported" or not result.retryable:
+        _vision_support_cache[key] = False
+    logger.warning(
+        "LLM provider '%s' model '%s' does not support image input; skipping for vision task",
+        provider.name,
+        model_name,
+    )
+    return False
+
+
 async def chat_completion(
     messages: list[dict],
     model: str = "",
@@ -366,6 +462,7 @@ async def chat_completion(
     response_format: dict | None = None,
     thinking: dict | None = None,
     provider_name: str = "",
+    require_vision: bool = False,
 ) -> ChatCompletionResult:
     """Call providers in fallback order; first success wins.
 
@@ -416,6 +513,17 @@ async def chat_completion(
                 explicit_stream=provider.stream,
             ):
                 payload["stream"] = True
+
+            if require_vision and not await _provider_supports_vision(
+                session,
+                provider=provider,
+                model_name=model_name,
+                headers=headers,
+                timeout=timeout,
+            ):
+                last_failure_kind = "vision_unsupported"
+                last_failed_provider = provider.name
+                continue
 
             for attempt in range(max_retries + 1):
                 result = await _post_chat_completion_once(

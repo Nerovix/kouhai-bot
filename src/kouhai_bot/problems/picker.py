@@ -246,14 +246,12 @@ def _diagram_details_for_cache(details: object) -> list[dict]:
         if not isinstance(item, dict):
             continue
         src = str(item.get("src", "") or "").strip()
-        description = str(item.get("description", "") or "").strip()
-        if not src and not description:
+        if not src:
             continue
         label = str(item.get("label", "") or f"Diagram {idx}").strip()
         diagrams.append({
             "label": label,
             "src": src,
-            "description": description,
         })
     return diagrams
 
@@ -261,7 +259,7 @@ def _diagram_details_for_cache(details: object) -> list[dict]:
 def fetch_statement(problem: dict) -> object:
     """
     Fetch full problem statement from Codeforces using cf_statement with Qwen-VL.
-    Formula images are converted to LaTeX text via VL; non-formula diagrams are described and attached.
+    Formula images are converted to LaTeX text via VL; non-formula diagrams are kept as summary-time image inputs.
     Returns dict with keys: name, time_limit, memory_limit, description,
     input, samples, notes, diagrams. Or None on failure.
     Caches locally so we only process each problem once.
@@ -320,7 +318,7 @@ def fetch_statement(problem: dict) -> object:
         return None
 
     if cf_result.get("has_non_formula_images"):
-        print(f"Info: {pid} has non-formula images (diagrams), using VL descriptions", file=sys.stderr)
+        print(f"Info: {pid} has non-formula images (diagrams), keeping image inputs", file=sys.stderr)
 
     # Filter: skip if any formula failed after retries
     if cf_result.get("formulas_failed", 0) > 0:

@@ -238,32 +238,12 @@ def _normalize_samples(samples: list[dict]) -> tuple[list[dict], bool]:
     return normalized, changed
 
 
-def _diagram_details_for_cache(details: object) -> list[dict]:
-    if not isinstance(details, list):
-        return []
-    diagrams: list[dict] = []
-    for idx, item in enumerate(details, 1):
-        if not isinstance(item, dict):
-            continue
-        src = str(item.get("src", "") or "").strip()
-        description = str(item.get("description", "") or "").strip()
-        if not src and not description:
-            continue
-        label = str(item.get("label", "") or f"Diagram {idx}").strip()
-        diagrams.append({
-            "label": label,
-            "src": src,
-            "description": description,
-        })
-    return diagrams
-
-
 def fetch_statement(problem: dict) -> object:
     """
     Fetch full problem statement from Codeforces using cf_statement with Qwen-VL.
-    Formula images are converted to LaTeX text via VL; non-formula diagrams are described and attached.
+    Formula images are converted to LaTeX text via VL; non-formula diagrams are filtered.
     Returns dict with keys: name, time_limit, memory_limit, description,
-    input, samples, notes, diagrams. Or None on failure.
+    input, samples, notes. Or None on failure / diagram problem.
     Caches locally so we only process each problem once.
     """
     contest_id = problem.get("contestId")
@@ -319,8 +299,10 @@ def fetch_statement(problem: dict) -> object:
         print(f"Warning: {pid} cf_statement error: {cf_result['error']}", file=sys.stderr)
         return None
 
+    # Filter: skip problems with non-formula images (diagrams)
     if cf_result.get("has_non_formula_images"):
-        print(f"Info: {pid} has non-formula images (diagrams), using VL descriptions", file=sys.stderr)
+        print(f"Warning: {pid} has non-formula images (diagrams), skipping", file=sys.stderr)
+        return None
 
     # Filter: skip if any formula failed after retries
     if cf_result.get("formulas_failed", 0) > 0:
@@ -357,9 +339,6 @@ def fetch_statement(problem: dict) -> object:
     # Description: use VL-processed text (formulas converted to LaTeX inline)
     desc = cf_result.get("text", "")
     result["description"] = desc
-    diagrams = _diagram_details_for_cache(cf_result.get("graphics_details", []))
-    if diagrams:
-        result["diagrams"] = diagrams
 
     # Extract Input spec from raw HTML
     inp_m = re.search(

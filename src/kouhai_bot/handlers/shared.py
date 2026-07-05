@@ -162,19 +162,6 @@ def load_problem_statement(pid: str) -> str:
     if desc:
         parts.append(f"\nDescription:\n{desc}")
 
-    diagrams = stmt.get("diagrams", [])
-    if isinstance(diagrams, list) and diagrams:
-        lines = []
-        for idx, item in enumerate(diagrams, 1):
-            if not isinstance(item, dict):
-                continue
-            label = str(item.get("label", "") or f"Diagram {idx}").strip()
-            description = str(item.get("description", "") or "").strip()
-            if description:
-                lines.append(f"{label}: {description}")
-        if lines:
-            parts.append("\nDiagrams:\n" + "\n".join(lines))
-
     inp = stmt.get("input", "")
     if inp:
         parts.append(f"\nInput:\n{inp}")

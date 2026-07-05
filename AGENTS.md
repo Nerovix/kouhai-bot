@@ -22,8 +22,8 @@ NapCat (QQ) ──WS──> worker.py
   only as fallback.
 - **Scheduler current-group config**: `~/.kouhai-bot/scheduler_config.json` stores job list + time overrides for `CURRENT_GROUP`. Jobs are defined in `scheduler/jobs.py`.
 - **Command event log**: `eventlog.py` writes append-only JSONL command events by real local date. `achievements.py` reads those events for the 04:00-to-04:00 daily report. `eventlog_backfill.py` and `tools/backfill_command_events.py` can reconstruct recent saved submit/clarify/review events from `scoreboard.json`.
-- **Formula/diagram VL**: `problems/fetcher.py` handles CF formula images → Qwen-VL → inline LaTeX, and `tex-graphics` diagrams → concise VL descriptions. Has white-bg preprocessing, hallucination detection, retry. Diagram metadata is cached as `diagrams` and problem cards attach original diagram images as forward nodes.
-- **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before VL pipeline via `_vl_processed` flag. Stale caches with images are re-fetched with Qwen-VL. Formula conversion failures still skip the problem; non-formula images are supported through VL descriptions plus attached image nodes.
+- **Formula VL**: `problems/fetcher.py` handles CF formula images → Qwen-VL → inline LaTeX. Has white-bg preprocessing, hallucination detection, retry.
+- **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before VL pipeline via `_vl_processed` flag. Stale caches with images are re-fetched with Qwen-VL. Problems with non-formula images (tex-graphics / diagrams) are skipped.
 - **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
 - **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection, dispatches commands, and owns the scheduler in one process. There is no SQLite event queue, ingress supervisor, worker hot-swap, or auto-update loop.
 - **Friend request auto-approval**: Normal OneBot `post_type="request"` / `request_type="friend"` events are parsed by `napcat/client.py`, routed by `handlers.process_event()`, and approved via `set_friend_add_request`. QQ/NapCat "doubtful" friend requests are not reliably pushed as request events, so `worker.py` also runs `friend_requests.doubt_friend_request_loop()`, which polls `get_doubt_friends_add_request` every 60 seconds and approves with `set_doubt_friends_add_request`. Both paths approve only after the requester is confirmed to be a member of `CURRENT_GROUP`; lookup failure, malformed events, non-friend requests, and non-members are ignored without approving. Requests that were already consumed by another QQ client may not appear in the doubtful-request poll.
@@ -631,9 +631,9 @@ commands are rejected in private with a friendly message.
   review as available. It sends a private problem card, preferring the current group's
   cached forward-card payload when the pid is the current group problem. Generated
   private cards must not expose the original CF id, title, contest id, or rating in the
-  card title. If an explicit pid/link still fails because diagram extraction or
-  statement fetch is unavailable, tell the user the bot has limited ability on that
-  image-dependent statement and suggest choosing another problem.
+  card title. If an explicit pid/link fails because the statement fetcher detects
+  non-formula images (`tex-graphics` diagrams), tell the user the bot has limited
+  ability on image-dependent statements and suggest choosing another problem.
 - `/problem` in private resends the selected private problem card. `/tag`, `/status`,
   `/clear`, `/submit`, `/clarify`, and `/review` all operate on private state and do
   not emit group @mentions. `/testcd` is private-only and reports the current service-group

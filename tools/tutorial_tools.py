@@ -13,8 +13,6 @@ import asyncio
 import json
 import os
 import sys
-import time
-import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,13 +22,20 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from kouhai_bot.config import get_config
-from kouhai_bot.handlers.shared import robust_json_parse
+from kouhai_bot.handlers.shared import robust_json_parse, translate_editorial_to_zh
 from kouhai_bot.llm import chat_completion
 from kouhai_bot.tutorials import MIN_EDITORIAL_LEN, _is_placeholder, extract_editorial
 
+from cf_tutorial_agent import AgentNoMatch
+from cf_tutorial_agent import DEFAULT_CANDIDATE_LIMIT
+from cf_tutorial_agent import DEFAULT_CONFIDENCE_THRESHOLD
+from cf_tutorial_agent import DEFAULT_DEADLINE_SEC
+from cf_tutorial_agent import DEFAULT_LLM_TEXT_LIMIT
+from cf_tutorial_agent import DEFAULT_SELECTOR_TIMEOUT_SEC
+from cf_tutorial_agent import load_statement
+from cf_tutorial_agent import run_agent_for_pid
+from cf_tutorial_agent import statement_to_text
 from scrape_cf_tutorial import ScrapeError
-from scrape_cf_tutorial import build_problem_url_from_pid
-from scrape_cf_tutorial import build_result
 from scrape_cf_tutorial import list_statement_pids
 
 DEFAULT_STATEMENTS_DIR = str(ROOT / "statements")
@@ -114,103 +119,128 @@ def _write_tutorial(path: Path, bundle: dict, *, pretty: bool) -> None:
     path.write_text(payload + ("\n" if pretty else ""), encoding="utf-8")
 
 
-def _crawl_pid(
+async def _translate_agent_bundle(
+    *,
+    pid: str,
+    bundle: dict,
+    statements_dir: Path,
+    tutorials_dir: Path,
+    timeout: int,
+) -> tuple[bool, str]:
+    sections = bundle.get("sections") or []
+    if not sections or not isinstance(sections[0], dict):
+        return False, "no_section"
+    editorial_text = extract_editorial(sections[0])
+    if len(editorial_text) < MIN_EDITORIAL_LEN:
+        return False, "editorial_too_short"
+    stmt = load_statement(statements_dir / f"{pid}.json")
+    problem_text = statement_to_text(stmt)
+    try:
+        translated, model_tag, matched = await asyncio.wait_for(
+            translate_editorial_to_zh(
+                editorial_text,
+                pid=pid,
+                problem_text=problem_text,
+            ),
+            timeout=max(1, timeout),
+        )
+    except asyncio.TimeoutError:
+        return False, "translation_timeout"
+    if matched is False:
+        return False, "translation_mismatch"
+    if not translated or len(translated.strip()) < MIN_EDITORIAL_LEN:
+        return False, "translation_empty"
+
+    cache_dir = tutorials_dir.parent / "tutorial_translations"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    full_text = (translated.strip() + model_tag).strip() if model_tag else translated.strip()
+    (cache_dir / f"{pid}.txt").write_text(full_text, encoding="utf-8")
+    (cache_dir / f"{pid}.verified").write_text("", encoding="utf-8")
+    no_editorial = cache_dir / f"{pid}.no_editorial"
+    if no_editorial.is_file():
+        no_editorial.unlink()
+    return True, "translated"
+
+
+def _run_agent_sync(
     pid: str,
     *,
-    out_path: Path,
+    statements_dir: Path,
+    tutorials_dir: Path,
     fetcher: str,
     pw_wait_ms: int,
     pretty: bool,
-    max_attempts: int,
-    retry_sleep_seconds: float,
+    blog_limit: int,
+    deadline_sec: int,
+    selector_timeout_sec: int,
+    confidence_threshold: float,
+    llm_text_limit: int,
+    translate: bool,
+    translate_timeout_sec: int,
 ) -> CrawlOutcome:
-    last_reason = ""
-    last_error = ""
-
-    for attempt in range(1, max_attempts + 1):
-        problem_url = build_problem_url_from_pid(pid)
-        try:
-            bundle = build_result(
-                problem_url,
+    out_path = tutorials_dir / f"{pid}.json"
+    try:
+        result = asyncio.run(
+            run_agent_for_pid(
+                pid=pid,
+                statements_dir=statements_dir,
                 fetcher=fetcher,
-                pw_wait_ms=pw_wait_ms,
+                pw_wait_ms=max(0, pw_wait_ms),
+                blog_limit=max(1, blog_limit),
+                deadline_sec=max(1, deadline_sec),
+                selector_timeout_sec=max(1, selector_timeout_sec),
+                confidence_threshold=max(0.0, min(1.0, confidence_threshold)),
+                llm_text_limit=max(800, llm_text_limit),
             )
-        except ScrapeError as exc:
-            last_error = str(exc)
-            if exc.code == 11:
-                return CrawlOutcome(
-                    pid=pid,
-                    status="skipped_pdf",
-                    attempts=attempt,
-                    error=last_error,
-                )
-            if attempt < max_attempts:
-                print(f"[RETRY_SCRAPE] {pid} attempt={attempt} error={exc}")
-                if retry_sleep_seconds > 0:
-                    time.sleep(retry_sleep_seconds)
-                continue
-            if out_path.is_file():
-                out_path.unlink()
-            return CrawlOutcome(
-                pid=pid,
-                status="scrape_failed",
-                attempts=attempt,
-                error=last_error,
-            )
-        except Exception as exc:
-            last_error = str(exc)
-            if attempt < max_attempts:
-                print(f"[RETRY_SCRAPE] {pid} attempt={attempt} error={exc}")
-                if retry_sleep_seconds > 0:
-                    time.sleep(retry_sleep_seconds)
-                continue
-            if out_path.is_file():
-                out_path.unlink()
-            return CrawlOutcome(
-                pid=pid,
-                status="scrape_failed",
-                attempts=attempt,
-                error=last_error,
-            )
+        )
+    except AgentNoMatch as exc:
+        if out_path.is_file():
+            out_path.unlink()
+        return CrawlOutcome(pid=pid, status="agent_no_match", attempts=1, error=str(exc))
+    except ScrapeError as exc:
+        if out_path.is_file():
+            out_path.unlink()
+        return CrawlOutcome(pid=pid, status="scrape_failed", attempts=1, error=str(exc))
 
-        reason = tutorial_quality_reason(bundle) or ""
-        if reason:
-            last_reason = reason
-            print(
-                f"[LOW_QUALITY] {pid} attempt={attempt}/{max_attempts} reason={reason}"
-            )
-            if attempt < max_attempts:
-                if retry_sleep_seconds > 0:
-                    time.sleep(retry_sleep_seconds)
-                continue
-            if out_path.is_file():
-                out_path.unlink()
-            return CrawlOutcome(
+    reason = tutorial_quality_reason(result.bundle) or ""
+    if reason:
+        if out_path.is_file():
+            out_path.unlink()
+        return CrawlOutcome(
+            pid=pid,
+            status="quality_failed",
+            attempts=1,
+            quality_reason=reason,
+        )
+
+    _write_tutorial(out_path, result.bundle, pretty=pretty)
+
+    status = "agent_ok"
+    if translate:
+        translated, translate_reason = asyncio.run(
+            _translate_agent_bundle(
                 pid=pid,
-                status="quality_failed",
-                attempts=attempt,
-                quality_reason=last_reason,
+                bundle=result.bundle,
+                statements_dir=statements_dir,
+                tutorials_dir=tutorials_dir,
+                timeout=translate_timeout_sec,
             )
+        )
+        if translated:
+            status = "agent_ok_translated"
+        else:
+            print(f"[TRANSLATE_SKIP] {pid} reason={translate_reason}")
 
-        _write_tutorial(out_path, bundle, pretty=pretty)
-        status = "ok" if attempt == 1 else "ok_after_retry"
-        return CrawlOutcome(pid=pid, status=status, attempts=attempt)
-
-    if out_path.is_file():
-        out_path.unlink()
-    return CrawlOutcome(
-        pid=pid,
-        status="quality_failed",
-        attempts=max_attempts,
-        quality_reason=last_reason or "unknown",
-        error=last_error,
+    print(
+        f"[AGENT_SELECT] {pid} candidate={result.selected_candidate_id} "
+        f"confidence={result.confidence:.2f} candidates={result.candidate_count} "
+        f"elapsed={result.elapsed_sec:.1f}s reason={result.reason}"
     )
+    return CrawlOutcome(pid=pid, status=status, attempts=1)
+
 
 
 def cmd_crawl(args: argparse.Namespace) -> None:
-    if args.max_attempts < 1:
-        raise SystemExit("--max-attempts 至少为 1")
-
     statements_dir = Path(args.statements_dir)
     tutorials_dir = Path(args.tutorials_dir)
     tutorials_dir.mkdir(parents=True, exist_ok=True)
@@ -230,7 +260,7 @@ def cmd_crawl(args: argparse.Namespace) -> None:
 
     print(
         f"[INFO] statements={statements_dir} tutorials={tutorials_dir} "
-        f"total={len(pids)} max_attempts={args.max_attempts} "
+        f"total={len(pids)} mode=agent "
         f"skip_existing={args.skip_existing} force={args.force}"
     )
 
@@ -254,14 +284,20 @@ def cmd_crawl(args: argparse.Namespace) -> None:
                 continue
 
         try:
-            outcome = _crawl_pid(
+            outcome = _run_agent_sync(
                 pid,
-                out_path=out_path,
+                statements_dir=statements_dir,
+                tutorials_dir=tutorials_dir,
                 fetcher=args.fetcher,
                 pw_wait_ms=max(0, args.pw_wait_ms),
                 pretty=args.pretty,
-                max_attempts=args.max_attempts,
-                retry_sleep_seconds=max(0.0, args.retry_sleep_seconds),
+                blog_limit=args.candidate_limit,
+                deadline_sec=args.deadline_sec,
+                selector_timeout_sec=args.selector_timeout_sec,
+                confidence_threshold=args.confidence_threshold,
+                llm_text_limit=args.llm_text_limit,
+                translate=args.translate,
+                translate_timeout_sec=args.translate_timeout_sec,
             )
         except Exception as exc:
             outcome = CrawlOutcome(
@@ -271,13 +307,12 @@ def cmd_crawl(args: argparse.Namespace) -> None:
                 error=str(exc),
             )
             print(f"[FAIL] {pid}: {exc}")
-            traceback.print_exc()
 
         outcomes.append(outcome)
         counts[outcome.status] = counts.get(outcome.status, 0) + 1
 
         tag = outcome.status.upper()
-        if outcome.status.startswith("ok"):
+        if outcome.status.startswith("ok") or outcome.status.startswith("agent_ok"):
             print(f"[{tag}] {pid} -> {out_path} attempts={outcome.attempts}")
         else:
             detail = outcome.quality_reason or outcome.error
@@ -292,8 +327,40 @@ def cmd_crawl(args: argparse.Namespace) -> None:
         "total": len(pids),
         "counts": counts,
         "quality_failed": [o.as_dict() for o in outcomes if o.status == "quality_failed"],
+        "agent_no_match": [o.as_dict() for o in outcomes if o.status == "agent_no_match"],
+        "scrape_failed": [o.as_dict() for o in outcomes if o.status == "scrape_failed"],
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+def cmd_agent(args: argparse.Namespace) -> None:
+    statements_dir = Path(args.statements_dir)
+    tutorials_dir = Path(args.tutorials_dir)
+    tutorials_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["SCRAPE_REQUEST_WAIT_SECONDS"] = str(max(0.0, args.request_wait_seconds))
+
+    outcome = _run_agent_sync(
+        args.pid,
+        statements_dir=statements_dir,
+        tutorials_dir=tutorials_dir,
+        fetcher=args.fetcher,
+        pw_wait_ms=max(0, args.pw_wait_ms),
+        pretty=args.pretty,
+        blog_limit=args.candidate_limit,
+        deadline_sec=args.deadline_sec,
+        selector_timeout_sec=args.selector_timeout_sec,
+        confidence_threshold=args.confidence_threshold,
+        llm_text_limit=args.llm_text_limit,
+        translate=args.translate,
+        translate_timeout_sec=args.translate_timeout_sec,
+    )
+    out_path = tutorials_dir / f"{args.pid}.json"
+    print(json.dumps({
+        **outcome.as_dict(),
+        "output": str(out_path) if out_path.is_file() else "",
+    }, ensure_ascii=False, indent=2))
+    if not outcome.status.startswith("agent_ok"):
+        raise SystemExit(2)
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +597,7 @@ def cmd_validate(args: argparse.Namespace) -> None:
 
 
 def _add_crawl_parser(sub: argparse._SubParsersAction) -> None:
-    p = sub.add_parser("crawl", help="根据 statements 题号爬取题解到 tutorials")
+    p = sub.add_parser("crawl", help="根据 statements 题号用 LLM harness 爬取题解到 tutorials")
     p.add_argument("--statements-dir", default=DEFAULT_STATEMENTS_DIR)
     p.add_argument("--tutorials-dir", default=DEFAULT_TUTORIALS_DIR)
     p.add_argument(
@@ -539,15 +606,37 @@ def _add_crawl_parser(sub: argparse._SubParsersAction) -> None:
         help="若 tutorials 中已有题解文件则跳过（不论质量）",
     )
     p.add_argument("--force", action="store_true", help="即使已有文件也重新爬取")
-    p.add_argument("--max-attempts", type=int, default=2)
     p.add_argument("--sleep-seconds", type=float, default=10.0)
-    p.add_argument("--retry-sleep-seconds", type=float, default=3.0)
     p.add_argument("--request-wait-seconds", type=float, default=10.0)
     p.add_argument("--fetcher", choices=["auto", "http", "playwright"], default="auto")
     p.add_argument("--pw-wait-ms", type=int, default=7000)
     p.add_argument("--pretty", action="store_true")
     p.add_argument("--limit", type=int, default=0, help="仅处理前 N 题（0=全部）")
+    _add_agent_options(p)
     p.set_defaults(func=cmd_crawl)
+
+
+def _add_agent_options(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--candidate-limit", type=int, default=DEFAULT_CANDIDATE_LIMIT)
+    p.add_argument("--deadline-sec", type=int, default=DEFAULT_DEADLINE_SEC)
+    p.add_argument("--selector-timeout-sec", type=int, default=DEFAULT_SELECTOR_TIMEOUT_SEC)
+    p.add_argument("--translate-timeout-sec", type=int, default=75)
+    p.add_argument("--confidence-threshold", type=float, default=DEFAULT_CONFIDENCE_THRESHOLD)
+    p.add_argument("--llm-text-limit", type=int, default=DEFAULT_LLM_TEXT_LIMIT)
+    p.add_argument("--translate", action="store_true", help="题解 JSON 成功后额外写中文翻译缓存")
+
+
+def _add_agent_parser(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("agent", help="单题轻量 LLM harness 爬取官方题解")
+    p.add_argument("--pid", required=True, help="题号，如 542D")
+    p.add_argument("--statements-dir", default=DEFAULT_STATEMENTS_DIR)
+    p.add_argument("--tutorials-dir", default=DEFAULT_TUTORIALS_DIR)
+    p.add_argument("--request-wait-seconds", type=float, default=0.0)
+    p.add_argument("--fetcher", choices=["auto", "http", "playwright"], default="auto")
+    p.add_argument("--pw-wait-ms", type=int, default=7000)
+    p.add_argument("--pretty", action="store_true")
+    _add_agent_options(p)
+    p.set_defaults(func=cmd_agent)
 
 
 def _add_validate_parser(sub: argparse._SubParsersAction) -> None:
@@ -577,6 +666,7 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     _add_crawl_parser(sub)
+    _add_agent_parser(sub)
     _add_validate_parser(sub)
     args = parser.parse_args()
     args.func(args)

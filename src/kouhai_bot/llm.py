@@ -366,6 +366,7 @@ async def chat_completion(
     response_format: dict | None = None,
     thinking: dict | None = None,
     provider_name: str = "",
+    send_reasoning_effort: bool = True,
 ) -> ChatCompletionResult:
     """Call providers in fallback order; first success wins.
 
@@ -408,7 +409,7 @@ async def chat_completion(
             if thinking:
                 payload["thinking"] = thinking
             reasoning_effort = provider.reasoning_effort.strip().lower()
-            if reasoning_effort:
+            if reasoning_effort and send_reasoning_effort:
                 payload["reasoning_effort"] = reasoning_effort
             if _provider_uses_stream(
                 provider.name,

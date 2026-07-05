@@ -107,8 +107,6 @@ def load_tutorial(pid: str) -> dict | None:
 
 
 def get_official_editorial(pid: str) -> OfficialEditorial | None:
-    if pid and os.path.isfile(_no_editorial_marker_path(pid)):
-        return None
     bundle = load_tutorial(pid)
     if not bundle:
         return None
@@ -218,9 +216,8 @@ async def get_editorial_zh_for_group(editorial: OfficialEditorial, pid: str) -> 
 
     Returns (translated_text, model_tag). model_tag is empty for cache hits.
     """
-    cached = _load_cached_translation(pid)
-    if len(cached) >= MIN_EDITORIAL_LEN:
-        return cached, ""
+    if has_cached_editorial_zh(pid):
+        return _load_cached_translation(pid), ""
 
     problem_text = load_problem_statement(pid)
     translated, model_tag, matched = await translate_editorial_to_zh(

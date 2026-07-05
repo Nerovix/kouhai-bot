@@ -51,7 +51,7 @@ NapCat (QQ) ──WS──> worker.py
   `thinking` and `reasoning_effort` are sent unconditionally; unsupported
   fields are silently ignored by upstream APIs.
 - **Official CF tutorials**: Scraped editorials live under `{data_dir}/tutorials/{pid}.json`
-  (see `tools/scrape_cf_tutorial.py`). Runtime extraction is in `tutorials.py`. On the
+  (see `tools/cf_tutorial_agent.py`; low-level CF HTML helpers live in `tools/scrape_cf_tutorial.py`). Runtime extraction is in `tutorials.py`. On the
   On **new problem** (`do_daily_post` / `/newproblem`), `schedule_prefetch_editorial(pid)`
   starts background translation (using `summary_model`) into `tutorial_translations/` so first AC
   can deliver without waiting. On **first AC**, congrats is sent in `_finalize_submit`, then
@@ -712,15 +712,18 @@ continue using their admission-time problem snapshot while the new card is being
 **Scraping** (offline, not in the bot hot path):
 
 ```bash
-# Batch: statements/*.json → tutorials/<pid>.json (quality check + 1 retry)
-uv run python tools/tutorial_tools.py crawl \
-  --statements-dir statements \
+# Batch: statements/*.json → tutorials/<pid>.json using the LLM harness
+KOUHAI_CONFIG=/path/to/config.yaml uv run python tools/tutorial_tools.py crawl \
+  --statements-dir ~/.kouhai-bot/statements \
   --tutorials-dir ~/.kouhai-bot/tutorials
 
-# Single problem debug
-uv run python tools/scrape_cf_tutorial.py \
-  --problem-url "https://codeforces.com/problemset/problem/542/D" \
-  --output /tmp/542D.json
+# Single-problem LLM harness: bounded blog candidates → selector LLM → existing JSON schema
+KOUHAI_CONFIG=/path/to/config.yaml uv run python tools/tutorial_tools.py agent \
+  --pid 542D \
+  --statements-dir ~/.kouhai-bot/statements \
+  --tutorials-dir ~/.kouhai-bot/tutorials \
+  --translate
+
 
 # Optional audit of existing tutorials/
 uv run python tools/tutorial_tools.py validate --heuristic-only

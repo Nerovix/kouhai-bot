@@ -1,26 +1,20 @@
 #!/usr/bin/env python3
-"""
-Scrape Codeforces tutorial/editorial by problem URL.
+"""Low-level Codeforces HTML helpers used by cf_tutorial_agent.py.
 
-Current supported tutorial style (v1):
-- Editorial page split by problem sections like:
-  #### A - ...
-  #### B - ...
-- Inside each section, parse Hint / Solution / Code.
+This module intentionally does not choose the final tutorial anymore. The LLM
+harness owns candidate selection; helpers here only fetch pages, normalize HTML,
+load dynamic Codeforces tutorial fragments, and parse common section shapes.
 """
 
 from __future__ import annotations
 
-import argparse
 import html
 import json
 import os
 import random
 import re
 import string
-import sys
 import time
-import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,9 +40,6 @@ except ImportError:
     PlaywrightTimeoutError = TimeoutError
 
 CF_ROOT = "https://codeforces.com"
-DEFAULT_STATE_DIR = os.path.expanduser("./")
-DEFAULT_STATEMENTS_DIR = os.path.join(DEFAULT_STATE_DIR, "statements")
-DEFAULT_TUTORIALS_DIR = os.path.join(DEFAULT_STATE_DIR, "tutorials")
 
 
 class ScrapeError(RuntimeError):
@@ -293,53 +284,6 @@ def fetch_dynamic_editorial(
     return section_title, "\n".join(lines).strip()
 
 
-def parse_problem_id(problem_url: str) -> str:
-    m = re.search(r"/problem(?:set)?/problem/(\d+)/([A-Za-z0-9]+)", problem_url)
-    if m:
-        return f"{m.group(1)}{m.group(2)}"
-    m2 = re.search(r"/contest/(\d+)/problem/([A-Za-z0-9]+)", problem_url)
-    if m2:
-        return f"{m2.group(1)}{m2.group(2)}"
-    return ""
-
-
-def extract_tutorial_url(problem_html: str, base_url: str) -> str:
-    anchor_pattern = re.compile(
-        r"<a[^>]+href\s*=\s*['\"](?P<href>[^'\"]+)['\"][^>]*>(?P<text>[\s\S]*?)</a>",
-        re.I,
-    )
-    candidates: list[tuple[str, str]] = []
-    for m in anchor_pattern.finditer(problem_html):
-        href = m.group("href")
-        text = re.sub(r"<[^>]+>", " ", m.group("text"))
-        text = html.unescape(re.sub(r"\s+", " ", text)).strip().lower()
-        normalized_href = href.lower()
-        # Some problems provide tutorial only as an external PDF.
-        if (
-            ("tutorial" in text or "editorial" in text)
-            and ("pdf" in text or normalized_href.endswith(".pdf") or ".pdf?" in normalized_href)
-        ):
-            raise ScrapeError(f"Tutorial 为 PDF，跳过提取: {urljoin(base_url, href)}", 11)
-        if "/blog/entry/" not in href.lower():
-            continue
-        candidates.append((href, text))
-        if "tutorial" in text or "editorial" in text:
-            return urljoin(base_url, href)
-
-    # Fallback: if multiple blog entries exist on the page, prefer the largest entry id.
-    if candidates:
-        def _entry_id(h: str) -> int:
-            m = re.search(r"/blog/entry/(\d+)", h, re.I)
-            return int(m.group(1)) if m else -1
-        href, _ = max(candidates, key=lambda x: _entry_id(x[0]))
-        return urljoin(base_url, href)
-
-    m2 = re.search(r"/blog/entry/\d+", problem_html, re.I)
-    if m2:
-        return urljoin(base_url, m2.group(0))
-
-    raise ScrapeError("在题目页中未找到 Tutorial 链接", 3)
-
 
 def extract_page_title(html_text: str) -> str:
     m = re.search(r"<title>([\s\S]*?)</title>", html_text, re.I)
@@ -574,142 +518,6 @@ def parse_sections(markdownish: str) -> list[Section]:
     return sections
 
 
-def build_result(problem_url: str, fetcher: str = "auto", pw_wait_ms: int = 7000) -> dict[str, Any]:
-    parsed = urlparse(problem_url)
-    if not parsed.scheme or not parsed.netloc:
-        raise ScrapeError(f"非法题目链接: {problem_url}", 1)
-
-    normalized_problem_url = problem_url.strip()
-    problem_html = fetch_html(normalized_problem_url, fetcher=fetcher, pw_wait_ms=pw_wait_ms)
-    problem_title = extract_problem_title(problem_html)
-    tutorial_url = extract_tutorial_url(problem_html, normalized_problem_url)
-    tutorial_html = fetch_html(tutorial_url, fetcher=fetcher, pw_wait_ms=pw_wait_ms)
-
-    body_html = extract_blog_body_html(tutorial_html)
-    markdownish = html_to_markdownish(body_html)
-    pid = parse_problem_id(normalized_problem_url)
-    dynamic_title = ""
-    dynamic_hint = ""
-    if pid:
-        dynamic_title, dynamic_hint = fetch_dynamic_editorial(
-            tutorial_url=tutorial_url,
-            tutorial_html=tutorial_html,
-            problem_code=pid,
-        )
-
-    try:
-        sections = parse_sections(markdownish)
-    except ScrapeError:
-        sections = []
-        if pid:
-            _, problem_index = parse_pid(pid)
-            if dynamic_hint:
-                sections = [
-                    Section(
-                        label=problem_index.upper(),
-                        title=dynamic_title,
-                        hint=dynamic_hint,
-                        solution="",
-                        code_blocks=[],
-                        raw_text=markdownish.strip(),
-                    )
-                ]
-            elif problem_title:
-                legacy_sections = parse_legacy_title_sections(markdownish)
-                target_key = _normalize_title_key(problem_title)
-                for legacy_title, legacy_block in legacy_sections:
-                    if _normalize_title_key(legacy_title) == target_key:
-                        code_blocks = [
-                            code.strip()
-                            for code in re.findall(
-                                r"```(?:[^\n`]*)\n([\s\S]*?)\n```", legacy_block
-                            )
-                            if code.strip()
-                        ]
-                        text_without_code = re.sub(
-                            r"```(?:[^\n`]*)\n[\s\S]*?\n```", "", legacy_block
-                        ).strip()
-                        sections = [
-                            Section(
-                                label=problem_index.upper(),
-                                title=legacy_title.strip(),
-                                hint="",
-                                solution=text_without_code,
-                                code_blocks=code_blocks,
-                                raw_text=legacy_block,
-                            )
-                        ]
-                        break
-        if not sections:
-            raise
-
-    # Keep only the target problem section (e.g. 1000E -> E).
-    if pid:
-        _, problem_index = parse_pid(pid)
-        target = problem_index.upper()
-        matched = [s for s in sections if s.label.upper() == target]
-        if matched:
-            sections = matched
-
-    # Some tutorial pages load Editorial via AJAX (/data/problemTutorial).
-    # If we only got placeholder text, try fetching the dynamic editorial.
-    if pid:
-        for sec in sections:
-            needs_dynamic = (
-                re.search(r"Tutorial is loading", sec.raw_text, flags=re.I)
-                or re.search(r"Tutorial is loading", sec.hint, flags=re.I)
-                or re.search(r"Tutorial is loading", sec.solution, flags=re.I)
-                or (
-                    not sec.hint.strip()
-                    and not sec.solution.strip()
-                    and len(sec.code_blocks) == 0
-                    and dynamic_hint.strip() != ""
-                )
-            )
-            if needs_dynamic:
-                if dynamic_hint:
-                    if re.search(r"\bTutorial\b", sec.raw_text, flags=re.I):
-                        if not sec.solution.strip() or re.search(
-                            r"Tutorial is loading", sec.solution, flags=re.I
-                        ):
-                            sec.solution = dynamic_hint
-                        if re.search(r"Tutorial is loading", sec.hint, flags=re.I):
-                            sec.hint = ""
-                    elif not sec.hint.strip() and not sec.solution.strip():
-                        # If static section parse produced an empty block, treat dynamic
-                        # payload as the main solution text instead of a hint.
-                        sec.solution = dynamic_hint
-                    else:
-                        sec.hint = dynamic_hint
-                if dynamic_title and not sec.title:
-                    sec.title = dynamic_title
-
-    # Normalize: for tutorial-styled pages, keep explanation in solution field.
-    for sec in sections:
-        if (
-            sec.hint.strip()
-            and (
-                not sec.solution.strip()
-                or re.search(r"Tutorial is loading", sec.solution, flags=re.I)
-            )
-            and re.search(r"\bTutorial\b", sec.raw_text, flags=re.I)
-        ):
-            sec.solution = sec.hint
-            sec.hint = ""
-
-    # Always drop known loading placeholders from final fields.
-    for sec in sections:
-        sec.hint = _strip_loading_placeholder(sec.hint)
-        sec.solution = _strip_loading_placeholder(sec.solution)
-
-    return {
-        "problem_url": normalized_problem_url,
-        "problem_id": pid,
-        "tutorial_url": tutorial_url,
-        "tutorial_title": extract_page_title(tutorial_html),
-        "sections": [s.as_dict() for s in sections],
-    }
-
 
 def parse_pid(pid: str) -> tuple[str, str]:
     m = re.fullmatch(r"(\d+)([A-Za-z0-9]+)", pid.strip())
@@ -736,58 +544,3 @@ def list_statement_pids(statements_dir: str) -> list[str]:
     if not pids:
         raise ScrapeError(f"statements 目录下未找到题号 JSON: {statements_dir}", 8)
     return pids
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description=(
-            "Scrape one Codeforces tutorial by problem URL (low-level). "
-            "Batch crawl from statements/ → tutorials/ use tools/tutorial_tools.py crawl."
-        )
-    )
-    parser.add_argument("--problem-url", required=True, help="Codeforces problem URL")
-    parser.add_argument("--output", help="Write JSON output to a file")
-    parser.add_argument(
-        "--fetcher",
-        choices=["auto", "http", "playwright"],
-        default="auto",
-        help="Fetch backend. auto=HTTP then Playwright fallback when anti-bot challenged",
-    )
-    parser.add_argument(
-        "--pw-wait-ms",
-        type=int,
-        default=7000,
-        help="Extra wait time in milliseconds when using Playwright",
-    )
-    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
-    args = parser.parse_args()
-
-    try:
-        result = build_result(
-            args.problem_url,
-            fetcher=args.fetcher,
-            pw_wait_ms=max(0, args.pw_wait_ms),
-        )
-    except ScrapeError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(exc.code)
-
-    payload = json.dumps(
-        result,
-        ensure_ascii=False,
-        indent=2 if args.pretty else None,
-    )
-    if args.output:
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(payload)
-            if args.pretty:
-                f.write("\n")
-    else:
-        try:
-            print(payload)
-        except UnicodeEncodeError:
-            sys.stdout.buffer.write((payload + "\n").encode("utf-8"))
-
-
-if __name__ == "__main__":
-    main()

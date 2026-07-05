@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 
 from .config import get_config
-from .handlers.shared import load_problem_statement, translate_editorial_to_zh
+from .handlers.shared import translate_editorial_to_zh
 
 MIN_EDITORIAL_LEN = 80
 _REVIEW_EDITORIAL_MAX_LEN = 12000
@@ -93,6 +93,44 @@ def extract_editorial(section: dict) -> str:
             body = ""
 
     return _append_code_blocks(body, code_blocks)
+
+
+def _load_problem_statement_for_editorial(pid: str) -> str:
+    path = os.path.join(get_config().data_dir, "statements", f"{pid}.json")
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            stmt = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return ""
+
+    parts: list[str] = []
+    if stmt.get("name"):
+        parts.append(f"Problem: {stmt['name']}")
+    if stmt.get("time_limit"):
+        parts.append(f"Time limit: {stmt['time_limit']}")
+    if stmt.get("memory_limit"):
+        parts.append(f"Memory limit: {stmt['memory_limit']}")
+    for label, key in [
+        ("Description", "description"),
+        ("Input", "input"),
+        ("Output", "output"),
+        ("Note", "notes"),
+    ]:
+        value = (stmt.get(key) or "").strip()
+        if value:
+            parts.append(f"\n{label}:\n{value}")
+    samples = stmt.get("samples") or []
+    if isinstance(samples, list):
+        for sample in samples:
+            if not isinstance(sample, dict):
+                continue
+            parts.append(
+                f"\nInput:\n{sample.get('input', '')}\n"
+                f"Output:\n{sample.get('output', '')}"
+            )
+    return "\n".join(parts)
 
 
 def load_tutorial(pid: str) -> dict | None:
@@ -219,7 +257,7 @@ async def get_editorial_zh_for_group(editorial: OfficialEditorial, pid: str) -> 
     if has_cached_editorial_zh(pid):
         return _load_cached_translation(pid), ""
 
-    problem_text = load_problem_statement(pid)
+    problem_text = _load_problem_statement_for_editorial(pid)
     translated, model_tag, matched = await translate_editorial_to_zh(
         editorial.text,
         pid=pid,

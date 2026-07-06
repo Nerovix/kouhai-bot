@@ -86,10 +86,8 @@ class _LazyConfig:
         "llm_openai_base_url": "https://api.openai.com/v1",
         "llm_openai_model": "gpt-5",
         "llm_reasoning_effort": "",
-        "judge_model": "",
-        "clarify_model": "",
-        "review_model": "",
-        "summary_model": "",
+        "smart_model": "deepseek-v4-pro",
+        "general_model": "deepseek-v4-flash",
         "qwen_api_key": "",
         "qwen_model": "qwen-vl-max",
         "current_group": GID,
@@ -122,15 +120,9 @@ class _LazyConfig:
         if explicit_model:
             return explicit_model
         task_name = (task or "").strip().lower()
-        if task_name == "judge":
-            return self._config.get("judge_model") or "deepseek-v4-pro"
-        if task_name == "clarify":
-            return self._config.get("clarify_model") or "deepseek-v4-flash"
-        if task_name == "review":
-            return self._config.get("review_model") or "deepseek-v4-pro"
-        if task_name == "summary":
-            return self._config.get("summary_model") or "deepseek-v4-pro"
-        return self.llm_default_model()
+        if task_name in {"judge", "review"}:
+            return self._config.get("smart_model") or "deepseek-v4-pro"
+        return self._config.get("general_model") or "deepseek-v4-flash"
 
     def __getattr__(self, name):
         if name == "data_dir":

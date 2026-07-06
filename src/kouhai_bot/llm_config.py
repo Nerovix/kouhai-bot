@@ -32,11 +32,8 @@ class LlmProviderConfig:
     name: str
     api_key: str
     base_url: str
-    model: str
-    judge_model: str = ""
-    clarify_model: str = ""
-    review_model: str = ""
-    summary_model: str = ""
+    smart_model: str
+    general_model: str
     reasoning_effort: str = ""
     model_tag: str = ""
     stream: bool = False
@@ -44,20 +41,14 @@ class LlmProviderConfig:
     def model_for(self, task: str = "", explicit_model: str = "") -> str:
         """Resolve the model name for a given task.
 
-        Priority: explicit_model > per-task override > default model.
+        Priority: explicit_model > smart/general task default.
         """
         if explicit_model:
             return explicit_model
         task_name = (task or "").strip().lower()
-        if task_name == "judge":
-            return self.judge_model or self.model
-        if task_name == "clarify":
-            return self.clarify_model or self.model
-        if task_name == "review":
-            return self.review_model or self.model
-        if task_name == "summary":
-            return self.summary_model or self.model
-        return self.model
+        if task_name in {"judge", "review"}:
+            return self.smart_model
+        return self.general_model
 
 
 def build_providers_from_yaml(llm_section: dict[str, Any]) -> list[LlmProviderConfig]:
@@ -94,9 +85,13 @@ def build_providers_from_yaml(llm_section: dict[str, Any]) -> list[LlmProviderCo
         if not api_key:
             raise RuntimeError(f"LLM provider '{name}' requires 'api_key'")
 
-        model = str(p.get("model", "")).strip()
-        if not model:
-            raise RuntimeError(f"LLM provider '{name}' requires 'model'")
+        smart_model = str(p.get("smart_model", "")).strip()
+        if not smart_model:
+            raise RuntimeError(f"LLM provider '{name}' requires 'smart_model'")
+
+        general_model = str(p.get("general_model", "")).strip()
+        if not general_model:
+            raise RuntimeError(f"LLM provider '{name}' requires 'general_model'")
 
         base_url = str(p.get("base_url", "https://api.openai.com/v1")).strip()
         if not base_url:
@@ -110,11 +105,8 @@ def build_providers_from_yaml(llm_section: dict[str, Any]) -> list[LlmProviderCo
                 name=name,
                 api_key=api_key,
                 base_url=base_url,
-                model=model,
-                judge_model=str(p.get("judge_model", "")).strip(),
-                clarify_model=str(p.get("clarify_model", "")).strip(),
-                review_model=str(p.get("review_model", "")).strip(),
-                summary_model=str(p.get("summary_model", "")).strip(),
+                smart_model=smart_model,
+                general_model=general_model,
                 reasoning_effort=str(p.get("reasoning_effort", "")).strip(),
                 model_tag=str(p.get("model_tag", "")).strip(),
                 stream=_parse_bool(p.get("stream", False)),

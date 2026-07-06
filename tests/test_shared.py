@@ -126,7 +126,8 @@ def _openai_cfg(**overrides):
         name="openai",
         api_key="sk-test",
         base_url="http://localhost:8080/v1",
-        model="gpt-5.5",
+        smart_model="gpt-5.5",
+        general_model="gpt-5.5-mini",
     )
     cfg = BotConfig(
         llm_providers=[provider],
@@ -137,6 +138,23 @@ def _openai_cfg(**overrides):
     for key, value in overrides.items():
         setattr(cfg, key, value)
     return cfg
+
+
+def test_provider_model_for_uses_smart_and_general_models():
+    provider = LlmProviderConfig(
+        name="openai",
+        api_key="sk-test",
+        base_url="http://localhost:8080/v1",
+        smart_model="smart",
+        general_model="general",
+    )
+
+    assert provider.model_for(task="judge") == "smart"
+    assert provider.model_for(task="review") == "smart"
+    assert provider.model_for(task="clarify") == "general"
+    assert provider.model_for(task="summary") == "general"
+    assert provider.model_for(task="unknown") == "general"
+    assert provider.model_for(task="judge", explicit_model="override") == "override"
 
 
 def test_call_chat_completion_retries_transient_failures_then_succeeds():
@@ -172,13 +190,15 @@ def test_call_chat_completion_pinned_provider_does_not_fallback():
         name="openai",
         api_key="sk-openai",
         base_url="http://openai.local/v1",
-        model="gpt-5.5",
+        smart_model="gpt-5.5",
+        general_model="gpt-5.5-mini",
     )
     deepseek = LlmProviderConfig(
         name="deepseek",
         api_key="sk-deepseek",
         base_url="http://deepseek.local/v1",
-        model="deepseek-v4-pro",
+        smart_model="deepseek-v4-pro",
+        general_model="deepseek-v4-chat",
     )
     cfg = BotConfig(
         llm_providers=[openai, deepseek],
@@ -283,7 +303,8 @@ def test_dashscope_provider_payload_enables_stream():
         name="qwen",
         api_key="sk-test",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        model="qwen-test",
+        smart_model="qwen-test",
+        general_model="qwen-test-lite",
     )
     cfg = _openai_cfg(llm_providers=[provider])
     calls = []
@@ -371,7 +392,8 @@ def test_explicit_stream_provider_payload_enables_stream():
         name="openai",
         api_key="sk-test",
         base_url="http://localhost:8080/v1",
-        model="gpt-5.5",
+        smart_model="gpt-5.5",
+        general_model="gpt-5.5-mini",
         stream=True,
     )
     cfg = _openai_cfg(llm_providers=[provider])

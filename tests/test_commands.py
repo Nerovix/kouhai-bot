@@ -395,10 +395,8 @@ def _config_dict():
         "llm_openai_base_url": "https://api.openai.com/v1",
         "llm_openai_model": "gpt-5",
         "llm_reasoning_effort": "",
-        "judge_model": "",
-        "clarify_model": "",
-        "review_model": "",
-        "summary_model": "",
+        "smart_model": "deepseek-v4-pro",
+        "general_model": "deepseek-v4-flash",
         "judge_timeout_sec": 1200,
         "clarify_timeout_sec": 600,
         "review_timeout_sec": 600,
@@ -440,15 +438,9 @@ class _LazyConfig:
         if explicit_model:
             return explicit_model
         task_name = (task or "").strip().lower()
-        if task_name == "judge":
-            return self._config.get("judge_model") or "deepseek-v4-pro"
-        if task_name == "clarify":
-            return self._config.get("clarify_model") or "deepseek-v4-flash"
-        if task_name == "review":
-            return self._config.get("review_model") or "deepseek-v4-pro"
-        if task_name == "summary":
-            return self._config.get("summary_model") or "deepseek-v4-pro"
-        return self.llm_default_model()
+        if task_name in {"judge", "review"}:
+            return self._config.get("smart_model") or "deepseek-v4-pro"
+        return self._config.get("general_model") or "deepseek-v4-flash"
 
     def __getattr__(self, name):
         if name == "data_dir":
@@ -3505,29 +3497,31 @@ def test_user_submission_history_is_unbounded_and_upserts_by_request_id():
     _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
     from kouhai_bot.handlers.shared import load_user_submissions, save_user_submission
 
-    for i in range(25):
+    with _all_patches():
+        for i in range(25):
+            save_user_submission(GID, UID, {
+                "timestamp": f"2026-05-14T00:00:{i:02d}+08:00",
+                "type": "submit",
+                "content": f"idea {i}",
+                "result": "incorrect",
+                "reason": "",
+                "reply": "",
+                "problem": PID,
+                "request_id": f"req-{i}",
+            })
         save_user_submission(GID, UID, {
-            "timestamp": f"2026-05-14T00:00:{i:02d}+08:00",
+            "timestamp": "2026-05-14T00:00:03+08:00",
             "type": "submit",
-            "content": f"idea {i}",
-            "result": "incorrect",
+            "content": "idea 3 updated",
+            "result": "superseded",
             "reason": "",
             "reply": "",
             "problem": PID,
-            "request_id": f"req-{i}",
+            "request_id": "req-3",
         })
-    save_user_submission(GID, UID, {
-        "timestamp": "2026-05-14T00:00:03+08:00",
-        "type": "submit",
-        "content": "idea 3 updated",
-        "result": "superseded",
-        "reason": "",
-        "reply": "",
-        "problem": PID,
-        "request_id": "req-3",
-    })
 
-    records = load_user_submissions(GID, UID)
+        records = load_user_submissions(GID, UID)
+
     assert len(records) == 25, records
     assert records[0]["content"] == "idea 0", records
     assert records[3]["content"] == "idea 3 updated", records

@@ -184,13 +184,11 @@ def fetch_html(url: str, fetcher: str = "auto", pw_wait_ms: int = 7000) -> str:
     if fetcher == "playwright":
         return fetch_html_playwright(url, wait_ms=pw_wait_ms)
 
-    # auto: HTTP first, fallback to Playwright if anti-bot challenge detected.
+    # auto: HTTP first, then let a real browser try any failure path.
     try:
         return fetch_html_http(url)
-    except ScrapeError as exc:
-        if exc.code == 9:
-            return fetch_html_playwright(url, wait_ms=pw_wait_ms)
-        raise
+    except Exception:
+        return fetch_html_playwright(url, wait_ms=pw_wait_ms)
 
 
 def _extract_csrf_token(page_html: str) -> str:

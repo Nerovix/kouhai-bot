@@ -157,6 +157,36 @@ def test_provider_model_for_uses_smart_and_general_models():
     assert provider.model_for(task="judge", explicit_model="override") == "override"
 
 
+def test_general_model_tasks_preserve_provider_model_tag():
+    provider = LlmProviderConfig(
+        name="openai",
+        api_key="sk-test",
+        base_url="http://localhost:8080/v1",
+        smart_model="smart",
+        general_model="general",
+        model_tag="『G』",
+    )
+    cfg = _openai_cfg(llm_providers=[provider])
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["payload"].copy())
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion_result(
+            [{"role": "user", "content": "Reply with exactly OK."}],
+            task="summary",
+        ))
+
+    assert result.text == "OK"
+    assert result.model == "general"
+    assert result.model_tag == "『G』"
+    assert calls[0]["model"] == "general"
+
+
 def test_call_chat_completion_retries_transient_failures_then_succeeds():
     cfg = _openai_cfg(llm_max_retries=2, llm_retry_base_delay_sec=0.25)
     sleep_mock = AsyncMock()

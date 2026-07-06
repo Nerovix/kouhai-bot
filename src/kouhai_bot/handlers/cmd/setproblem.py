@@ -8,6 +8,7 @@ import asyncio
 
 from .. import registry
 from ..registry import CommandDef
+from ...editorial_followup import schedule_prefetch_editorial
 from ...napcat.client import build_plain_message, send_group_msg, send_private_msg
 from ...private_judge import (
     NonFormulaImageProblem,
@@ -171,6 +172,8 @@ async def handle(group_id: int, user_id: int, sender: dict,
             copied=copied,
         )
     ))
+    if pid:
+        schedule_prefetch_editorial(pid)
 
 
 def register() -> None:

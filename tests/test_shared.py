@@ -8,7 +8,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kouhai_bot.config import BotConfig
 from kouhai_bot.llm_config import LlmProviderConfig
-from kouhai_bot.handlers.shared import build_second_judge_messages, call_chat_completion, call_chat_completion_result, summarize_problem, translate_editorial_to_zh
+from kouhai_bot.handlers.shared import (
+    build_second_judge_messages,
+    call_chat_completion,
+    call_chat_completion_result,
+    judge_submission_result,
+    robust_json_parse,
+    summarize_problem,
+    translate_editorial_to_zh,
+    translate_sample_notes,
+)
 from kouhai_bot.llm import ChatCompletionResult, _ChatCompletionAttempt, _post_chat_completion_once
 
 
@@ -185,6 +194,72 @@ def test_general_model_tasks_preserve_provider_model_tag():
     assert result.model == "general"
     assert result.model_tag == "『G』"
     assert calls[0]["model"] == "general"
+
+
+def test_task_entrypoints_are_blackbox_except_model_class_and_tag():
+    provider = LlmProviderConfig(
+        name="deepseek",
+        api_key="sk-test",
+        base_url="http://localhost:8080/v1",
+        smart_model="deepseek-v4-pro",
+        general_model="deepseek-v4-flash",
+        model_tag="『T』",
+    )
+    cfg = _openai_cfg(llm_providers=[provider])
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        payload = kwargs["payload"].copy()
+        calls.append(payload)
+        text = "OK"
+        if payload.get("response_format") == {"type": "json_object"}:
+            user_content = payload["messages"][-1]["content"]
+            if "official_editorial" in user_content:
+                text = json.dumps({"matched": "yes", "result": "中文题解"})
+            else:
+                text = json.dumps({
+                    "correct": False,
+                    "reason": "missing proof",
+                    "reply": "再检查一下证明。",
+                    "reaction": "",
+                })
+        return _ChatCompletionAttempt(text=text, retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        judge = asyncio.run(judge_submission_result("problem", "solution", []))
+        review = asyncio.run(call_chat_completion_result(
+            [{"role": "user", "content": "review this"}],
+            task="review",
+        ))
+        summary, summary_tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
+        notes, notes_tag = asyncio.run(translate_sample_notes("1 goes to 2"))
+        editorial, editorial_tag, matched = asyncio.run(translate_editorial_to_zh(
+            "official editorial",
+            pid="1A",
+            problem_text="problem",
+        ))
+
+    assert robust_json_parse(judge.text)["correct"] is False
+    assert judge.model_tag == "『T』"
+    assert review.text == "OK"
+    assert review.model_tag == "『T』"
+    assert summary == "OK"
+    assert summary_tag == "『T』"
+    assert notes == "OK"
+    assert notes_tag == "『T』"
+    assert editorial == "中文题解"
+    assert editorial_tag == "『T』"
+    assert matched is True
+    assert [call["model"] for call in calls] == [
+        "deepseek-v4-pro",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash",
+    ]
 
 
 def test_call_chat_completion_retries_transient_failures_then_succeeds():

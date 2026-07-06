@@ -49,25 +49,29 @@ def _chunk_text(text: str, chunk_size: int) -> list[str]:
     return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
 
 
-def _prefetch_needed(pid: str) -> bool:
+def _prefetch_needed(pid: str, *, run_agent: bool) -> bool:
     if has_cached_editorial_zh(pid):
         return False
-    if is_no_official_editorial(pid) and get_official_editorial(pid) is None:
+    if (
+        is_no_official_editorial(pid)
+        and not run_agent
+        and get_official_editorial(pid) is None
+    ):
         return False
     return True
 
 
-def schedule_prefetch_editorial(pid: str) -> None:
+def schedule_prefetch_editorial(pid: str, *, run_agent: bool = True) -> None:
     """Start translating editorial when today's problem is set (/newproblem, daily_post)."""
     pid = (pid or "").strip()
-    if not pid or not _prefetch_needed(pid):
+    if not pid or not _prefetch_needed(pid, run_agent=run_agent):
         return
     existing = _prefetch_tasks.get(pid)
     if existing is not None and not existing.done():
         return
     logger.info("editorial prefetch scheduled for %s", pid)
     task = asyncio.create_task(
-        _run_prefetch_editorial(pid),
+        _run_prefetch_editorial(pid, run_agent=run_agent),
         name=f"editorial_prefetch_{pid}",
     )
     _prefetch_tasks[pid] = task
@@ -92,7 +96,7 @@ def schedule_prefetch_for_group_today(group_id: int) -> None:
         return
     pid = str(state.get("today", "") or "").strip()
     if pid:
-        schedule_prefetch_editorial(pid)
+        schedule_prefetch_editorial(pid, run_agent=False)
 
 
 def schedule_prefetch_for_current_group() -> None:
@@ -101,10 +105,10 @@ def schedule_prefetch_for_current_group() -> None:
         schedule_prefetch_for_group_today(cfg.current_group)
 
 
-async def _run_prefetch_editorial(pid: str) -> None:
+async def _run_prefetch_editorial(pid: str, *, run_agent: bool) -> None:
     started = time.monotonic()
     try:
-        await prefetch_editorial_zh(pid)
+        await prefetch_editorial_zh(pid, run_agent=run_agent)
         elapsed = time.monotonic() - started
         if has_cached_editorial_zh(pid):
             logger.info("editorial prefetch ready for %s in %.1fs (cached)", pid, elapsed)

@@ -1,8 +1,10 @@
 """Tests for official tutorial extraction."""
 
 import asyncio
+import json
 import os
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -15,6 +17,7 @@ from kouhai_bot.tutorials import (
     get_editorial_zh_for_group,
     get_official_editorial,
     has_cached_editorial_zh,
+    ensure_tutorial_json,
     is_no_official_editorial,
     mark_no_official_editorial,
     prefetch_editorial_zh,
@@ -253,6 +256,100 @@ def test_prefetch_editorial_zh_marks_missing(tmp_path, monkeypatch):
     assert is_no_official_editorial("999Z")
 
 
+def test_prefetch_editorial_zh_no_agent_leaves_missing_unknown(tmp_path, monkeypatch):
+    from kouhai_bot.config import BotConfig
+
+    cfg = BotConfig(data_dir=str(tmp_path))
+    monkeypatch.setattr("kouhai_bot.tutorials.get_config", lambda: cfg)
+
+    async def _run():
+        with patch(
+            "kouhai_bot.tutorials.ensure_tutorial_json",
+            AsyncMock(side_effect=AssertionError("agent should not run")),
+        ), patch(
+            "kouhai_bot.tutorials.translate_editorial_to_zh",
+            AsyncMock(side_effect=AssertionError("translate should not run")),
+        ):
+            await prefetch_editorial_zh("999Z", run_agent=False)
+
+    asyncio.run(_run())
+    assert not is_no_official_editorial("999Z")
+    assert not (tmp_path / "tutorial_translations" / "999Z.no_editorial").exists()
+
+
+def test_tutorial_agent_importable_from_runtime():
+    from kouhai_bot.tutorials import _load_tutorial_agent
+
+    AgentNoMatch, ScrapeError, run_agent_for_pid = _load_tutorial_agent()
+    assert issubclass(AgentNoMatch, Exception)
+    assert issubclass(ScrapeError, Exception)
+    assert run_agent_for_pid.__name__ == "run_agent_for_pid"
+
+
+def test_prefetch_editorial_zh_runs_agent_before_translate(tmp_path, monkeypatch):
+    from kouhai_bot.config import BotConfig
+
+    cfg = BotConfig(data_dir=str(tmp_path))
+    monkeypatch.setattr("kouhai_bot.tutorials.get_config", lambda: cfg)
+    statements_dir = tmp_path / "statements"
+    statements_dir.mkdir()
+    (statements_dir / "542D.json").write_text(
+        json.dumps({"name": "P", "description": "D", "input": "I", "output": "O"}),
+        encoding="utf-8",
+    )
+    mark_no_official_editorial("542D")
+
+    class FakeAgentNoMatch(Exception):
+        pass
+
+    class FakeScrapeError(Exception):
+        pass
+
+    async def _fake_run_agent_for_pid(*, pid, statements_dir):
+        assert pid == "542D"
+        assert (statements_dir / "542D.json").is_file()
+        body = _long_text("agent editorial ")
+        return SimpleNamespace(
+            bundle={
+                "tutorial_url": "https://codeforces.com/blog/entry/1",
+                "tutorial_title": "Editorial",
+                "sections": [
+                    {"hint": "", "solution": body, "raw_text": body, "code_blocks": []}
+                ],
+            },
+            selected_candidate_id="c1",
+            confidence=0.91,
+            elapsed_sec=1.2,
+        )
+
+    async def _run():
+        with patch(
+            "kouhai_bot.tutorials._load_tutorial_agent",
+            return_value=(FakeAgentNoMatch, FakeScrapeError, _fake_run_agent_for_pid),
+        ), patch(
+            "kouhai_bot.tutorials.translate_editorial_to_zh",
+            AsyncMock(return_value=("自动抓取后的译文。" * 12, "", True)),
+        ):
+            await prefetch_editorial_zh("542D")
+
+    asyncio.run(_run())
+    assert not is_no_official_editorial("542D")
+    assert get_official_editorial("542D") is not None
+    assert has_cached_editorial_zh("542D")
+
+
+def test_ensure_tutorial_json_returns_false_without_statement(tmp_path, monkeypatch):
+    from kouhai_bot.config import BotConfig
+
+    cfg = BotConfig(data_dir=str(tmp_path))
+    monkeypatch.setattr("kouhai_bot.tutorials.get_config", lambda: cfg)
+
+    async def _run():
+        assert await ensure_tutorial_json("999Z") is False
+
+    asyncio.run(_run())
+
+
 def test_prefetch_editorial_zh_caches_translation(tmp_path, monkeypatch):
     from kouhai_bot.config import BotConfig
 
@@ -261,7 +358,6 @@ def test_prefetch_editorial_zh_caches_translation(tmp_path, monkeypatch):
     tutorials_dir = tmp_path / "tutorials"
     tutorials_dir.mkdir()
     body = _long_text("prefetch-")
-    import json
     (tutorials_dir / "542D.json").write_text(
         json.dumps({
             "tutorial_url": "https://example.com/e",

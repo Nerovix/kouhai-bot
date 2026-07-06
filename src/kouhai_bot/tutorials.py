@@ -6,15 +6,21 @@ Extraction rules align with tools/scrape_cf_tutorial.py normalization (hint/solu
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import sys
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 from .config import get_config
 from .handlers.shared import translate_editorial_to_zh
 
 MIN_EDITORIAL_LEN = 80
 _REVIEW_EDITORIAL_MAX_LEN = 12000
+
+logger = logging.getLogger("kouhai-bot.tutorials")
 
 _PLACEHOLDER_RE = re.compile(
     r"Tutorial is loading|Will be added soon",
@@ -144,6 +150,88 @@ def load_tutorial(pid: str) -> dict | None:
         return None
 
 
+def _tools_dir() -> Path:
+    return Path(__file__).resolve().parents[2] / "tools"
+
+
+def _load_tutorial_agent() -> tuple[type[Exception], type[Exception], Any]:
+    tools_dir = _tools_dir()
+    if tools_dir.is_dir():
+        tools_dir_str = str(tools_dir)
+        if tools_dir_str not in sys.path:
+            sys.path.insert(0, tools_dir_str)
+
+    from cf_tutorial_agent import AgentNoMatch, run_agent_for_pid
+    from scrape_cf_tutorial import ScrapeError
+
+    return AgentNoMatch, ScrapeError, run_agent_for_pid
+
+
+def _write_tutorial_bundle(pid: str, bundle: dict) -> None:
+    tutorials_dir = Path(get_config().data_dir) / "tutorials"
+    tutorials_dir.mkdir(parents=True, exist_ok=True)
+    out_path = tutorials_dir / f"{pid}.json"
+    tmp_path = out_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, out_path)
+
+
+async def ensure_tutorial_json(pid: str) -> bool:
+    """Run the CF tutorial agent if no usable tutorial JSON is cached."""
+    pid = (pid or "").strip()
+    if not pid:
+        return False
+    if get_official_editorial(pid) is not None:
+        clear_no_official_editorial_marker(pid)
+        return True
+
+    cfg = get_config()
+    statements_dir = Path(cfg.data_dir) / "statements"
+    statement_path = statements_dir / f"{pid}.json"
+    if not statement_path.is_file():
+        logger.info("tutorial agent skipped for %s: statement cache missing", pid)
+        return False
+
+    try:
+        AgentNoMatch, ScrapeError, run_agent_for_pid = _load_tutorial_agent()
+    except Exception as e:
+        logger.warning("tutorial agent unavailable for %s: %s", pid, e, exc_info=True)
+        return False
+
+    try:
+        result = await run_agent_for_pid(pid=pid, statements_dir=statements_dir)
+    except AgentNoMatch as e:
+        logger.info("tutorial agent found no official editorial for %s: %s", pid, e)
+        return False
+    except ScrapeError as e:
+        logger.warning("tutorial agent scrape failed for %s: %s", pid, e)
+        return False
+    except Exception as e:
+        logger.warning("tutorial agent failed for %s: %s", pid, e, exc_info=True)
+        return False
+
+    try:
+        _write_tutorial_bundle(pid, result.bundle)
+    except OSError as e:
+        logger.warning("failed to write tutorial JSON for %s: %s", pid, e, exc_info=True)
+        return False
+
+    if get_official_editorial(pid) is None:
+        logger.warning("tutorial agent wrote unusable tutorial JSON for %s", pid)
+        return False
+
+    clear_no_official_editorial_marker(pid)
+    logger.info(
+        "tutorial agent cached official editorial for %s "
+        "candidate=%s confidence=%.2f elapsed=%.1fs",
+        pid,
+        result.selected_candidate_id,
+        result.confidence,
+        result.elapsed_sec,
+    )
+    return True
+
+
 def get_official_editorial(pid: str) -> OfficialEditorial | None:
     bundle = load_tutorial(pid)
     if not bundle:
@@ -234,15 +322,24 @@ def load_cached_editorial_zh(pid: str) -> str:
     return _load_cached_translation(pid)
 
 
-async def prefetch_editorial_zh(pid: str) -> None:
+async def prefetch_editorial_zh(pid: str, *, run_agent: bool = True) -> None:
     """Translate editorial ahead of first AC; does not send to the group."""
     if not pid or has_cached_editorial_zh(pid):
         return
-    if is_no_official_editorial(pid):
-        if get_official_editorial(pid) is None:
+    editorial = get_official_editorial(pid)
+    if is_no_official_editorial(pid) and not run_agent:
+        if editorial is None:
             return
         clear_no_official_editorial_marker(pid)
-    editorial = get_official_editorial(pid)
+    if not run_agent and editorial is None:
+        return
+    if run_agent and editorial is None:
+        await ensure_tutorial_json(pid)
+        editorial = get_official_editorial(pid)
+    if is_no_official_editorial(pid):
+        if editorial is None:
+            return
+        clear_no_official_editorial_marker(pid)
     if not editorial:
         mark_no_official_editorial(pid)
         return

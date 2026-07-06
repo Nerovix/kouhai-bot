@@ -28,6 +28,14 @@ llm:
 
   # Fallback provider list — order matters!
   providers:
+    # ── Optional primary: ZenMux/Fable (OpenAI-compatible) ──
+    # - name: fable
+    #   api_key: "..."
+    #   base_url: "https://zenmux.ai/api/v1"
+    #   model: "anthropic/claude-fable-5-free"
+    #   reasoning_effort: "max"
+    #   model_tag: "『Fable』"
+
     # ── Primary: OpenAI-compatible ──
     - name: openai
       api_key: "..."

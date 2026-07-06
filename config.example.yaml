@@ -32,7 +32,8 @@ llm:
     # - name: fable
     #   api_key: "..."
     #   base_url: "https://zenmux.ai/api/v1"
-    #   model: "anthropic/claude-fable-5-free"
+    #   smart_model: "anthropic/claude-fable-5-free"
+    #   general_model: "anthropic/claude-fable-5-free"
     #   reasoning_effort: "max"
     #   model_tag: "『Fable』"
 

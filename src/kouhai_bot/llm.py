@@ -95,6 +95,17 @@ def _provider_is_dashscope(provider_name: str, base_url: str) -> bool:
     )
 
 
+def _provider_is_fable(provider_name: str, base_url: str) -> bool:
+    name = (provider_name or "").strip().lower()
+    parsed = urlparse((base_url or "").strip())
+    host = (parsed.hostname or "").lower()
+    return name == "fable" or host == "zenmux.ai"
+
+
+def _provider_accepts_generic_thinking(provider_name: str, base_url: str) -> bool:
+    return not _provider_is_fable(provider_name, base_url)
+
+
 def _should_retry_status(status: int) -> bool:
     return status in {408, 409, 429} or status >= 500
 
@@ -459,13 +470,15 @@ async def chat_completion(
             }
             if response_format:
                 payload["response_format"] = response_format
-            if thinking:
+            if thinking and _provider_accepts_generic_thinking(provider.name, provider.base_url):
                 payload["thinking"] = thinking
                 if _provider_is_dashscope(provider.name, provider.base_url):
                     payload["enable_thinking"] = True
             reasoning_effort = provider.reasoning_effort.strip().lower()
             if reasoning_effort and send_reasoning_effort:
                 payload["reasoning_effort"] = reasoning_effort
+                if _provider_is_fable(provider.name, provider.base_url):
+                    payload["temperature"] = 1
             if _provider_uses_stream(
                 provider.name,
                 provider.base_url,

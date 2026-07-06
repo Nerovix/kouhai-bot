@@ -307,6 +307,45 @@ def test_dashscope_provider_payload_enables_stream():
     assert calls[0]["enable_thinking"] is True
 
 
+def test_zenmux_fable_payload_uses_reasoning_effort_without_generic_thinking():
+    provider = LlmProviderConfig(
+        name="fable",
+        api_key="sk-test",
+        base_url="https://zenmux.ai/api/v1",
+        model="anthropic/claude-fable-5-free",
+        reasoning_effort="max",
+    )
+    cfg = _openai_cfg(llm_providers=[provider])
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["payload"].copy())
+        return _ChatCompletionAttempt(
+            text="{\"ok\":true}",
+            retryable=False,
+            retry_after_sec=None,
+        )
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion_result(
+            [{"role": "user", "content": "Reply with JSON."}],
+            task="judge",
+            response_format={"type": "json_object"},
+            thinking={"type": "enabled"},
+        ))
+
+    assert result.text == "{\"ok\":true}"
+    assert calls[0]["model"] == "anthropic/claude-fable-5-free"
+    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[0]["reasoning_effort"] == "max"
+    assert calls[0]["temperature"] == 1
+    assert "thinking" not in calls[0]
+    assert "enable_thinking" not in calls[0]
+    assert "stream" not in calls[0]
+
+
 def test_non_dashscope_provider_payload_does_not_enable_stream():
     cfg = _openai_cfg()
     calls = []

@@ -32,7 +32,8 @@ llm:
     # - name: fable
     #   api_key: "..."
     #   base_url: "https://zenmux.ai/api/v1"
-    #   model: "anthropic/claude-fable-5-free"
+    #   smart_model: "anthropic/claude-fable-5-free"
+    #   general_model: "anthropic/claude-fable-5-free"
     #   reasoning_effort: "max"
     #   model_tag: "『Fable』"
 
@@ -40,7 +41,8 @@ llm:
     - name: openai
       api_key: "..."
       base_url: "..."
-      model: "gpt-5.5"
+      smart_model: "gpt-5.5"      # judge/review
+      general_model: "gpt-5.5-mini" # clarify/summary/editorial and other tasks
       stream: true               # use SSE streaming; recommended for sub2api/OpenAI
       reasoning_effort: "high"  # minimal/low/medium/high/xhigh
       model_tag: "『֎AI』"        # appended to LLM output; empty to disable
@@ -49,14 +51,16 @@ llm:
     - name: qwen
       api_key: "..."
       base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      model: "qwen3.7-max"
+      smart_model: "qwen3.7-max"
+      general_model: "qwen3.7-plus"
       model_tag: "『Qwen』"
 
     # ── Fallback: DeepSeek (supports OpenAI-compatible format) ──
     - name: deepseek
       api_key: "..."
       base_url: "https://api.deepseek.com"
-      model: "deepseek-v4-pro"
+      smart_model: "deepseek-v4-pro"
+      general_model: "deepseek-v4-chat"
       model_tag: "『🐳』"
 
 # ── Qwen-VL (formula image recognition) ──

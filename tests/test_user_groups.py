@@ -27,7 +27,13 @@ def _make_yaml(**overrides) -> str:
         "current_group": 123,
         "llm": {
             "providers": [
-                {"name": "t", "api_key": "k", "base_url": "http://x/v1", "model": "m"}
+                {
+                    "name": "t",
+                    "api_key": "k",
+                    "base_url": "http://x/v1",
+                    "smart_model": "smart",
+                    "general_model": "general",
+                }
             ]
         },
         "qwen": {"api_key": "k", "model": "qwen-vl-max"},

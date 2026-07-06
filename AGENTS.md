@@ -46,14 +46,14 @@ NapCat (QQ) ──WS──> worker.py
   OpenAI-compatible `/chat/completions` format. DashScope/阿里云百炼 providers
   are called with HTTP+SSE streaming to avoid the 10-minute synchronous HTTP
   limit; providers with `stream: true` do the same; other providers use the
-  normal JSON response path. Per-task model
-  overrides (`judge_model`, `clarify_model`, etc.) are defined per provider.
+  normal JSON response path. Each provider defines `smart_model` for judge/review
+  and `general_model` for clarify/summary/editorial and other tasks.
   `thinking` and `reasoning_effort` are sent unconditionally; unsupported
   fields are silently ignored by upstream APIs.
 - **Official CF tutorials**: Scraped editorials live under `{data_dir}/tutorials/{pid}.json`
   (see `tools/cf_tutorial_agent.py`; low-level CF HTML helpers live in `tools/scrape_cf_tutorial.py`). Runtime extraction is in `tutorials.py`. On the
   On **new problem** (`do_daily_post` / `/newproblem`), `schedule_prefetch_editorial(pid)`
-  starts background translation (using `summary_model`) into `tutorial_translations/` so first AC
+  starts background translation (using `general_model`) into `tutorial_translations/` so first AC
   can deliver without waiting. On **first AC**, congrats is sent in `_finalize_submit`, then
   `schedule_post_solve_editorial_followup()` only **delivers** (awaits in-flight prefetch if
   needed). Neither path uses the state scheduler. Tutorial scraping depends on Playwright
@@ -104,11 +104,8 @@ Each provider in `llm.providers`:
 | `name` | — | Provider identifier for logging (**required**) |
 | `api_key` | — | API key (**required**) |
 | `base_url` | `https://api.openai.com/v1` | Base URL for chat completions |
-| `model` | — | Default model (**required**) |
-| `judge_model` | `model` | Per-task override for `/submit` |
-| `clarify_model` | `model` | Per-task override for `/clarify` |
-| `review_model` | `model` | Per-task override for `/review` |
-| `summary_model` | `model` | Per-task override for `/summary` + editorial translation |
+| `smart_model` | — | Model for `/submit` judge and `/review` (**required**) |
+| `general_model` | — | Model for `/clarify`, summaries, editorial translation, sample-note translation, and other LLM tasks (**required**) |
 | `reasoning_effort` | — | OpenAI reasoning effort: `minimal`/`low`/`medium`/`high`/`xhigh` |
 | `stream` | `false` | Send `stream=true` and read SSE chunks for this provider; DashScope/阿里云百炼 streams automatically |
 | `model_tag` | `""` | Short string appended to every LLM-generated user message (judge/clarify/review/summary/editorial); empty means no tag |
@@ -271,10 +268,12 @@ Common fallback pattern: OpenAI (better quality, less stable) → DeepSeek (stab
 llm:
   providers:
     - name: openai
-      model: "gpt-5.5"
+      smart_model: "gpt-5.5"
+      general_model: "gpt-5.5-mini"
       reasoning_effort: "high"
     - name: deepseek
-      model: "deepseek-v4-pro"
+      smart_model: "deepseek-v4-pro"
+      general_model: "deepseek-v4-chat"
 ```
 
 All providers receive the same base request payload. Non-applicable fields (e.g.
@@ -344,15 +343,15 @@ No repository-local runtime queue is used.
 
 | Command | File | Handler | Lock | Model | Notes |
 |---------|------|---------|------|-------|-------|
-| `/submit` (`/sbm`) | submit.py | `handle` | ✅ state scheduler | per-provider `judge_model` | Judge solution, save history, serialize only first-blood/scoreboard; configured dynamic-wait group submits redirect to private judge; private AC does not score until synced |
-| `/clarify` (`/clrf`) | clarify.py | `handle` | ✅ state scheduler | per-provider `clarify_model` | Clarify problem details (JSON output, anti-spoiler, no original problem identity), using admission-time pid; private uses pid-specific summary |
+| `/submit` (`/sbm`) | submit.py | `handle` | ✅ state scheduler | per-provider `smart_model` | Judge solution, save history, serialize only first-blood/scoreboard; configured dynamic-wait group submits redirect to private judge; private AC does not score until synced |
+| `/clarify` (`/clrf`) | clarify.py | `handle` | ✅ state scheduler | per-provider `general_model` | Clarify problem details (JSON output, anti-spoiler, no original problem identity), using admission-time pid; private uses pid-specific summary |
 | `/clear` | clear.py | `handle` | ✅ state scheduler | — | Clear the current user's stored submit/clarify/review history for the admission-time current problem or current private problem |
-| `/newproblem` (`/np`) | newproblem.py | `handle` | ✅ post lock | per-provider `summary_model` | Force new problem when solved (or none); unsolved needs exact `/newproblem --force`; samples are forwarded as separate nodes; if statement has `notes`, translate+symbol-normalize and append as a dedicated notes node; commits state only after card delivery succeeds and keeps `daily_msg.json` in sync even on direct-text fallback |
+| `/newproblem` (`/np`) | newproblem.py | `handle` | ✅ post lock | per-provider `general_model` | Force new problem when solved (or none); unsolved needs exact `/newproblem --force`; samples are forwarded as separate nodes; if statement has `notes`, translate+symbol-normalize and append as a dedicated notes node; commits state only after card delivery succeeds and keeps `daily_msg.json` in sync even on direct-text fallback |
 | `/problem` (`/pb`) | stubs.py | `handle_problem` | ❌ | — | Resend current group/private problem via forward card; group path only uses `daily_msg.json` when pid matches `state.json.today`; if solved, add a friendly `/newproblem` hint |
 | `/tag` | stubs.py | `handle_tag` | ❌ | — | Show current group/private problem CF tags |
 | `/scoreboard` | stubs.py | `handle_scoreboard` | ❌ | — | Cumulative weighted leaderboard; shows the formula at the top, then refreshes latest group nicknames at display time |
 | `/help` | help.py | `handle` | ❌ | — | Auto-generated help (forward card) |
-| `/review` (`/rv`) | review.py | `handle` | ✅ state scheduler | per-provider `review_model` | Discuss the latest solved group/private problem by default; quoted group problem cards can target older problems |
+| `/review` (`/rv`) | review.py | `handle` | ✅ state scheduler | per-provider `smart_model` | Discuss the latest solved group/private problem by default; quoted group problem cards can target older problems |
 | `/status` | stubs.py | `handle_status` | ❌ | — | Check whether this group or private judge has active stateful work |
 | `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, `random`, or a quoted problem card |
 | `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite |
@@ -593,7 +592,7 @@ scheduler lock, but final reply is not ordered behind unrelated same-group reque
   inputs. Ignore @all, the bot itself, the requester, and duplicate mentions. Do not
   persist anything to mentioned users' histories; only the requester receives the
   saved review record.
-- Uses per-provider `review_model` (free text, no JSON format). Timeout from
+- Uses per-provider `smart_model` (free text, no JSON format). Timeout from
   `llm.review_timeout_sec`. `thinking: enabled` and `reasoning_effort` are sent
   unconditionally; unsupported fields are silently ignored.
 - Long replies (>400 chars) → merged-forward card; short replies → @mention inline
@@ -690,7 +689,7 @@ lock and wraps the same locked implementation:
 1. Reveal yesterday's problem via `picker.py reveal`
 2. Pick a candidate problem via `picker.py pick-json --with-statement`; this marks used
    problems and caches statements but does **not** write `state.json`
-3. Generate Chinese summary via `summarize_problem()` → per-provider `summary_model`,
+3. Generate Chinese summary via `summarize_problem()` → per-provider `general_model`,
    timeout from `llm.summary_timeout_sec`
 4. Self-send summary text; self-send each sample as an independent node; if statement has
    `notes`, translate it to Chinese and append a dedicated `样例解释` node (with LaTeX/Markdown

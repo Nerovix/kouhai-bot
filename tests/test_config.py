@@ -21,7 +21,8 @@ def _make_yaml(**overrides) -> str:
                     "name": "test",
                     "api_key": "sk-test",
                     "base_url": "http://localhost:8080/v1",
-                    "model": "test-model",
+                    "smart_model": "test-smart-model",
+                    "general_model": "test-general-model",
                 }
             ]
         },
@@ -79,17 +80,42 @@ def test_config_requires_provider_name(monkeypatch, tmp_path):
         _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
 
 
-def test_config_requires_provider_model(monkeypatch, tmp_path):
+def test_config_requires_provider_smart_model(monkeypatch, tmp_path):
     data = yaml.safe_load(_make_yaml())
-    data["llm"]["providers"][0]["model"] = ""
-    with pytest.raises(RuntimeError, match="model"):
+    data["llm"]["providers"][0]["smart_model"] = ""
+    with pytest.raises(RuntimeError, match="smart_model"):
+        _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+
+
+def test_config_requires_provider_general_model(monkeypatch, tmp_path):
+    data = yaml.safe_load(_make_yaml())
+    data["llm"]["providers"][0]["general_model"] = ""
+    with pytest.raises(RuntimeError, match="general_model"):
+        _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+
+
+def test_legacy_provider_model_does_not_satisfy_required_models(monkeypatch, tmp_path):
+    data = yaml.safe_load(_make_yaml())
+    provider = data["llm"]["providers"][0]
+    provider["model"] = "legacy-model"
+    del provider["smart_model"]
+    del provider["general_model"]
+    with pytest.raises(RuntimeError, match="smart_model"):
         _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
 
 
 def test_llm_timeouts_load_from_yaml(monkeypatch, tmp_path):
     yaml_str = _make_yaml(
         llm={
-            "providers": [{"name": "t", "api_key": "k", "base_url": "http://x/v1", "model": "m"}],
+            "providers": [
+                {
+                    "name": "t",
+                    "api_key": "k",
+                    "base_url": "http://x/v1",
+                    "smart_model": "smart",
+                    "general_model": "general",
+                }
+            ],
             "judge_timeout_sec": 1500,
             "clarify_timeout_sec": 700,
             "review_timeout_sec": 800,

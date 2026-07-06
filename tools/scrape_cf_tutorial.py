@@ -40,6 +40,14 @@ except ImportError:
     PlaywrightTimeoutError = TimeoutError
 
 CF_ROOT = "https://codeforces.com"
+CF_PLAYWRIGHT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+CF_PLAYWRIGHT_VIEWPORT = {"width": 1365, "height": 768}
+CF_CONTENT_SELECTOR = ".problem-statement, .ttypography"
+CF_CONTENT_WAIT_MS = 45000
 
 
 class ScrapeError(RuntimeError):
@@ -94,7 +102,13 @@ def get_curl_session():
 
 
 def _is_cf_challenge_page(text: str) -> bool:
-    return bool(re.search(r"browser is being checked|Please wait\.", text, re.I))
+    return bool(
+        re.search(r"browser is being checked|Please wait\.|Just a moment", text, re.I)
+    )
+
+
+def _is_cf_challenge_title(title: str) -> bool:
+    return title.strip().lower().startswith("just a moment")
 
 
 def fetch_html_http(url: str) -> str:
@@ -147,13 +161,29 @@ def fetch_html_playwright(url: str, wait_ms: int = 7000) -> str:
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context()
-            page = context.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            if wait_ms > 0:
-                page.wait_for_timeout(wait_ms)
-            text = page.content()
-            browser.close()
+            try:
+                context = browser.new_context(
+                    user_agent=CF_PLAYWRIGHT_USER_AGENT,
+                    viewport=CF_PLAYWRIGHT_VIEWPORT,
+                )
+                page = context.new_page()
+                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                if wait_ms > 0:
+                    page.wait_for_timeout(wait_ms)
+                try:
+                    page.wait_for_selector(
+                        CF_CONTENT_SELECTOR,
+                        timeout=CF_CONTENT_WAIT_MS,
+                    )
+                except PlaywrightTimeoutError:
+                    if _is_cf_challenge_title(page.title()):
+                        raise ScrapeError(
+                            f"Playwright 抓取后仍命中反爬挑战页: {url}",
+                            9,
+                        )
+                text = page.content()
+            finally:
+                browser.close()
         if _is_cf_challenge_page(text):
             raise ScrapeError(f"Playwright 抓取后仍命中反爬挑战页: {url}", 9)
         return text

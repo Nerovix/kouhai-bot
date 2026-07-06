@@ -16,15 +16,22 @@ def _make_yaml(**overrides) -> str:
         "bot_qq": 1234567890,
         "current_group": 999999,
         "llm": {
-            "providers": [
+            "smart_model": [
                 {
-                    "name": "test",
+                    "name": "smart-test",
                     "api_key": "sk-test",
                     "base_url": "http://localhost:8080/v1",
-                    "smart_model": "test-smart-model",
-                    "general_model": "test-general-model",
+                    "model": "test-smart-model",
                 }
-            ]
+            ],
+            "general_model": [
+                {
+                    "name": "general-test",
+                    "api_key": "sk-test",
+                    "base_url": "http://localhost:8080/v1",
+                    "model": "test-general-model",
+                }
+            ],
         },
         "qwen": {
             "api_key": "sk-qwen",
@@ -59,10 +66,17 @@ def test_config_requires_bot_qq(monkeypatch, tmp_path):
         _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
 
 
-def test_config_requires_providers(monkeypatch, tmp_path):
+def test_config_requires_smart_model_queue(monkeypatch, tmp_path):
     data = yaml.safe_load(_make_yaml())
-    data["llm"]["providers"] = []
-    with pytest.raises(RuntimeError, match="providers"):
+    data["llm"]["smart_model"] = []
+    with pytest.raises(RuntimeError, match="smart_model"):
+        _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+
+
+def test_config_requires_general_model_queue(monkeypatch, tmp_path):
+    data = yaml.safe_load(_make_yaml())
+    data["llm"]["general_model"] = []
+    with pytest.raises(RuntimeError, match="general_model"):
         _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
 
 
@@ -75,31 +89,25 @@ def test_config_requires_qwen_model(monkeypatch, tmp_path):
 
 def test_config_requires_provider_name(monkeypatch, tmp_path):
     data = yaml.safe_load(_make_yaml())
-    data["llm"]["providers"][0]["name"] = ""
+    data["llm"]["smart_model"][0]["name"] = ""
     with pytest.raises(RuntimeError, match="name"):
         _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
 
 
-def test_config_requires_provider_smart_model(monkeypatch, tmp_path):
+def test_config_requires_provider_model(monkeypatch, tmp_path):
     data = yaml.safe_load(_make_yaml())
-    data["llm"]["providers"][0]["smart_model"] = ""
-    with pytest.raises(RuntimeError, match="smart_model"):
+    data["llm"]["general_model"][0]["model"] = ""
+    with pytest.raises(RuntimeError, match="model"):
         _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
 
 
-def test_config_requires_provider_general_model(monkeypatch, tmp_path):
+def test_legacy_single_provider_queue_does_not_satisfy_required_queues(monkeypatch, tmp_path):
     data = yaml.safe_load(_make_yaml())
-    data["llm"]["providers"][0]["general_model"] = ""
-    with pytest.raises(RuntimeError, match="general_model"):
-        _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
-
-
-def test_legacy_provider_model_does_not_satisfy_required_models(monkeypatch, tmp_path):
-    data = yaml.safe_load(_make_yaml())
-    provider = data["llm"]["providers"][0]
-    provider["model"] = "legacy-model"
-    del provider["smart_model"]
-    del provider["general_model"]
+    data["llm"] = {
+        "providers": [
+            {"name": "legacy", "api_key": "k", "base_url": "http://x/v1", "model": "m"}
+        ]
+    }
     with pytest.raises(RuntimeError, match="smart_model"):
         _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
 
@@ -107,14 +115,11 @@ def test_legacy_provider_model_does_not_satisfy_required_models(monkeypatch, tmp
 def test_llm_timeouts_load_from_yaml(monkeypatch, tmp_path):
     yaml_str = _make_yaml(
         llm={
-            "providers": [
-                {
-                    "name": "t",
-                    "api_key": "k",
-                    "base_url": "http://x/v1",
-                    "smart_model": "smart",
-                    "general_model": "general",
-                }
+            "smart_model": [
+                {"name": "smart", "api_key": "k", "base_url": "http://x/v1", "model": "smart"}
+            ],
+            "general_model": [
+                {"name": "general", "api_key": "k", "base_url": "http://x/v1", "model": "general"}
             ],
             "judge_timeout_sec": 1500,
             "clarify_timeout_sec": 700,
@@ -131,10 +136,10 @@ def test_llm_timeouts_load_from_yaml(monkeypatch, tmp_path):
 
 def test_provider_stream_loads_from_yaml(monkeypatch, tmp_path):
     data = yaml.safe_load(_make_yaml())
-    data["llm"]["providers"][0]["stream"] = True
+    data["llm"]["smart_model"][0]["stream"] = True
     cfg = _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
 
-    assert cfg.llm_providers[0].stream is True
+    assert cfg.llm_smart_providers[0].stream is True
 
 
 def test_current_group_loaded(monkeypatch, tmp_path):
@@ -147,15 +152,15 @@ def test_submit_ac_backdoor_loaded(monkeypatch, tmp_path):
     assert cfg.submit_ac_backdoor == "open-sesame"
 
 
-def test_providers_not_list_raises(monkeypatch, tmp_path):
+def test_provider_queue_not_list_raises(monkeypatch, tmp_path):
     data = yaml.safe_load(_make_yaml())
-    data["llm"]["providers"] = "not-a-list"
+    data["llm"]["smart_model"] = "not-a-list"
     with pytest.raises(RuntimeError, match="must be a list"):
         _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
 
 
 def test_provider_entry_not_dict_raises(monkeypatch, tmp_path):
     data = yaml.safe_load(_make_yaml())
-    data["llm"]["providers"] = ["not-a-dict"]
+    data["llm"]["general_model"] = ["not-a-dict"]
     with pytest.raises(RuntimeError, match="must be a mapping"):
         _from_yaml(yaml.dump(data), monkeypatch, tmp_path)

@@ -395,8 +395,8 @@ def _config_dict():
         "llm_openai_base_url": "https://api.openai.com/v1",
         "llm_openai_model": "gpt-5",
         "llm_reasoning_effort": "",
-        "smart_model": "deepseek-v4-pro",
-        "general_model": "deepseek-v4-flash",
+        "smart_queue_model": "deepseek-v4-pro",
+        "general_queue_model": "deepseek-v4-flash",
         "judge_timeout_sec": 1200,
         "clarify_timeout_sec": 600,
         "review_timeout_sec": 600,
@@ -439,8 +439,8 @@ class _LazyConfig:
             return explicit_model
         task_name = (task or "").strip().lower()
         if task_name in {"judge", "review"}:
-            return self._config.get("smart_model") or "deepseek-v4-pro"
-        return self._config.get("general_model") or "deepseek-v4-flash"
+            return self._config.get("smart_queue_model") or "deepseek-v4-pro"
+        return self._config.get("general_queue_model") or "deepseek-v4-flash"
 
     def __getattr__(self, name):
         if name == "data_dir":

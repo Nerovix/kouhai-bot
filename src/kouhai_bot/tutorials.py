@@ -326,17 +326,20 @@ async def prefetch_editorial_zh(pid: str, *, run_agent: bool = True) -> None:
     """Translate editorial ahead of first AC; does not send to the group."""
     if not pid or has_cached_editorial_zh(pid):
         return
-    if is_no_official_editorial(pid) and not run_agent:
-        if get_official_editorial(pid) is None:
-            return
-        clear_no_official_editorial_marker(pid)
-    if run_agent and get_official_editorial(pid) is None:
-        await ensure_tutorial_json(pid)
-    if is_no_official_editorial(pid):
-        if get_official_editorial(pid) is None:
-            return
-        clear_no_official_editorial_marker(pid)
     editorial = get_official_editorial(pid)
+    if is_no_official_editorial(pid) and not run_agent:
+        if editorial is None:
+            return
+        clear_no_official_editorial_marker(pid)
+    if not run_agent and editorial is None:
+        return
+    if run_agent and editorial is None:
+        await ensure_tutorial_json(pid)
+        editorial = get_official_editorial(pid)
+    if is_no_official_editorial(pid):
+        if editorial is None:
+            return
+        clear_no_official_editorial_marker(pid)
     if not editorial:
         mark_no_official_editorial(pid)
         return

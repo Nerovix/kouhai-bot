@@ -256,6 +256,27 @@ def test_prefetch_editorial_zh_marks_missing(tmp_path, monkeypatch):
     assert is_no_official_editorial("999Z")
 
 
+def test_prefetch_editorial_zh_no_agent_leaves_missing_unknown(tmp_path, monkeypatch):
+    from kouhai_bot.config import BotConfig
+
+    cfg = BotConfig(data_dir=str(tmp_path))
+    monkeypatch.setattr("kouhai_bot.tutorials.get_config", lambda: cfg)
+
+    async def _run():
+        with patch(
+            "kouhai_bot.tutorials.ensure_tutorial_json",
+            AsyncMock(side_effect=AssertionError("agent should not run")),
+        ), patch(
+            "kouhai_bot.tutorials.translate_editorial_to_zh",
+            AsyncMock(side_effect=AssertionError("translate should not run")),
+        ):
+            await prefetch_editorial_zh("999Z", run_agent=False)
+
+    asyncio.run(_run())
+    assert not is_no_official_editorial("999Z")
+    assert not (tmp_path / "tutorial_translations" / "999Z.no_editorial").exists()
+
+
 def test_tutorial_agent_importable_from_runtime():
     from kouhai_bot.tutorials import _load_tutorial_agent
 

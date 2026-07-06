@@ -298,10 +298,13 @@ def test_dashscope_provider_payload_enables_stream():
         result = asyncio.run(call_chat_completion(
             [{"role": "user", "content": "Reply with exactly OK."}],
             task="judge",
+            thinking={"type": "enabled"},
         ))
 
     assert result == "OK"
     assert calls[0]["stream"] is True
+    assert calls[0]["thinking"] == {"type": "enabled"}
+    assert calls[0]["enable_thinking"] is True
 
 
 def test_non_dashscope_provider_payload_does_not_enable_stream():
@@ -351,7 +354,8 @@ def test_explicit_stream_provider_payload_enables_stream():
     assert calls[0]["stream"] is True
 
 
-def test_streaming_chat_completion_reads_sse_delta_chunks():
+def test_streaming_chat_completion_reads_sse_delta_chunks(caplog):
+    caplog.set_level("INFO", logger="kouhai-bot.llm")
     response = _DummyResponse(lines=[
         ': keep-alive\n',
         'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n',
@@ -377,6 +381,7 @@ def test_streaming_chat_completion_reads_sse_delta_chunks():
     assert result.text == "Hello world"
     assert result.retryable is False
     assert session.calls[0][1]["json"] == {"stream": True}
+    assert "reasoning_content chars=8" in caplog.text
 
 
 def test_streaming_chat_completion_ignores_metadata_events():

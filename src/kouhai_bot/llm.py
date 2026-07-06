@@ -72,15 +72,27 @@ def _provider_uses_stream(
     if explicit_stream:
         return True
 
+    return _provider_is_dashscope(provider_name, base_url)
+
+
+def _provider_is_dashscope(provider_name: str, base_url: str) -> bool:
     name = (provider_name or "").strip().lower()
-    if name in {"aliyun", "bailian", "dashscope"}:
+    if name in {"aliyun", "bailian", "dashscope"} or "dashscope" in name:
         return True
 
     parsed = urlparse((base_url or "").strip())
     host = (parsed.hostname or "").lower()
     if not host and "://" not in (base_url or ""):
         host = (base_url or "").split("/", 1)[0].lower()
-    return host == "dashscope.aliyuncs.com" or host.endswith(".dashscope.aliyuncs.com")
+    return (
+        host in {
+            "dashscope.aliyuncs.com",
+            "dashscope-intl.aliyuncs.com",
+            "dashscope-us.aliyuncs.com",
+        }
+        or host.endswith(".dashscope.aliyuncs.com")
+        or host.endswith(".maas.aliyuncs.com")
+    )
 
 
 def _should_retry_status(status: int) -> bool:
@@ -137,6 +149,38 @@ def _choice_delta_text(choice: dict) -> str:
     message = choice.get("message", {})
     if isinstance(message, dict):
         return _stream_content_text(message)
+    return ""
+
+
+def _choice_reasoning_text(choice: dict) -> str:
+    for key in ("delta", "message"):
+        value = choice.get(key, {})
+        if not isinstance(value, dict):
+            continue
+        reasoning_content = value.get("reasoning_content", "")
+        if isinstance(reasoning_content, str):
+            return reasoning_content
+    return ""
+
+
+def _stream_event_reasoning_text(data: dict) -> str:
+    choices = data.get("choices", [])
+    if choices:
+        choice = choices[0]
+        if isinstance(choice, dict):
+            return _choice_reasoning_text(choice)
+
+    output = data.get("output")
+    if isinstance(output, dict):
+        choices = output.get("choices", [])
+        if choices:
+            choice = choices[0]
+            if isinstance(choice, dict):
+                message = choice.get("message", {})
+                if isinstance(message, dict):
+                    reasoning_content = message.get("reasoning_content", "")
+                    if isinstance(reasoning_content, str):
+                        return reasoning_content
     return ""
 
 
@@ -205,10 +249,17 @@ async def _read_streaming_chat_completion(
 ) -> _ChatCompletionAttempt:
     parts: list[str] = []
     event_lines: list[str] = []
+    reasoning_chars = 0
 
     def finish(text: str) -> _ChatCompletionAttempt:
         if not text:
             logger.warning("%s API stream returned no text", provider_name)
+        if reasoning_chars:
+            logger.info(
+                "%s API stream returned reasoning_content chars=%s",
+                provider_name,
+                reasoning_chars,
+            )
         return _ChatCompletionAttempt(
             text=text or None,
             retryable=not bool(text),
@@ -226,6 +277,7 @@ async def _read_streaming_chat_completion(
         )
 
     def handle_event(raw_data: str) -> tuple[bool, _ChatCompletionAttempt | None]:
+        nonlocal reasoning_chars
         data_text = raw_data.strip()
         if not data_text:
             return False, None
@@ -236,6 +288,7 @@ async def _read_streaming_chat_completion(
         except json.JSONDecodeError:
             return False, stream_failure("invalid json")
 
+        reasoning_chars += len(_stream_event_reasoning_text(data))
         text, valid_event, error_message = _stream_event_text(data)
         if error_message:
             return False, stream_failure(error_message)
@@ -408,6 +461,8 @@ async def chat_completion(
                 payload["response_format"] = response_format
             if thinking:
                 payload["thinking"] = thinking
+                if _provider_is_dashscope(provider.name, provider.base_url):
+                    payload["enable_thinking"] = True
             reasoning_effort = provider.reasoning_effort.strip().lower()
             if reasoning_effort and send_reasoning_effort:
                 payload["reasoning_effort"] = reasoning_effort

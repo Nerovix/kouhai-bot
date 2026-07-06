@@ -56,8 +56,9 @@ NapCat (QQ) ──WS──> worker.py
   starts background translation (using `summary_model`) into `tutorial_translations/` so first AC
   can deliver without waiting. On **first AC**, congrats is sent in `_finalize_submit`, then
   `schedule_post_solve_editorial_followup()` only **delivers** (awaits in-flight prefetch if
-  needed). Neither path uses the state scheduler. `/review` uses English editorial in LLM
-  context only.
+  needed). Neither path uses the state scheduler. Tutorial scraping depends on Playwright
+  with Chromium installed for browser fallback when HTTP fetches hit Codeforces blocking.
+  `/review` uses English editorial in LLM context only.
 
 ## Configuration
 

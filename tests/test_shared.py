@@ -438,7 +438,8 @@ def test_zenmux_fable_payload_uses_reasoning_effort_without_generic_thinking():
         name="fable",
         api_key="sk-test",
         base_url="https://zenmux.ai/api/v1",
-        model="anthropic/claude-fable-5-free",
+        smart_model="anthropic/claude-fable-5-free",
+        general_model="anthropic/claude-fable-5-free",
         reasoning_effort="max",
     )
     cfg = _openai_cfg(llm_providers=[provider])

@@ -131,15 +131,21 @@ class _PostSession:
 
 
 def _openai_cfg(**overrides):
-    provider = LlmProviderConfig(
+    smart_provider = LlmProviderConfig(
         name="openai",
         api_key="sk-test",
         base_url="http://localhost:8080/v1",
-        smart_model="gpt-5.5",
-        general_model="gpt-5.5-mini",
+        model="gpt-5.5",
+    )
+    general_provider = LlmProviderConfig(
+        name="openai",
+        api_key="sk-test",
+        base_url="http://localhost:8080/v1",
+        model="gpt-5.5-mini",
     )
     cfg = BotConfig(
-        llm_providers=[provider],
+        llm_smart_providers=[smart_provider],
+        llm_general_providers=[general_provider],
         llm_max_retries=2,
         llm_retry_base_delay_sec=1.0,
         llm_retry_max_delay_sec=8.0,
@@ -149,21 +155,16 @@ def _openai_cfg(**overrides):
     return cfg
 
 
-def test_provider_model_for_uses_smart_and_general_models():
+def test_provider_model_for_uses_provider_model_and_explicit_override():
     provider = LlmProviderConfig(
         name="openai",
         api_key="sk-test",
         base_url="http://localhost:8080/v1",
-        smart_model="smart",
-        general_model="general",
+        model="configured",
     )
 
-    assert provider.model_for(task="judge") == "smart"
-    assert provider.model_for(task="review") == "smart"
-    assert provider.model_for(task="clarify") == "general"
-    assert provider.model_for(task="summary") == "general"
-    assert provider.model_for(task="unknown") == "general"
-    assert provider.model_for(task="judge", explicit_model="override") == "override"
+    assert provider.model_for() == "configured"
+    assert provider.model_for(explicit_model="override") == "override"
 
 
 def test_general_model_tasks_preserve_provider_model_tag():
@@ -171,11 +172,10 @@ def test_general_model_tasks_preserve_provider_model_tag():
         name="openai",
         api_key="sk-test",
         base_url="http://localhost:8080/v1",
-        smart_model="smart",
-        general_model="general",
+        model="general",
         model_tag="『G』",
     )
-    cfg = _openai_cfg(llm_providers=[provider])
+    cfg = _openai_cfg(llm_general_providers=[provider])
     calls = []
 
     async def fake_once(session, **kwargs):
@@ -197,15 +197,24 @@ def test_general_model_tasks_preserve_provider_model_tag():
 
 
 def test_task_entrypoints_are_blackbox_except_model_class_and_tag():
-    provider = LlmProviderConfig(
-        name="deepseek",
+    smart_provider = LlmProviderConfig(
+        name="deepseek-smart",
         api_key="sk-test",
         base_url="http://localhost:8080/v1",
-        smart_model="deepseek-v4-pro",
-        general_model="deepseek-v4-flash",
+        model="deepseek-v4-pro",
         model_tag="『T』",
     )
-    cfg = _openai_cfg(llm_providers=[provider])
+    general_provider = LlmProviderConfig(
+        name="deepseek-general",
+        api_key="sk-test",
+        base_url="http://localhost:8080/v1",
+        model="deepseek-v4-flash",
+        model_tag="『T』",
+    )
+    cfg = _openai_cfg(
+        llm_smart_providers=[smart_provider],
+        llm_general_providers=[general_provider],
+    )
     calls = []
 
     async def fake_once(session, **kwargs):
@@ -295,18 +304,17 @@ def test_call_chat_completion_pinned_provider_does_not_fallback():
         name="openai",
         api_key="sk-openai",
         base_url="http://openai.local/v1",
-        smart_model="gpt-5.5",
-        general_model="gpt-5.5-mini",
+        model="gpt-5.5",
     )
     deepseek = LlmProviderConfig(
         name="deepseek",
         api_key="sk-deepseek",
         base_url="http://deepseek.local/v1",
-        smart_model="deepseek-v4-pro",
-        general_model="deepseek-v4-chat",
+        model="deepseek-v4-pro",
     )
     cfg = BotConfig(
-        llm_providers=[openai, deepseek],
+        llm_smart_providers=[openai, deepseek],
+        llm_general_providers=[deepseek],
         llm_max_retries=0,
         llm_retry_base_delay_sec=0.0,
         llm_retry_max_delay_sec=0.0,
@@ -408,10 +416,9 @@ def test_dashscope_provider_payload_enables_stream():
         name="qwen",
         api_key="sk-test",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        smart_model="qwen-test",
-        general_model="qwen-test-lite",
+        model="qwen-test",
     )
-    cfg = _openai_cfg(llm_providers=[provider])
+    cfg = _openai_cfg(llm_smart_providers=[provider])
     calls = []
 
     async def fake_once(session, **kwargs):
@@ -438,11 +445,10 @@ def test_zenmux_fable_payload_uses_reasoning_effort_without_generic_thinking():
         name="fable",
         api_key="sk-test",
         base_url="https://zenmux.ai/api/v1",
-        smart_model="anthropic/claude-fable-5-free",
-        general_model="anthropic/claude-fable-5-free",
+        model="anthropic/claude-fable-5-free",
         reasoning_effort="max",
     )
-    cfg = _openai_cfg(llm_providers=[provider])
+    cfg = _openai_cfg(llm_smart_providers=[provider])
     calls = []
 
     async def fake_once(session, **kwargs):
@@ -498,11 +504,10 @@ def test_explicit_stream_provider_payload_enables_stream():
         name="openai",
         api_key="sk-test",
         base_url="http://localhost:8080/v1",
-        smart_model="gpt-5.5",
-        general_model="gpt-5.5-mini",
+        model="gpt-5.5",
         stream=True,
     )
-    cfg = _openai_cfg(llm_providers=[provider])
+    cfg = _openai_cfg(llm_smart_providers=[provider])
     calls = []
 
     async def fake_once(session, **kwargs):

@@ -438,7 +438,11 @@ async def chat_completion(
     On exhaustion, the next provider in the fallback list is tried.
     """
     cfg = get_config()
-    providers = cfg.llm_providers
+    task_name = (task or "").strip().lower()
+    if task_name in {"judge", "review"}:
+        providers = cfg.llm_smart_providers
+    else:
+        providers = cfg.llm_general_providers
     if provider_name:
         providers = [p for p in providers if p.name == provider_name]
     if not providers:
@@ -458,7 +462,7 @@ async def chat_completion(
 
     async with aiohttp.ClientSession() as session:
         for provider in providers:
-            model_name = provider.model_for(task=task, explicit_model=model)
+            model_name = provider.model_for(explicit_model=model)
             headers = {
                 "Authorization": f"Bearer {provider.api_key}",
                 "Content-Type": "application/json",

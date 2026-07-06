@@ -26,15 +26,12 @@ def _make_yaml(**overrides) -> str:
         "bot_qq": 1,
         "current_group": 123,
         "llm": {
-            "providers": [
-                {
-                    "name": "t",
-                    "api_key": "k",
-                    "base_url": "http://x/v1",
-                    "smart_model": "smart",
-                    "general_model": "general",
-                }
-            ]
+            "smart_model": [
+                {"name": "smart", "api_key": "k", "base_url": "http://x/v1", "model": "smart"}
+            ],
+            "general_model": [
+                {"name": "general", "api_key": "k", "base_url": "http://x/v1", "model": "general"}
+            ],
         },
         "qwen": {"api_key": "k", "model": "qwen-vl-max"},
     }

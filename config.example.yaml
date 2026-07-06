@@ -26,14 +26,13 @@ llm:
   review_timeout_sec: 600
   summary_timeout_sec: 120
 
-  # Fallback provider list — order matters!
-  providers:
+  # Smart-model fallback queue — judge/review use this list. Order matters.
+  smart_model:
     # ── Optional primary: ZenMux/Fable (OpenAI-compatible) ──
     # - name: fable
     #   api_key: "..."
     #   base_url: "https://zenmux.ai/api/v1"
-    #   smart_model: "anthropic/claude-fable-5-free"
-    #   general_model: "anthropic/claude-fable-5-free"
+    #   model: "anthropic/claude-fable-5-free"
     #   reasoning_effort: "max"
     #   model_tag: "『Fable』"
 
@@ -41,8 +40,7 @@ llm:
     - name: openai
       api_key: "..."
       base_url: "..."
-      smart_model: "gpt-5.5"      # judge/review
-      general_model: "gpt-5.5-mini" # clarify/summary/editorial and other tasks
+      model: "gpt-5.5"
       stream: true               # use SSE streaming; recommended for sub2api/OpenAI
       reasoning_effort: "high"  # minimal/low/medium/high/xhigh
       model_tag: "『֎AI』"        # appended to LLM output; empty to disable
@@ -51,16 +49,29 @@ llm:
     - name: qwen
       api_key: "..."
       base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      smart_model: "qwen3.7-max"
-      general_model: "qwen3.7-plus"
+      model: "qwen3.7-max"
       model_tag: "『Qwen』"
 
     # ── Fallback: DeepSeek (supports OpenAI-compatible format) ──
     - name: deepseek
       api_key: "..."
       base_url: "https://api.deepseek.com"
-      smart_model: "deepseek-v4-pro"
-      general_model: "deepseek-v4-chat"
+      model: "deepseek-v4-pro"
+      model_tag: "『🐳』"
+
+  # General-model fallback queue — clarify/summary/editorial and other tasks use this list.
+  # This queue can use completely different providers/models from smart_model.
+  general_model:
+    - name: qwen
+      api_key: "..."
+      base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      model: "qwen3.7-plus"
+      model_tag: "『Qwen』"
+
+    - name: deepseek
+      api_key: "..."
+      base_url: "https://api.deepseek.com"
+      model: "deepseek-v4-chat"
       model_tag: "『🐳』"
 
 # ── Qwen-VL (formula image recognition) ──

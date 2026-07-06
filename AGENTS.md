@@ -40,20 +40,20 @@ NapCat (QQ) ──WS──> worker.py
   by `CURFEW_START_HOUR` and `CURFEW_DURATION_HOURS`. Other commands (clarify, review,
   scoreboard, etc.) are unaffected. Curfew wraps past midnight correctly (e.g. start=22,
   duration=6 → 22:00–04:00).
-- **LLM fallback**: `llm.py` — providers are tried in list order defined by
-  `llm.providers` in `config.yaml`. Each provider is retried internally
-  (`llm.max_retries`) before moving to the next. All providers use the
-  OpenAI-compatible `/chat/completions` format. DashScope/阿里云百炼 providers
-  are called with HTTP+SSE streaming to avoid the 10-minute synchronous HTTP
-  limit; providers with `stream: true` do the same; other providers use the
-  normal JSON response path. Each provider defines `smart_model` for judge/review
-  and `general_model` for clarify/summary/editorial and other tasks.
+- **LLM fallback**: `llm.py` — providers are tried in list order from one of two
+  independent queues in `config.yaml`: `llm.smart_model` for judge/review and
+  `llm.general_model` for clarify/summary/editorial and other tasks. Each
+  provider is retried internally (`llm.max_retries`) before moving to the next.
+  All providers use the OpenAI-compatible `/chat/completions` format.
+  DashScope/阿里云百炼 providers are called with HTTP+SSE streaming to avoid the
+  10-minute synchronous HTTP limit; providers with `stream: true` do the same;
+  other providers use the normal JSON response path.
   `thinking` and `reasoning_effort` are sent unconditionally; unsupported
   fields are silently ignored by upstream APIs.
 - **Official CF tutorials**: Scraped editorials live under `{data_dir}/tutorials/{pid}.json`
   (see `tools/cf_tutorial_agent.py`; low-level CF HTML helpers live in `tools/scrape_cf_tutorial.py`). Runtime extraction is in `tutorials.py`. On the
   On **new problem** (`do_daily_post` / `/newproblem`), `schedule_prefetch_editorial(pid)`
-  starts background translation (using `general_model`) into `tutorial_translations/` so first AC
+  starts background translation (using the `llm.general_model` queue) into `tutorial_translations/` so first AC
   can deliver without waiting. On **first AC**, congrats is sent in `_finalize_submit`, then
   `schedule_post_solve_editorial_followup()` only **delivers** (awaits in-flight prefetch if
   needed). Neither path uses the state scheduler. Tutorial scraping depends on Playwright
@@ -95,17 +95,17 @@ All providers use the OpenAI-compatible `/chat/completions` endpoint.
 | `llm.clarify_timeout_sec` | int | 600 | Clarify LLM timeout |
 | `llm.review_timeout_sec` | int | 600 | Review LLM timeout |
 | `llm.summary_timeout_sec` | int | 120 | Summary + editorial translation timeout |
-| `llm.providers` | list | — | **Ordered** fallback provider list (**required, min 1**) |
+| `llm.smart_model` | list | — | Ordered fallback provider list for `/submit` judge and `/review` (**required, min 1**) |
+| `llm.general_model` | list | — | Ordered fallback provider list for `/clarify`, summaries, editorial translation, sample-note translation, and other LLM tasks (**required, min 1**) |
 
-Each provider in `llm.providers`:
+Each provider in `llm.smart_model` or `llm.general_model`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `name` | — | Provider identifier for logging (**required**) |
 | `api_key` | — | API key (**required**) |
 | `base_url` | `https://api.openai.com/v1` | Base URL for chat completions |
-| `smart_model` | — | Model for `/submit` judge and `/review` (**required**) |
-| `general_model` | — | Model for `/clarify`, summaries, editorial translation, sample-note translation, and other LLM tasks (**required**) |
+| `model` | — | Model name for this provider entry (**required**) |
 | `reasoning_effort` | — | OpenAI reasoning effort: `minimal`/`low`/`medium`/`high`/`xhigh` |
 | `stream` | `false` | Send `stream=true` and read SSE chunks for this provider; DashScope/阿里云百炼 streams automatically |
 | `model_tag` | `""` | Short string appended to every LLM-generated user message (judge/clarify/review/summary/editorial); empty means no tag |
@@ -259,21 +259,26 @@ Healthy state:
 
 ### LLM fallback
 
-Providers in `llm.providers` are tried **in list order**. Each provider is retried
-up to `llm.max_retries` times internally (exponential backoff). On exhaustion, the
-next provider is tried. The first successful response wins.
+Providers in the selected queue are tried **in list order**. Each provider is
+retried up to `llm.max_retries` times internally (exponential backoff). On
+exhaustion, the next provider in that same queue is tried. The first successful
+response wins.
 
-Common fallback pattern: OpenAI (better quality, less stable) → DeepSeek (stable backup):
+Common fallback pattern: OpenAI (better quality, less stable) → DeepSeek (stable backup)
+for smart tasks, with a separate cheaper/faster general queue:
 ```yaml
 llm:
-  providers:
+  smart_model:
     - name: openai
-      smart_model: "gpt-5.5"
-      general_model: "gpt-5.5-mini"
+      model: "gpt-5.5"
       reasoning_effort: "high"
     - name: deepseek
-      smart_model: "deepseek-v4-pro"
-      general_model: "deepseek-v4-chat"
+      model: "deepseek-v4-pro"
+  general_model:
+    - name: qwen
+      model: "qwen3.7-plus"
+    - name: deepseek
+      model: "deepseek-v4-chat"
 ```
 
 All providers receive the same base request payload. Non-applicable fields (e.g.
@@ -343,15 +348,15 @@ No repository-local runtime queue is used.
 
 | Command | File | Handler | Lock | Model | Notes |
 |---------|------|---------|------|-------|-------|
-| `/submit` (`/sbm`) | submit.py | `handle` | ✅ state scheduler | per-provider `smart_model` | Judge solution, save history, serialize only first-blood/scoreboard; configured dynamic-wait group submits redirect to private judge; private AC does not score until synced |
-| `/clarify` (`/clrf`) | clarify.py | `handle` | ✅ state scheduler | per-provider `general_model` | Clarify problem details (JSON output, anti-spoiler, no original problem identity), using admission-time pid; private uses pid-specific summary |
+| `/submit` (`/sbm`) | submit.py | `handle` | ✅ state scheduler | `llm.smart_model` queue | Judge solution, save history, serialize only first-blood/scoreboard; configured dynamic-wait group submits redirect to private judge; private AC does not score until synced |
+| `/clarify` (`/clrf`) | clarify.py | `handle` | ✅ state scheduler | `llm.general_model` queue | Clarify problem details (JSON output, anti-spoiler, no original problem identity), using admission-time pid; private uses pid-specific summary |
 | `/clear` | clear.py | `handle` | ✅ state scheduler | — | Clear the current user's stored submit/clarify/review history for the admission-time current problem or current private problem |
-| `/newproblem` (`/np`) | newproblem.py | `handle` | ✅ post lock | per-provider `general_model` | Force new problem when solved (or none); unsolved needs exact `/newproblem --force`; samples are forwarded as separate nodes; if statement has `notes`, translate+symbol-normalize and append as a dedicated notes node; commits state only after card delivery succeeds and keeps `daily_msg.json` in sync even on direct-text fallback |
+| `/newproblem` (`/np`) | newproblem.py | `handle` | ✅ post lock | `llm.general_model` queue | Force new problem when solved (or none); unsolved needs exact `/newproblem --force`; samples are forwarded as separate nodes; if statement has `notes`, translate+symbol-normalize and append as a dedicated notes node; commits state only after card delivery succeeds and keeps `daily_msg.json` in sync even on direct-text fallback |
 | `/problem` (`/pb`) | stubs.py | `handle_problem` | ❌ | — | Resend current group/private problem via forward card; group path only uses `daily_msg.json` when pid matches `state.json.today`; if solved, add a friendly `/newproblem` hint |
 | `/tag` | stubs.py | `handle_tag` | ❌ | — | Show current group/private problem CF tags |
 | `/scoreboard` | stubs.py | `handle_scoreboard` | ❌ | — | Cumulative weighted leaderboard; shows the formula at the top, then refreshes latest group nicknames at display time |
 | `/help` | help.py | `handle` | ❌ | — | Auto-generated help (forward card) |
-| `/review` (`/rv`) | review.py | `handle` | ✅ state scheduler | per-provider `smart_model` | Discuss the latest solved group/private problem by default; quoted group problem cards can target older problems |
+| `/review` (`/rv`) | review.py | `handle` | ✅ state scheduler | `llm.smart_model` queue | Discuss the latest solved group/private problem by default; quoted group problem cards can target older problems |
 | `/status` | stubs.py | `handle_status` | ❌ | — | Check whether this group or private judge has active stateful work |
 | `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, `random`, or a quoted problem card |
 | `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite |
@@ -592,7 +597,7 @@ scheduler lock, but final reply is not ordered behind unrelated same-group reque
   inputs. Ignore @all, the bot itself, the requester, and duplicate mentions. Do not
   persist anything to mentioned users' histories; only the requester receives the
   saved review record.
-- Uses per-provider `smart_model` (free text, no JSON format). Timeout from
+- Uses `llm.smart_model` queue (free text, no JSON format). Timeout from
   `llm.review_timeout_sec`. `thinking: enabled` and `reasoning_effort` are sent
   unconditionally; unsupported fields are silently ignored.
 - Long replies (>400 chars) → merged-forward card; short replies → @mention inline
@@ -689,7 +694,7 @@ lock and wraps the same locked implementation:
 1. Reveal yesterday's problem via `picker.py reveal`
 2. Pick a candidate problem via `picker.py pick-json --with-statement`; this marks used
    problems and caches statements but does **not** write `state.json`
-3. Generate Chinese summary via `summarize_problem()` → per-provider `general_model`,
+3. Generate Chinese summary via `summarize_problem()` → `llm.general_model` queue,
    timeout from `llm.summary_timeout_sec`
 4. Self-send summary text; self-send each sample as an independent node; if statement has
    `notes`, translate it to Chinese and append a dedicated `样例解释` node (with LaTeX/Markdown

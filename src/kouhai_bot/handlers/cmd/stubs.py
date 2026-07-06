@@ -110,11 +110,6 @@ async def handle_problem(group_id: int, user_id: int, sender: dict,
             msg_id = daily_msg.get("msg_id")
             if msg_id:
                 fwd_nodes = [{"type": "node", "data": {"id": str(msg_id)}}]
-                diagram_msg_ids = daily_msg.get("diagram_msg_ids", [])
-                if isinstance(diagram_msg_ids, list):
-                    for diagram_msg_id in diagram_msg_ids:
-                        if diagram_msg_id:
-                            fwd_nodes.append({"type": "node", "data": {"id": str(diagram_msg_id)}})
                 sample_msg_ids = daily_msg.get("sample_msg_ids", [])
                 if isinstance(sample_msg_ids, list):
                     for sample_msg_id in sample_msg_ids:
@@ -136,7 +131,6 @@ async def handle_problem(group_id: int, user_id: int, sender: dict,
             post_msg = daily_msg.get("post_msg")
             sample_messages = daily_msg.get("sample_messages")
             notes_message = daily_msg.get("notes_message")
-            diagram_messages = daily_msg.get("diagram_messages")
             snake_enabled = bool(daily_msg.get("snake_enabled", True))
             if isinstance(post_msg, str) and isinstance(sample_messages, list):
                 fwd_resp, node_payload = await _send_problem_forward_card(
@@ -144,7 +138,6 @@ async def handle_problem(group_id: int, user_id: int, sender: dict,
                     post_msg=post_msg,
                     sample_messages=[str(item) for item in sample_messages],
                     notes_message=str(notes_message) if isinstance(notes_message, str) else "",
-                    diagram_messages=diagram_messages if isinstance(diagram_messages, list) else [],
                     snake_enabled=snake_enabled,
                 )
                 if fwd_resp:

@@ -13,8 +13,7 @@ VL backends (set via --vl-backend or CF_VL_BACKEND env):
   - none     Dry-run only
 
 Returns:
-  - has_non_formula_images: True if problem contains tex-graphics diagrams
-  - graphics_details: VL descriptions for tex-graphics diagrams when available
+  - has_non_formula_images: True if problem contains tex-graphics diagrams → filter out
 """
 
 import argparse
@@ -23,7 +22,6 @@ import json
 import os
 import re
 import sys
-import urllib.parse
 import urllib.request
 from io import BytesIO
 
@@ -113,7 +111,7 @@ def find_all_tex_images(ps_html: str) -> tuple[list[dict], list[dict]]:
     """Find all tex-formula and tex-graphics images.
     Returns (formulas, graphics) — each a list of {tag, src, class, start, end}.
     tex-formula = math formula images (should convert to LaTeX)
-    tex-graphics = diagrams/charts/drawings (should describe and attach)
+    tex-graphics = diagrams/charts/drawings (should filter out the problem)
     """
     formulas = []
     graphics = []
@@ -127,7 +125,7 @@ def find_all_tex_images(ps_html: str) -> tuple[list[dict], list[dict]]:
         cls = cls_m.group(1) if cls_m else ""
         entry = {
             "tag": tag,
-            "src": normalize_image_url(src_m.group(1) if src_m else ""),
+            "src": src_m.group(1) if src_m else "",
             "class": cls,
             "start": m.start(),
             "end": m.end(),
@@ -144,16 +142,6 @@ def find_all_tex_images(ps_html: str) -> tuple[list[dict], list[dict]]:
 def image_to_base64_url(image_bytes: bytes, mime: str = "image/png") -> str:
     b64 = base64.b64encode(image_bytes).decode()
     return f"data:{mime};base64,{b64}"
-
-
-def normalize_image_url(url: str) -> str:
-    """Normalize CF image URLs so urllib and OneBot can consume them."""
-    url = str(url or "").strip()
-    if url.startswith("//"):
-        return "https:" + url
-    if url.startswith("/"):
-        return urllib.parse.urljoin("https://codeforces.com", url)
-    return url
 
 
 def download_image(url: str) -> bytes:
@@ -341,34 +329,6 @@ def call_vl_with_retry(
     return "(VL hallucination after retries)"
 
 
-def call_vl_for_graphic(
-    vl_fn,
-    b64_url: str,
-    context: str,
-    pid: str,
-    graphic_idx: int,
-) -> str:
-    """Ask VL for a faithful text rendering of a diagram."""
-    prompt = (
-        "This image is a diagram from a competitive programming problem statement. "
-        "Describe only visible, task-relevant facts so a solver and a judging model can "
-        "understand the statement without seeing the image. Include labels, numbers, "
-        "nodes, edges, arrows, axes, coordinates, colors, shapes, examples, and order "
-        "relationships if present. Do not infer a solution or add unstated facts. "
-        "If the image contains no useful problem information, say: no task-relevant "
-        "details visible.\n\n"
-        f"Surrounding statement text: {context}"
-    )
-    result = vl_fn(prompt, [b64_url])
-    result = re.sub(r"\s+", " ", result or "").strip()
-    if not result:
-        return "(VL failed)"
-    if len(result) > 1000:
-        result = result[:1000].rstrip() + "..."
-    print(f"  [{pid}] Graphic {graphic_idx}: {result[:120]}", file=sys.stderr)
-    return result
-
-
 # ── HTML to text ────────────────────────────────────────────────────────
 
 def html_to_text(ps_html: str) -> str:
@@ -392,8 +352,7 @@ def process_problem(
       - pid, url, text, text_length
       - formulas_found, formulas_processed
       - formula_details: list of {src, latex}
-      - has_non_formula_images: True if tex-graphics (diagrams) found
-      - graphics_details: list of {src, label, description}
+      - has_non_formula_images: True if tex-graphics (diagrams) found → filter out
       - formulas_failed: number of formulas that couldn't be converted after retries
     """
     html, pid = fetch_problem_html(contest_id, index)
@@ -408,14 +367,12 @@ def process_problem(
           file=sys.stderr)
 
     if has_non_formula_images:
-        print(f"  [{pid}] contains tex-graphics (diagrams) — describing with VL",
+        print(f"  [{pid}] ⚠ contains tex-graphics (diagrams) — will be filtered",
               file=sys.stderr)
 
     # Process formula images
     formula_results = []
     formulas_failed = 0
-    graphic_results = []
-    graphics_failed = 0
 
     if formulas and vl_backend in VL_BACKENDS:
         vl_fn = VL_BACKENDS[vl_backend]
@@ -457,38 +414,12 @@ def process_problem(
         for fm in formulas:
             formula_results.append({"src": fm["src"], "latex": "[FORMULA IMAGE]"})
 
-    # Describe non-formula graphics instead of rejecting the whole problem.
-    if graphics and vl_backend in VL_BACKENDS:
-        vl_fn = VL_BACKENDS[vl_backend]
-        for i, gm in enumerate(graphics, 1):
-            label = f"Diagram {i}"
-            try:
-                img_bytes = download_image(gm["src"])
-                b64_url = image_to_base64_url(preprocess_formula_png(img_bytes, upscale=1))
-                context = extract_context(ps_html, gm["start"], gm["end"])
-                description = call_vl_for_graphic(vl_fn, b64_url, context, pid, i)
-                if description.startswith("(VL"):
-                    graphics_failed += 1
-                graphic_results.append({
-                    "src": gm["src"],
-                    "label": label,
-                    "description": description,
-                })
-            except Exception as e:
-                graphics_failed += 1
-                graphic_results.append({
-                    "src": gm["src"],
-                    "label": label,
-                    "description": f"(error: {e})",
-                })
-                print(f"    → graphic error: {e}", file=sys.stderr)
-    elif graphics:
-        for i, gm in enumerate(graphics, 1):
-            graphic_results.append({
-                "src": gm["src"],
-                "label": f"Diagram {i}",
-                "description": "[DIAGRAM IMAGE]",
-            })
+    # Also mark graphics images in results (for reporting)
+    for gm in graphics:
+        formula_results.append({
+            "src": gm["src"],
+            "latex": "[DIAGRAM — non-formula image]",
+        })
 
     # Replace all image tags with their text representation (reverse order)
     result_html = ps_html
@@ -501,17 +432,9 @@ def process_problem(
 
     for img_entry in all_images:
         # Find matching result by src URL
-        if "tex-graphics" in img_entry.get("class", ""):
-            matching_graphics = [r for r in graphic_results if r["src"] == img_entry["src"]]
-            graphic = matching_graphics[0] if matching_graphics else {}
-            label = graphic.get("label", "Diagram")
-            description = graphic.get("description", "[DIAGRAM IMAGE]")
-            replacement_text = f"[{label}: {description}]"
-        else:
-            matching = [r for r in formula_results if r["src"] == img_entry["src"]]
-            latex = matching[0]["latex"] if matching else "[IMAGE]"
-            replacement_text = f"({latex})"
-        replacement = f'<span class="tex-formula-text">{replacement_text}</span>'
+        matching = [r for r in formula_results if r["src"] == img_entry["src"]]
+        latex = matching[0]["latex"] if matching else "[IMAGE]"
+        replacement = f'<span class="tex-formula-text">({latex})</span>'
         result_html = (
             result_html[:img_entry["start"]] + replacement + result_html[img_entry["end"]:]
         )
@@ -524,9 +447,6 @@ def process_problem(
         "formulas_found": len(formulas),
         "graphics_found": len(graphics),
         "has_non_formula_images": has_non_formula_images,
-        "graphics_processed": len(graphics) - graphics_failed,
-        "graphics_failed": graphics_failed,
-        "graphics_details": graphic_results,
         "formulas_processed": len(formulas) - formulas_failed,
         "formulas_failed": formulas_failed,
         "formula_details": formula_results,
@@ -600,22 +520,13 @@ def main():
         print(f"URL: {result['url']}")
         print(f"Formulas: {result['formulas_found']} found, {result['formulas_processed']} processed")
         if result["has_non_formula_images"]:
-            print(
-                f"Diagrams: {result['graphics_found']} found, "
-                f"{result.get('graphics_processed', 0)} described"
-            )
+            print("⚠ Contains non-formula images (diagrams) — recommend filtering")
         if result["formulas_failed"]:
             print(f"⚠ {result['formulas_failed']} formula(s) failed")
-        if result.get("graphics_failed"):
-            print(f"⚠ {result['graphics_failed']} diagram(s) failed")
         for fr in result.get("formula_details", []):
             src_short = fr["src"][:60]
             print(f"  {src_short}")
             print(f"    → {fr.get('latex', '?')[:120]}")
-        for gr in result.get("graphics_details", []):
-            src_short = gr["src"][:60]
-            print(f"  {src_short}")
-            print(f"    → {gr.get('description', '?')[:120]}")
         print(f"\n--- Problem text ({result['text_length']} chars) ---")
         print(result["text"][:2000])
 

@@ -528,36 +528,6 @@ def _build_sample_messages(stmt: dict) -> list[str]:
     return messages
 
 
-def _build_diagram_messages(stmt: dict) -> list[dict]:
-    diagrams = stmt.get("diagrams")
-    if not isinstance(diagrams, list):
-        return []
-    messages: list[dict] = []
-    for idx, item in enumerate(diagrams, 1):
-        if not isinstance(item, dict):
-            continue
-        src = str(item.get("src", "") or "").strip()
-        description = str(item.get("description", "") or "").strip()
-        label = str(item.get("label", "") or f"图 {idx}").strip()
-        if not src and not description:
-            continue
-        messages.append({"label": label, "src": src, "description": description})
-    return messages
-
-
-def _build_diagram_segments(diagram: dict) -> list[dict]:
-    label = str(diagram.get("label", "示意图") or "示意图").strip()
-    description = str(diagram.get("description", "") or "").strip()
-    src = str(diagram.get("src", "") or "").strip()
-    caption = f"题面示意图：{label}"
-    if description and not description.startswith("("):
-        caption += f"\n{description}"
-    segments = build_plain_message(caption)
-    if src:
-        segments.append({"type": "image", "data": {"file": src}})
-    return segments
-
-
 async def _build_notes_message(stmt: dict) -> str:
     raw_notes = _normalize_sample_block(stmt.get("notes", ""))
     if not raw_notes:
@@ -599,7 +569,6 @@ async def build_problem_card_payload(group_id: int, problem: dict, *, greeting: 
         "post_msg": post_msg,
         "sample_messages": _build_sample_messages(stmt),
         "notes_message": await _build_notes_message(stmt),
-        "diagram_messages": _build_diagram_messages(stmt),
         "snake_enabled": False,
     }
 
@@ -679,9 +648,6 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
     msg_id = payload.get("msg_id")
     if msg_id:
         node_ids.append(str(msg_id))
-        for diagram_id in payload.get("diagram_msg_ids", []) if isinstance(payload.get("diagram_msg_ids"), list) else []:
-            if diagram_id:
-                node_ids.append(str(diagram_id))
         for sample_id in payload.get("sample_msg_ids", []) if isinstance(payload.get("sample_msg_ids"), list) else []:
             if sample_id:
                 node_ids.append(str(sample_id))
@@ -698,25 +664,16 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
     post_msg = payload.get("post_msg")
     sample_messages = payload.get("sample_messages")
     notes_message = payload.get("notes_message")
-    diagram_messages = payload.get("diagram_messages")
     if not isinstance(post_msg, str):
         post_msg = "当前题目"
     if not isinstance(sample_messages, list):
         sample_messages = []
     if not isinstance(notes_message, str):
         notes_message = ""
-    if not isinstance(diagram_messages, list):
-        diagram_messages = []
 
     main_node_id = await send_private_msg(cfg.bot_qq, build_plain_message(post_msg))
     node_ids = [str(main_node_id)] if main_node_id else []
     if main_node_id:
-        for diagram in diagram_messages:
-            if not isinstance(diagram, dict):
-                continue
-            resp = await send_private_msg(cfg.bot_qq, _build_diagram_segments(diagram))
-            if resp:
-                node_ids.append(str(resp))
         for text in [*[str(item) for item in sample_messages], notes_message]:
             if not text:
                 continue
@@ -732,11 +689,6 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
 
     direct_id = await send_private_msg(user_id, build_plain_message(post_msg))
     _save_private_problem_card_ref(group_id, direct_id, pid)
-    for diagram in diagram_messages:
-        if not isinstance(diagram, dict):
-            continue
-        diagram_id = await send_private_msg(user_id, _build_diagram_segments(diagram))
-        _save_private_problem_card_ref(group_id, diagram_id, pid)
     for sample in sample_messages:
         sample_id = await send_private_msg(user_id, build_plain_message(str(sample)))
         _save_private_problem_card_ref(group_id, sample_id, pid)

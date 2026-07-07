@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections import deque
 from dataclasses import dataclass
+from typing import Callable
 
 from .config import get_config
 from .napcat.client import build_plain_message, send_group_msg
@@ -23,9 +25,18 @@ class EchoEntry:
 class GroupEcho:
     """Bounded recent-message buffer for repeat detection."""
 
-    def __init__(self, *, max_entries: int = 50, trigger_count: int = 3) -> None:
+    def __init__(
+        self,
+        *,
+        max_entries: int = 50,
+        trigger_count: int = 2,
+        echo_probability: float = 0.5,
+        rng: Callable[[], float] = random.random,
+    ) -> None:
         self.max_entries = max_entries
         self.trigger_count = trigger_count
+        self.echo_probability = echo_probability
+        self._rng = rng
         self._buffer: deque[EchoEntry] = deque(maxlen=max_entries)
         self._lock = asyncio.Lock()
 
@@ -62,14 +73,16 @@ class GroupEcho:
                 return False
 
             has_bot = any(str(uid) == str(cfg.bot_qq) for uid in streak_users)
-            if not has_bot:
+            if not has_bot and self._rng() < self.echo_probability:
                 echo_text = streak_text
-
-            for _ in range(streak_len):
-                buf.pop()
+                buf.append(EchoEntry(
+                    user_id=int(cfg.bot_qq),
+                    raw_text=streak_text,
+                    message_id=f"echo:{message_id}",
+                ))
 
         if echo_text is None:
-            logger.debug("Skipped echo for group %s because bot was in streak", group_id)
+            logger.debug("Skipped probabilistic echo for group %s", group_id)
             return False
 
         logger.info("Echoing repeated group message in group %s", group_id)

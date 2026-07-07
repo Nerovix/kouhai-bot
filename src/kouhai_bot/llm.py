@@ -106,6 +106,22 @@ def _provider_accepts_generic_thinking(provider_name: str, base_url: str) -> boo
     return not _provider_is_fable(provider_name, base_url)
 
 
+def _chat_completion_timeout(
+    *,
+    payload: dict,
+    total_timeout_sec: int,
+    stream_idle_timeout_sec: int | float | None,
+) -> aiohttp.ClientTimeout:
+    if payload.get("stream") is True:
+        idle_timeout = (
+            float(stream_idle_timeout_sec)
+            if stream_idle_timeout_sec and stream_idle_timeout_sec > 0
+            else None
+        )
+        return aiohttp.ClientTimeout(total=total_timeout_sec, sock_read=idle_timeout)
+    return aiohttp.ClientTimeout(total=total_timeout_sec)
+
+
 def _should_retry_status(status: int) -> bool:
     return status in {408, 409, 429} or status >= 500
 
@@ -348,13 +364,18 @@ async def _post_chat_completion_once(
     headers: dict[str, str],
     payload: dict,
     timeout: int,
+    stream_idle_timeout_sec: int | float | None = None,
 ) -> _ChatCompletionAttempt:
     try:
         async with session.post(
             _chat_completions_url(base_url),
             json=payload,
             headers=headers,
-            timeout=aiohttp.ClientTimeout(total=timeout),
+            timeout=_chat_completion_timeout(
+                payload=payload,
+                total_timeout_sec=timeout,
+                stream_idle_timeout_sec=stream_idle_timeout_sec,
+            ),
         ) as resp:
             if resp.status != 200:
                 text = await resp.text()
@@ -456,6 +477,9 @@ async def chat_completion(
         retry_base,
         float(getattr(cfg, "llm_retry_max_delay_sec", 8.0) or 0.0),
     )
+    stream_idle_timeout_sec = int(
+        getattr(cfg, "llm_stream_idle_timeout_sec", 120) or 0
+    )
 
     last_failure_kind: str | None = None
     last_failed_provider: str | None = None
@@ -498,6 +522,7 @@ async def chat_completion(
                     headers=headers,
                     payload=payload,
                     timeout=timeout,
+                    stream_idle_timeout_sec=stream_idle_timeout_sec,
                 )
                 if result.text is not None:
                     if last_failed_provider:

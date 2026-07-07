@@ -121,6 +121,7 @@ def test_llm_timeouts_load_from_yaml(monkeypatch, tmp_path):
             "general_model": [
                 {"name": "general", "api_key": "k", "base_url": "http://x/v1", "model": "general"}
             ],
+            "stream_idle_timeout_sec": 456,
             "judge_timeout_sec": 1500,
             "clarify_timeout_sec": 700,
             "review_timeout_sec": 800,
@@ -128,10 +129,17 @@ def test_llm_timeouts_load_from_yaml(monkeypatch, tmp_path):
         }
     )
     cfg = _from_yaml(yaml_str, monkeypatch, tmp_path)
+    assert cfg.llm_stream_idle_timeout_sec == 456
     assert cfg.judge_timeout_sec == 1500
     assert cfg.clarify_timeout_sec == 700
     assert cfg.review_timeout_sec == 800
     assert cfg.summary_timeout_sec == 180
+
+
+def test_llm_stream_idle_timeout_defaults_to_120(monkeypatch, tmp_path):
+    cfg = _from_yaml(_make_yaml(), monkeypatch, tmp_path)
+
+    assert cfg.llm_stream_idle_timeout_sec == 120
 
 
 def test_provider_stream_loads_from_yaml(monkeypatch, tmp_path):

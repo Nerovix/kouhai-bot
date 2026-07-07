@@ -418,11 +418,14 @@ def test_dashscope_provider_payload_enables_stream():
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         model="qwen-test",
     )
-    cfg = _openai_cfg(llm_smart_providers=[provider])
+    cfg = _openai_cfg(llm_smart_providers=[provider], llm_stream_idle_timeout_sec=321)
     calls = []
 
     async def fake_once(session, **kwargs):
-        calls.append(kwargs["payload"].copy())
+        calls.append({
+            "payload": kwargs["payload"].copy(),
+            "stream_idle_timeout_sec": kwargs["stream_idle_timeout_sec"],
+        })
         return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
 
     with patch("kouhai_bot.llm.get_config", return_value=cfg), \
@@ -435,9 +438,36 @@ def test_dashscope_provider_payload_enables_stream():
         ))
 
     assert result == "OK"
-    assert calls[0]["stream"] is True
-    assert calls[0]["thinking"] == {"type": "enabled"}
-    assert calls[0]["enable_thinking"] is True
+    assert calls[0]["payload"]["stream"] is True
+    assert calls[0]["payload"]["thinking"] == {"type": "enabled"}
+    assert calls[0]["payload"]["enable_thinking"] is True
+    assert calls[0]["stream_idle_timeout_sec"] == 321
+
+
+def test_streaming_provider_uses_default_idle_timeout():
+    provider = LlmProviderConfig(
+        name="qwen",
+        api_key="sk-test",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="qwen-test",
+    )
+    cfg = _openai_cfg(llm_smart_providers=[provider])
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["stream_idle_timeout_sec"])
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion(
+            [{"role": "user", "content": "Reply with exactly OK."}],
+            task="judge",
+        ))
+
+    assert result == "OK"
+    assert calls == [120]
 
 
 def test_zenmux_fable_payload_uses_reasoning_effort_without_generic_thinking():
@@ -524,6 +554,53 @@ def test_explicit_stream_provider_payload_enables_stream():
 
     assert result == "OK"
     assert calls[0]["stream"] is True
+
+
+def test_streaming_chat_completion_uses_sock_read_idle_timeout():
+    response = _DummyResponse(lines=[
+        'data: {"choices":[{"delta":{"content":"OK"}}]}\n',
+        '\n',
+        'data: [DONE]\n',
+        '\n',
+    ])
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="qwen",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        headers={},
+        payload={"stream": True},
+        timeout=7200,
+        stream_idle_timeout_sec=600,
+    ))
+
+    timeout = session.calls[0][1]["timeout"]
+    assert result.text == "OK"
+    assert timeout.total == 7200
+    assert timeout.sock_read == 600
+
+
+def test_non_streaming_chat_completion_does_not_use_sock_read_idle_timeout():
+    response = _DummyResponse(json_data={
+        "choices": [{"message": {"content": "OK"}}],
+    })
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="openai",
+        base_url="http://localhost:8080/v1",
+        headers={},
+        payload={},
+        timeout=7200,
+        stream_idle_timeout_sec=600,
+    ))
+
+    timeout = session.calls[0][1]["timeout"]
+    assert result.text == "OK"
+    assert timeout.total == 7200
+    assert timeout.sock_read is None
 
 
 def test_streaming_chat_completion_reads_sse_delta_chunks(caplog):

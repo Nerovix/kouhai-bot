@@ -19,6 +19,7 @@ llm:
   max_retries: 3               # per-provider retries
   retry_base_delay_sec: 1.0
   retry_max_delay_sec: 8.0
+  stream_idle_timeout_sec: 120 # SSE idle timeout; retries if no bytes arrive for this long
 
   # Per-task timeouts (apply to all providers)
   judge_timeout_sec: 1200

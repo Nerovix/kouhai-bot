@@ -17,7 +17,7 @@ logger = logging.getLogger("kouhai-bot.echo")
 class EchoEntry:
     user_id: int
     raw_text: str
-    message_id: str
+    message_id: int | str
 
 
 class GroupEcho:
@@ -35,7 +35,7 @@ class GroupEcho:
         group_id: int,
         user_id: int,
         raw_text: str,
-        message_id: str,
+        message_id: int | str,
     ) -> bool:
         """Record a group message and echo it when a repeat streak triggers."""
         cfg = get_config()
@@ -89,7 +89,7 @@ async def check_and_echo(
     group_id: int,
     user_id: int,
     raw_text: str,
-    message_id: str,
+    message_id: int | str,
 ) -> bool:
     return await _echo.check_and_echo(
         group_id=group_id,

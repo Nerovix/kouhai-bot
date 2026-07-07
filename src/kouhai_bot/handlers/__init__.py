@@ -144,18 +144,19 @@ async def process_event(
     if not raw_text:
         return
 
+    if msg_type == "group":
+        await echo.check_and_echo(
+            group_id=group_id,
+            user_id=user_id,
+            raw_text=raw_text,
+            message_id=message_id,
+        )
+
     # Only respond to commands (starting with /) or DMs
     if not raw_text.startswith("/"):
         if msg_type == "private":
             # DM — respond naturally
             pass  # TODO: chat handler
-        elif msg_type == "group":
-            await echo.check_and_echo(
-                group_id=group_id,
-                user_id=user_id,
-                raw_text=raw_text,
-                message_id=message_id,
-            )
         return
 
     # Extract command name

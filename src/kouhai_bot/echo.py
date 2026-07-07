@@ -1,4 +1,4 @@
-"""Group echo/repeat handling for non-command messages."""
+"""Group echo/repeat handling for group messages."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ class GroupEcho:
         cfg = get_config()
         if group_id != cfg.current_group:
             return False
-        if not raw_text or raw_text.startswith("/"):
+        if not raw_text:
             return False
 
         echo_text: str | None = None
@@ -53,7 +53,7 @@ class GroupEcho:
             streak_len = 0
             streak_users: set[int] = set()
             for entry in reversed(buf):
-                if entry.raw_text != streak_text:
+                if entry.raw_text != streak_text or entry.raw_text.startswith("/"):
                     break
                 streak_len += 1
                 streak_users.add(entry.user_id)

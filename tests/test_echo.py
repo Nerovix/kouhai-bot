@@ -10,7 +10,13 @@ from kouhai_bot.handlers import process_event
 
 
 BOT_QQ = 1234567890
-ECHO_MESSAGE = [{"type": "text", "data": {"text": "复读"}}]
+
+
+def _plain(text: str) -> list[dict]:
+    return [{"type": "text", "data": {"text": text}}]
+
+
+ECHO_MESSAGE = _plain("复读")
 
 
 class _TestConfig:
@@ -92,13 +98,36 @@ def test_bot_in_streak_prevents_echo():
     assert echo.buffer_snapshot() == []
 
 
-def test_command_messages_are_ignored():
+def test_command_messages_break_streak_and_stay_in_buffer():
     echo = GroupEcho()
 
     sent = asyncio.run(_feed(echo, ["复读", "/submit 复读", "复读", "复读"]))
 
-    assert sent == [(_TestConfig.current_group, ECHO_MESSAGE)]
-    assert echo.buffer_snapshot() == []
+    assert sent == []
+    assert [entry.raw_text for entry in echo.buffer_snapshot()] == [
+        "复读",
+        "/submit 复读",
+        "复读",
+        "复读",
+    ]
+
+
+def test_three_messages_after_command_trigger_echo():
+    echo = GroupEcho()
+
+    sent = asyncio.run(_feed(echo, ["msg", "msg", "/cmd", "msg", "msg", "msg"]))
+
+    assert sent == [(_TestConfig.current_group, _plain("msg"))]
+    assert [entry.raw_text for entry in echo.buffer_snapshot()] == ["msg", "msg", "/cmd"]
+
+
+def test_two_messages_after_command_do_not_trigger_echo():
+    echo = GroupEcho()
+
+    sent = asyncio.run(_feed(echo, ["msg", "/cmd", "msg", "msg"]))
+
+    assert sent == []
+    assert [entry.raw_text for entry in echo.buffer_snapshot()] == ["msg", "/cmd", "msg", "msg"]
 
 
 def test_non_identical_messages_do_not_trigger():

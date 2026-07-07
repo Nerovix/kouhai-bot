@@ -10,6 +10,7 @@ import unicodedata
 from . import registry
 from .registry import CommandDef
 from ..config import get_config
+from .. import echo
 from ..eventlog import (
     EVENT_META_KEY,
     log_command_finished,
@@ -148,6 +149,13 @@ async def process_event(
         if msg_type == "private":
             # DM — respond naturally
             pass  # TODO: chat handler
+        elif msg_type == "group":
+            await echo.check_and_echo(
+                group_id=group_id,
+                user_id=user_id,
+                raw_text=raw_text,
+                message_id=message_id,
+            )
         return
 
     # Extract command name

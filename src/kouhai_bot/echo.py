@@ -21,20 +21,13 @@ class EchoEntry:
 
 
 class GroupEcho:
-    """Bounded per-group recent-message buffers for repeat detection."""
+    """Bounded recent-message buffer for repeat detection."""
 
     def __init__(self, *, max_entries: int = 50, trigger_count: int = 3) -> None:
         self.max_entries = max_entries
         self.trigger_count = trigger_count
-        self._buffers: dict[int, deque[EchoEntry]] = {}
+        self._buffer: deque[EchoEntry] = deque(maxlen=max_entries)
         self._lock = asyncio.Lock()
-
-    def _buffer_for(self, group_id: int) -> deque[EchoEntry]:
-        buf = self._buffers.get(group_id)
-        if buf is None:
-            buf = deque(maxlen=self.max_entries)
-            self._buffers[group_id] = buf
-        return buf
 
     async def check_and_echo(
         self,
@@ -53,7 +46,7 @@ class GroupEcho:
 
         echo_text: str | None = None
         async with self._lock:
-            buf = self._buffer_for(group_id)
+            buf = self._buffer
             buf.append(EchoEntry(user_id=user_id, raw_text=raw_text, message_id=message_id))
 
             streak_text = buf[-1].raw_text
@@ -83,9 +76,9 @@ class GroupEcho:
         await send_group_msg(group_id, build_plain_message(echo_text))
         return True
 
-    def buffer_snapshot(self, group_id: int) -> list[EchoEntry]:
-        """Return a copy of a group buffer for tests and diagnostics."""
-        return list(self._buffers.get(group_id, ()))
+    def buffer_snapshot(self) -> list[EchoEntry]:
+        """Return a copy of the buffer for tests and diagnostics."""
+        return list(self._buffer)
 
 
 _echo = GroupEcho()

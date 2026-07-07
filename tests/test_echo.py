@@ -9,17 +9,16 @@ from kouhai_bot.echo import GroupEcho
 from kouhai_bot.handlers import process_event
 
 
-GID = 123456
-OTHER_GID = 654321
 BOT_QQ = 1234567890
+ECHO_MESSAGE = [{"type": "text", "data": {"text": "复读"}}]
 
 
 class _TestConfig:
     bot_qq = BOT_QQ
-    current_group = GID
+    current_group = 123456
 
 
-def _event(text: str, *, user_id: int = 42, group_id: int = GID) -> dict:
+def _event(text: str, *, user_id: int = 42, group_id: int = _TestConfig.current_group) -> dict:
     return {
         "type": "message",
         "message_type": "group",
@@ -44,7 +43,7 @@ async def _feed(echo: GroupEcho, texts: list[str], *, users: list[int] | None = 
         for i, text in enumerate(texts):
             user_id = users[i] if users is not None else i + 1
             await echo.check_and_echo(
-                group_id=GID,
+                group_id=_TestConfig.current_group,
                 user_id=user_id,
                 raw_text=text,
                 message_id=f"msg_{i}",
@@ -58,8 +57,8 @@ def test_three_identical_messages_trigger_echo():
 
     sent = asyncio.run(_feed(echo, ["复读", "复读", "复读"]))
 
-    assert sent == [(GID, [{"type": "text", "data": {"text": "复读"}}])]
-    assert echo.buffer_snapshot(GID) == []
+    assert sent == [(_TestConfig.current_group, ECHO_MESSAGE)]
+    assert echo.buffer_snapshot() == []
 
 
 def test_two_identical_messages_do_not_trigger():
@@ -68,7 +67,7 @@ def test_two_identical_messages_do_not_trigger():
     sent = asyncio.run(_feed(echo, ["复读", "复读"]))
 
     assert sent == []
-    assert [entry.raw_text for entry in echo.buffer_snapshot(GID)] == ["复读", "复读"]
+    assert [entry.raw_text for entry in echo.buffer_snapshot()] == ["复读", "复读"]
 
 
 def test_identical_messages_with_different_one_in_between_wait_for_suffix_streak():
@@ -76,8 +75,8 @@ def test_identical_messages_with_different_one_in_between_wait_for_suffix_streak
 
     sent = asyncio.run(_feed(echo, ["复读", "复读", "打断", "复读", "复读", "复读"]))
 
-    assert sent == [(GID, [{"type": "text", "data": {"text": "复读"}}])]
-    assert [entry.raw_text for entry in echo.buffer_snapshot(GID)] == ["复读", "复读", "打断"]
+    assert sent == [(_TestConfig.current_group, ECHO_MESSAGE)]
+    assert [entry.raw_text for entry in echo.buffer_snapshot()] == ["复读", "复读", "打断"]
 
 
 def test_bot_in_streak_prevents_echo():
@@ -90,7 +89,7 @@ def test_bot_in_streak_prevents_echo():
     ))
 
     assert sent == []
-    assert echo.buffer_snapshot(GID) == []
+    assert echo.buffer_snapshot() == []
 
 
 def test_command_messages_are_ignored():
@@ -98,8 +97,8 @@ def test_command_messages_are_ignored():
 
     sent = asyncio.run(_feed(echo, ["复读", "/submit 复读", "复读", "复读"]))
 
-    assert sent == [(GID, [{"type": "text", "data": {"text": "复读"}}])]
-    assert echo.buffer_snapshot(GID) == []
+    assert sent == [(_TestConfig.current_group, ECHO_MESSAGE)]
+    assert echo.buffer_snapshot() == []
 
 
 def test_non_identical_messages_do_not_trigger():
@@ -116,7 +115,7 @@ def test_buffer_is_bounded():
     sent = asyncio.run(_feed(echo, [f"msg {i}" for i in range(8)]))
 
     assert sent == []
-    assert [entry.raw_text for entry in echo.buffer_snapshot(GID)] == [
+    assert [entry.raw_text for entry in echo.buffer_snapshot()] == [
         "msg 3",
         "msg 4",
         "msg 5",
@@ -137,8 +136,7 @@ def test_process_event_hooks_echo_for_non_command_group_messages():
                 patch("kouhai_bot.echo.send_group_msg", _send_group_msg):
             for i in range(3):
                 await process_event(_event("复读", user_id=i + 10), spawn_handlers=False)
-            await process_event(_event("复读", group_id=OTHER_GID), spawn_handlers=False)
 
     asyncio.run(_run())
 
-    assert sent == [(GID, [{"type": "text", "data": {"text": "复读"}}])]
+    assert sent == [(_TestConfig.current_group, ECHO_MESSAGE)]

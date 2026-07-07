@@ -10,6 +10,7 @@ import unicodedata
 from . import registry
 from .registry import CommandDef
 from ..config import get_config
+from .. import echo
 from ..eventlog import (
     EVENT_META_KEY,
     log_command_finished,
@@ -142,6 +143,14 @@ async def process_event(
     raw_text = _normalize_leading_command_junk(raw_text)
     if not raw_text:
         return
+
+    if msg_type == "group":
+        await echo.check_and_echo(
+            group_id=group_id,
+            user_id=user_id,
+            raw_text=raw_text,
+            message_id=message_id,
+        )
 
     # Only respond to commands (starting with /) or DMs
     if not raw_text.startswith("/"):

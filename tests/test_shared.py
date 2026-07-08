@@ -11,10 +11,14 @@ from kouhai_bot.llm_config import LlmProviderConfig
 from kouhai_bot.handlers.shared import (
     build_judge_messages,
     build_second_judge_messages,
+    _build_summary_prompt,
+    _build_summary_repair_prompt,
     call_chat_completion,
     get_judge_prompt,
     call_chat_completion_result,
+    judge_submission,
     judge_submission_result,
+    parse_json_with_llm_repair,
     robust_json_parse,
     summarize_problem,
     translate_editorial_to_zh,
@@ -43,7 +47,9 @@ def test_translate_editorial_to_zh_uses_structured_match_output():
             model_tag="🐳",
         )
 
-    with patch("kouhai_bot.handlers.shared.call_chat_completion_result", fake_call):
+    cfg = _openai_cfg(summary_timeout_sec=123)
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", fake_call):
         translated, tag, matched = asyncio.run(translate_editorial_to_zh(
             "Official editorial",
             pid="542D",
@@ -296,8 +302,11 @@ def test_task_entrypoints_are_blackbox_except_model_class_and_tag():
         text = "OK"
         if payload.get("response_format") == {"type": "json_object"}:
             user_content = payload["messages"][-1]["content"]
+            system_content = payload["messages"][0]["content"]
             if "official_editorial" in user_content:
                 text = json.dumps({"matched": "yes", "result": "中文题解"})
+            elif "summary" in system_content:
+                text = json.dumps({"summary": "OK"})
             else:
                 text = json.dumps({
                     "correct": False,
@@ -438,6 +447,7 @@ def test_call_chat_completion_stops_on_non_retryable_failure():
     sleep_mock.assert_not_awaited()
 
 
+
 def test_call_chat_completion_honors_retry_after_with_cap():
     cfg = _openai_cfg(
         llm_max_retries=1,
@@ -466,6 +476,92 @@ def test_call_chat_completion_honors_retry_after_with_cap():
     sleep_mock.assert_awaited_once_with(2.5)
 
 
+
+
+def test_parse_json_with_llm_repair_wraps_plain_text_summary():
+    calls = []
+
+    async def fake_call(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        return ChatCompletionResult(
+            text=json.dumps({"summary": "纯文本题意"}),
+            model_tag="『FIX』",
+        )
+
+    cfg = _openai_cfg(summary_timeout_sec=123)
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call):
+        parsed, tag = asyncio.run(parse_json_with_llm_repair(
+            "纯文本题意",
+            expected_schema='{ "summary": string }',
+            timeout=123,
+        ))
+
+    assert parsed == {"summary": "纯文本题意"}
+    assert tag == "『FIX』"
+    assert len(calls) == 1
+    assert calls[0]["task"] == "summary"
+    assert calls[0]["temperature"] == 0.0
+    assert calls[0]["timeout"] == 123
+    assert calls[0]["response_format"] == {"type": "json_object"}
+
+
+def test_parse_json_with_llm_repair_retries_until_valid_json():
+    outputs = ["still not json", json.dumps({"ok": True})]
+
+    async def fake_call(messages, **kwargs):
+        return ChatCompletionResult(text=outputs.pop(0), model_tag="『FIX』")
+
+    cfg = _openai_cfg(summary_timeout_sec=123)
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call):
+        parsed, tag = asyncio.run(parse_json_with_llm_repair(
+            "bad",
+            expected_schema='{ "ok": boolean }',
+            max_attempts=3,
+        ))
+
+    assert parsed == {"ok": True}
+    assert tag == "『FIX』"
+    assert outputs == []
+
+
+def test_judge_submission_repairs_malformed_json_response():
+    async def fake_judge_result(*args, **kwargs):
+        return ChatCompletionResult(text='正确，应判 true', model_tag="『J』")
+
+    async def fake_repair(messages, **kwargs):
+        return ChatCompletionResult(
+            text=json.dumps({"correct": True, "reason": "格式已修复", "reply": "", "reaction": ""}),
+            model_tag="『FIX』",
+        )
+
+    cfg = _openai_cfg(summary_timeout_sec=123)
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.judge_submission_result", side_effect=fake_judge_result), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_repair):
+        parsed = asyncio.run(judge_submission("problem", "solution"))
+
+    assert parsed["correct"] is True
+    assert parsed["reason"] == "格式已修复"
+
+
+def test_summary_prompt_lists_unicode_notation_inventory():
+    prompt = _build_summary_prompt("stmt", "input", "limits")
+    repair = _build_summary_repair_prompt("stmt", "input", "limits", "bad", ["issue"])
+
+    for text in (prompt, repair):
+        assert "Unicode 角标弹药表" in text
+        assert "₀₁₂₃₄₅₆₇₈₉" in text
+        assert "⁰¹²³⁴⁵⁶⁷⁸⁹" in text
+        assert "ᵢ ⱼ ₖ" in text
+        assert "ᵃ ᵇ ᶜ" in text
+        assert "aᵢ₊₁" in text
+        assert "10¹⁸" in text
+        assert "10⁹+7" in text
+        assert "端点下标不确定时优先写成自然语言" in text
+
+
 def test_summarize_problem_uses_configured_timeout():
     cfg = _openai_cfg(summary_timeout_sec=321)
 
@@ -475,13 +571,126 @@ def test_summarize_problem_uses_configured_timeout():
                              response_format=None, thinking=None):
         assert task == "summary"
         assert timeout == 321
-        return ChatCompletionResult(text="summary ok", model_tag="🐳")
+        assert response_format == {"type": "json_object"}
+        assert temperature == 0.4
+        return ChatCompletionResult(text=json.dumps({"summary": "summary ok"}), model_tag="🐳")
 
     with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
             patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
         summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
         assert summary == "summary ok"
         assert tag == "🐳"
+
+
+def test_summarize_problem_repairs_solution_leak_and_format_sections():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+    calls = []
+    bad = (
+        "给定数组 a。\n输入：第一行 n。\n输出：答案。"
+        "解题思路是枚举每个位置即可，复杂度 O(n)。"
+    )
+    fixed = "给定长度为 n 的数组 a，要求计算满足题目条件的答案并输出。n≤10⁵，时限 1s。"
+
+    async def fake_call_chat(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        text = bad if len(calls) == 1 else fixed
+        tag = "bad" if len(calls) == 1 else "fixed"
+        return ChatCompletionResult(text=json.dumps({"summary": text}), model_tag=tag)
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
+        summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
+
+    assert summary == fixed
+    assert tag == "fixed"
+    assert len(calls) == 2
+    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[1]["temperature"] == 0.2
+    assert "bad_summary" in calls[1]["messages"][-1]["content"]
+
+
+def test_summarize_problem_invalid_json_returns_none():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+
+    async def fake_call_chat(messages, **kwargs):
+        return ChatCompletionResult(text="plain text summary", model_tag="🐳")
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
+        summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
+
+    assert summary is None
+    assert tag == ""
+
+
+def test_summarize_problem_repairs_missing_time_and_memory_limits():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+    calls = []
+    first = "给定长度为 n 的数组 a，要求输出答案。n≤10⁵。"
+    fixed = "给定长度为 n 的数组 a，要求输出答案。n≤10⁵，时限2s，内存256MB。"
+
+    async def fake_call_chat(messages, **kwargs):
+        calls.append(messages[-1]["content"])
+        text = first if len(calls) == 1 else fixed
+        return ChatCompletionResult(text=json.dumps({"summary": text}), model_tag="🐳")
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
+        summary, tag = asyncio.run(summarize_problem(
+            "stmt",
+            "input",
+            "Time: 2 seconds, Memory: 256 megabytes",
+        ))
+
+    assert summary == fixed
+    assert tag == "🐳"
+    assert len(calls) == 2
+    assert "summary omits time limit" in calls[1]
+    assert "summary omits memory limit" in calls[1]
+
+
+def test_summarize_problem_repairs_ordinary_subscript_clutter_but_allows_complex_formula():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+    calls = []
+    clutter = "给定 a_i、b_i、c_i、d_i、e_i、f_i，要求对每个 i 输出答案。"
+    repaired = "给定每个位置的若干参数，要求逐位置计算并输出答案。"
+
+    async def fake_call_chat(messages, **kwargs):
+        calls.append(messages[-1]["content"])
+        text = clutter if len(calls) == 1 else repaired
+        return ChatCompletionResult(text=json.dumps({"summary": text}), model_tag="🐳")
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
+        summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
+
+    assert summary == repaired
+    assert tag == "🐳"
+    assert len(calls) == 2
+
+    simple = "给定 a_i、a_n、1e18 和 10^9+7。"
+
+    async def fake_simple_call(messages, **kwargs):
+        return ChatCompletionResult(text=json.dumps({"summary": simple}), model_tag="🐳")
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_simple_call):
+        summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
+
+    assert summary == "给定 aᵢ、aₙ、10¹⁸ 和 10⁹+7。"
+    assert tag == "🐳"
+
+    complex_formula = r"定义 f(x)=\sum_{i=1}^{n} floor(x / p_i)，要求对每个询问计算满足条件的最小 x。"
+
+    async def fake_formula_call(messages, **kwargs):
+        return ChatCompletionResult(text=json.dumps({"summary": complex_formula}), model_tag="🐳")
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_formula_call):
+        summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
+
+    assert summary == complex_formula
+    assert tag == "🐳"
 
 
 def test_dashscope_provider_payload_enables_stream():
@@ -543,13 +752,47 @@ def test_streaming_provider_uses_default_idle_timeout():
     assert calls == [120]
 
 
-def test_zenmux_fable_payload_uses_reasoning_effort_without_generic_thinking():
+
+def test_zenmux_minimax_m3_payload_accepts_adaptive_thinking():
     provider = LlmProviderConfig(
-        name="fable",
+        name="minimax-m3",
         api_key="sk-test",
         base_url="https://zenmux.ai/api/v1",
-        model="anthropic/claude-fable-5-free",
+        model="minimax/minimax-m3",
+    )
+    cfg = _openai_cfg(llm_general_providers=[provider])
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["payload"].copy())
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion_result(
+            [{"role": "user", "content": "Reply OK."}],
+            task="summary",
+            thinking={"type": "adaptive"},
+        ))
+
+    assert result.text == "OK"
+    assert calls[0]["model"] == "minimax/minimax-m3"
+    assert calls[0]["thinking"] == {"type": "adaptive"}
+    assert "enable_thinking" not in calls[0]
+    assert "reasoning_effort" not in calls[0]
+
+
+def test_provider_payload_options_control_thinking_temperature_and_extra_body():
+    provider = LlmProviderConfig(
+        name="custom-zenmux",
+        api_key="sk-test",
+        base_url="https://zenmux.ai/api/v1",
+        model="provider/custom-model",
         reasoning_effort="max",
+        send_thinking=False,
+        temperature=1.0,
+        extra_body={"service_tier": "priority"},
     )
     cfg = _openai_cfg(llm_smart_providers=[provider])
     calls = []
@@ -573,13 +816,46 @@ def test_zenmux_fable_payload_uses_reasoning_effort_without_generic_thinking():
         ))
 
     assert result.text == "{\"ok\":true}"
-    assert calls[0]["model"] == "anthropic/claude-fable-5-free"
+    assert calls[0]["model"] == "provider/custom-model"
     assert calls[0]["response_format"] == {"type": "json_object"}
     assert calls[0]["reasoning_effort"] == "max"
-    assert calls[0]["temperature"] == 1
+    assert calls[0]["temperature"] == 1.0
+    assert calls[0]["service_tier"] == "priority"
     assert "thinking" not in calls[0]
     assert "enable_thinking" not in calls[0]
     assert "stream" not in calls[0]
+
+
+def test_zenmux_grok45free_payload_uses_xhigh_reasoning_and_tag():
+    provider = LlmProviderConfig(
+        name="grok45free",
+        api_key="sk-test",
+        base_url="https://zenmux.ai/api/v1",
+        model="x-ai/grok-4.5-free",
+        reasoning_effort="xhigh",
+        model_tag="『∅』",
+    )
+    cfg = _openai_cfg(llm_smart_providers=[provider])
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["payload"].copy())
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion_result(
+            [{"role": "user", "content": "Reply OK."}],
+            task="judge",
+            thinking={"type": "enabled"},
+        ))
+
+    assert result.text == "OK"
+    assert result.model_tag == "『∅』"
+    assert calls[0]["model"] == "x-ai/grok-4.5-free"
+    assert calls[0]["reasoning_effort"] == "xhigh"
+    assert calls[0]["thinking"] == {"type": "enabled"}
 
 
 def test_non_dashscope_provider_payload_does_not_enable_stream():
@@ -627,6 +903,36 @@ def test_explicit_stream_provider_payload_enables_stream():
 
     assert result == "OK"
     assert calls[0]["stream"] is True
+
+
+def test_zenmux_minimax_payload_does_not_use_fable_temperature_special_case():
+    provider = LlmProviderConfig(
+        name="minimax-m3",
+        api_key="sk-test",
+        base_url="https://zenmux.ai/api/v1",
+        model="minimax/minimax-m3",
+        reasoning_effort="high",
+    )
+    cfg = _openai_cfg(llm_general_providers=[provider])
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["payload"].copy())
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion(
+            [{"role": "user", "content": "Reply with exactly OK."}],
+            task="summary",
+        ))
+
+    assert result == "OK"
+    assert calls[0]["model"] == "minimax/minimax-m3"
+    assert calls[0]["reasoning_effort"] == "high"
+    assert calls[0]["temperature"] == 0.7
+
 
 
 def test_streaming_chat_completion_uses_sock_read_idle_timeout():

@@ -29,13 +29,13 @@ llm:
 
   # Smart-model fallback queue — judge/review use this list. Order matters.
   smart_model:
-    # ── Optional primary: ZenMux/Fable (OpenAI-compatible) ──
-    # - name: fable
+    # ── Optional primary: ZenMux Grok 4.5 Free (OpenAI-compatible) ──
+    # - name: grok45free
     #   api_key: "..."
     #   base_url: "https://zenmux.ai/api/v1"
-    #   model: "anthropic/claude-fable-5-free"
-    #   reasoning_effort: "max"
-    #   model_tag: "『Fable』"
+    #   model: "x-ai/grok-4.5-free"
+    #   reasoning_effort: "xhigh"  # highest accepted by this ZenMux model
+    #   model_tag: "『∅』"
 
     # ── Primary: OpenAI-compatible ──
     - name: openai
@@ -63,6 +63,13 @@ llm:
   # General-model fallback queue — clarify/summary/editorial and other tasks use this list.
   # This queue can use completely different providers/models from smart_model.
   general_model:
+    # Optional stronger summary/general provider: ZenMux MiniMax M3 (OpenAI-compatible)
+    # - name: minimax-m3
+    #   api_key: "..."
+    #   base_url: "https://zenmux.ai/api/v1"
+    #   model: "minimax/minimax-m3"
+    #   model_tag: "『M3』"
+
     - name: qwen
       api_key: "..."
       base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"

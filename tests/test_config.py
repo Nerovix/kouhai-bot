@@ -150,6 +150,28 @@ def test_provider_stream_loads_from_yaml(monkeypatch, tmp_path):
     assert cfg.llm_smart_providers[0].stream is True
 
 
+def test_provider_payload_options_load_from_yaml(monkeypatch, tmp_path):
+    data = yaml.safe_load(_make_yaml())
+    provider = data["llm"]["smart_model"][0]
+    provider["send_thinking"] = False
+    provider["temperature"] = 1
+    provider["extra_body"] = {"service_tier": "priority"}
+    cfg = _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+
+    loaded = cfg.llm_smart_providers[0]
+    assert loaded.send_thinking is False
+    assert loaded.temperature == 1.0
+    assert loaded.extra_body == {"service_tier": "priority"}
+
+
+def test_provider_extra_body_must_be_mapping(monkeypatch, tmp_path):
+    data = yaml.safe_load(_make_yaml())
+    data["llm"]["smart_model"][0]["extra_body"] = "bad"
+
+    with pytest.raises(RuntimeError, match="extra_body"):
+        _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+
+
 def test_current_group_loaded(monkeypatch, tmp_path):
     cfg = _from_yaml(_make_yaml(current_group=123456), monkeypatch, tmp_path)
     assert cfg.current_group == 123456

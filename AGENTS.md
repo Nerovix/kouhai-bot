@@ -48,8 +48,9 @@ NapCat (QQ) ──WS──> worker.py
   DashScope/阿里云百炼 providers are called with HTTP+SSE streaming to avoid the
   10-minute synchronous HTTP limit; providers with `stream: true` do the same;
   other providers use the normal JSON response path.
-  `thinking` and `reasoning_effort` are sent unconditionally; unsupported
-  fields are silently ignored by upstream APIs.
+  `reasoning_effort`, `thinking`, temperature override, and provider-specific
+  extra body fields are controlled per provider; unsupported fields may be ignored
+  or rejected by upstream APIs.
 - **Official CF tutorials**: Scraped editorials live under `{data_dir}/tutorials/{pid}.json`
   (see `tools/cf_tutorial_agent.py`; low-level CF HTML helpers live in `tools/scrape_cf_tutorial.py`). Runtime extraction is in `tutorials.py`. On the
   On **new problem** (`do_daily_post` / `/newproblem`), `schedule_prefetch_editorial(pid)`
@@ -106,8 +107,11 @@ Each provider in `llm.smart_model` or `llm.general_model`:
 | `api_key` | — | API key (**required**) |
 | `base_url` | `https://api.openai.com/v1` | Base URL for chat completions |
 | `model` | — | Model name for this provider entry (**required**) |
-| `reasoning_effort` | — | OpenAI reasoning effort: `minimal`/`low`/`medium`/`high`/`xhigh` |
+| `reasoning_effort` | — | Provider reasoning effort (e.g. `minimal`/`low`/`medium`/`high`/`xhigh`/`max`, if supported upstream) |
 | `stream` | `false` | Send `stream=true` and read SSE chunks for this provider; DashScope/阿里云百炼 streams automatically |
+| `send_thinking` | `true` | Whether to pass handler-provided `thinking` payloads to this provider |
+| `temperature` | — | Optional provider-level temperature override; omit to use the task's requested temperature |
+| `extra_body` | `{}` | Extra JSON fields merged into this provider's chat-completions request body |
 | `model_tag` | `""` | Short string appended to every LLM-generated user message (judge/clarify/review/summary/editorial); empty means no tag |
 
 #### `qwen` section
@@ -281,11 +285,13 @@ llm:
       model: "deepseek-v4-chat"
 ```
 
-All providers receive the same base request payload. Non-applicable fields (e.g.
-`reasoning_effort` on DeepSeek, `thinking` on OpenAI) are silently ignored by the
-upstream API. `thinking={"type": "enabled"}` is always sent when the judge handler
-requests it — it's an OpenAI-compatible extension that DeepSeek supports.
-DashScope/阿里云百炼 providers (detected by `dashscope.aliyuncs.com` base URL or
+All providers receive the same base request payload, then provider-level controls
+can add or suppress optional fields. `reasoning_effort` is sent when configured and
+not disabled by the caller. `thinking={"type": "enabled"}` is sent only when the
+handler requests it and the provider has `send_thinking` enabled. Use `temperature`
+or `extra_body` for gateway-specific requirements instead of adding per-model
+branches in `llm.py`. DashScope/阿里云百炼 providers (detected by
+`dashscope.aliyuncs.com` base URL or
 `aliyun`/`bailian`/`dashscope` provider name) and providers with `stream: true`
 additionally receive
 `stream=true`; `llm.py` reads the SSE `data:` stream and concatenates

@@ -94,6 +94,13 @@ You may NOT invent:
 - key equality/inequality/tie-break logic
 - nontrivial complexity optimization
 
+Special caution for optimization/greedy submissions:
+- Judge the algorithm the user actually wrote, not the closest known correct editorial algorithm.
+- Do not repair "take the current largest interval/cost and split it in the middle" into "take the maximum marginal gain of adding one more operation".
+- Do not repair step-by-step heap simulation into binary search over a threshold, batching, or closed-form counting.
+- If the answer or number of operations can be huge and the user only describes adding/popping one operation at a time, reject unless they explicitly give a batching or logarithmic optimization.
+- Before accepting a greedy idea, check whether the stated priority/comparison key is the same quantity the objective actually optimizes.
+
 ---
 
 ## Minimal decision pipeline (must follow)

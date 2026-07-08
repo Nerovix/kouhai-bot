@@ -105,6 +105,13 @@ def _chunk_text(text: str, chunk_size: int) -> list[str]:
     return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
 
 
+def _log_preview(value: object, limit: int = 240) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
 CLARIFY_PROMPT = """你是一个算法竞赛群的选手，群友对当前的每日一题有疑问，需要你帮他澄清题目细节。
 
 ## 你的任务
@@ -778,18 +785,52 @@ class GroupCoordinator:
 
         history = await self._load_user_problem_history_for_request(req, pid)
         await _react_req(req, random.choice(["128064", "289"]))
+        logger.info(
+            "[group_%s] first judge start pid=%s seq=%s user=%s history_items=%s",
+            req.group_id,
+            pid,
+            req.seq,
+            req.user_id,
+            len(history),
+        )
         result = await _judge_llm_limited(problem_text, req.payload, history)
         if not result.text:
+            logger.warning(
+                "[group_%s] first judge failed pid=%s seq=%s provider=%s model=%s failure=%s",
+                req.group_id,
+                pid,
+                req.seq,
+                result.provider_name,
+                result.model,
+                result.failure_kind,
+            )
             return {"kind": result.failure_kind or "error", "pid": pid}
         parsed = robust_json_parse(result.text)
+        logger.info(
+            "[group_%s] first judge result pid=%s seq=%s provider=%s model=%s correct=%s reaction=%s reason=%s",
+            req.group_id,
+            pid,
+            req.seq,
+            result.provider_name,
+            result.model,
+            parsed.get("correct"),
+            parsed.get("reaction", ""),
+            _log_preview(parsed.get("reason", "")),
+        )
         if parsed.get("correct", False) and parsed.get("reaction", "") != "123":
             editorial = get_official_editorial(pid) if has_cached_editorial_zh(pid) else None
-            first_provider = result.provider_name
-            first_model = result.model
-            if editorial and first_provider and first_model:
+            if editorial:
                 source = "\n".join(
                     part for part in [editorial.tutorial_title, editorial.tutorial_url]
                     if part
+                )
+                logger.info(
+                    "[group_%s] second judge start pid=%s seq=%s user=%s source=%s",
+                    req.group_id,
+                    pid,
+                    req.seq,
+                    req.user_id,
+                    _log_preview(source),
                 )
                 second = await _second_judge_llm_limited(
                     problem_text,
@@ -798,12 +839,21 @@ class GroupCoordinator:
                     parsed,
                     editorial.text,
                     source,
-                    provider_name=first_provider,
-                    model=first_model,
                 )
                 if second.text:
                     second_parsed = robust_json_parse(second.text)
                     if "correct" in second_parsed:
+                        logger.info(
+                            "[group_%s] second judge result pid=%s seq=%s provider=%s model=%s correct=%s reaction=%s reason=%s",
+                            req.group_id,
+                            pid,
+                            req.seq,
+                            second.provider_name,
+                            second.model,
+                            second_parsed.get("correct"),
+                            second_parsed.get("reaction", ""),
+                            _log_preview(second_parsed.get("reason", "")),
+                        )
                         return {
                             "kind": "judge",
                             "pid": pid,
@@ -813,12 +863,16 @@ class GroupCoordinator:
                             "second_judge": True,
                         }
                 logger.warning(
-                    "[group_%s] second judge unavailable or malformed for %s via provider=%s model=%s; keeping first verdict",
+                    "[group_%s] second judge unavailable or malformed for %s seq=%s provider=%s model=%s failure=%s has_text=%s; blocking first-pass correct verdict",
                     req.group_id,
                     pid,
-                    first_provider,
-                    first_model,
+                    req.seq,
+                    second.provider_name,
+                    second.model,
+                    second.failure_kind,
+                    bool(second.text),
                 )
+                return {"kind": second.failure_kind or "service_unavailable", "pid": pid}
         return {"kind": "judge", "pid": pid, "result": parsed, "model_tag": result.model_tag}
 
 

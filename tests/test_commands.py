@@ -281,6 +281,40 @@ async def _mock_second_judge_result(
     )
 
 
+def _judge_payload(messages):
+    return json.loads(messages[-1]["content"])
+
+
+def _payload_submission(payload):
+    return payload.get("current_submission", payload.get("submission", ""))
+
+
+def _payload_dialogue(payload):
+    return payload.get("dialogue") or payload.get("history") or []
+
+
+def _dialogue_has_user_claim(dialogue, content, verdict=None, kind=None):
+    for item in dialogue:
+        if item.get("role", "user") != "user":
+            continue
+        if item.get("content") != content:
+            continue
+        if verdict is not None and item.get("verdict", item.get("result")) != verdict:
+            continue
+        if kind is not None and item.get("kind", item.get("type")) != kind:
+            continue
+        return True
+    return False
+
+
+def _dialogue_has_assistant_text(dialogue, content):
+    return any(
+        item.get("role") == "assistant"
+        and item.get("content") == content
+        for item in dialogue
+    )
+
+
 def _wrap_llm_result(fn, failure_kind="service_unavailable"):
     async def _wrapped(*args, **kwargs):
         result = await fn(*args, **kwargs)
@@ -641,8 +675,8 @@ def test_submit_second_judge_overturns_correct_verdict():
     with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
         saved = json.load(f)
     assert len(_second_judge_calls) == 1
-    assert _second_judge_calls[0]["provider_name"] == "deepseek"
-    assert _second_judge_calls[0]["model"] == "deepseek-v4-pro"
+    assert _second_judge_calls[0]["provider_name"] == ""
+    assert _second_judge_calls[0]["model"] == ""
     assert saved["solves"] == []
     records = saved["user_submissions"][str(UID)]
     assert records[-1]["result"] == "incorrect"
@@ -652,7 +686,7 @@ def test_submit_second_judge_overturns_correct_verdict():
     print("✅ submit: second judge can overturn correct verdict")
 
 
-def test_submit_second_judge_failure_keeps_first_correct_verdict():
+def test_submit_second_judge_failure_blocks_first_correct_verdict():
     _reset_state()
     _setup_problem()
     _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
@@ -681,12 +715,12 @@ def test_submit_second_judge_failure_keeps_first_correct_verdict():
     with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
         saved = json.load(f)
     assert len(_second_judge_calls) == 1
-    assert len(saved["solves"]) == 1
+    assert saved["solves"] == []
     records = saved["user_submissions"][str(UID)]
-    assert records[-1]["result"] == "correct"
-    assert "模型服务" not in _last_text()
+    assert records[-1]["result"] == "service_unavailable"
+    assert "模型服务出故障了" in _last_text()
     _cleanup()
-    print("✅ submit: second judge failure keeps first correct verdict")
+    print("✅ submit: second judge failure blocks first correct verdict")
 
 
 def test_submit_correct_uses_fresh_top5_nicknames_and_points():
@@ -1714,7 +1748,7 @@ def test_review_after_pending_submit_uses_snapshotted_solved_problem():
         content = messages[-1]["content"]
         if content.startswith("{"):
             payload = json.loads(content)
-            if payload["submission"] == "solve now":
+            if _payload_submission(payload) == "solve now":
                 await asyncio.wait_for(release_submit.wait(), timeout=0.5)
                 return json.dumps({"correct": True, "reason": "", "reply": "", "reaction": ""})
             return json.dumps({"correct": False, "reason": "wrong", "reply": "OTHER"})
@@ -3060,8 +3094,8 @@ def test_submit_parallel_replies_follow_completion_order():
 
     async def _ordered_deepseek(messages, model="", task="", temperature=0.7, timeout=120,
                                 response_format=None, thinking=None):
-        payload = json.loads(messages[-1]["content"])
-        submission = payload["submission"]
+        payload = _judge_payload(messages)
+        submission = _payload_submission(payload)
         if submission == "first solution":
             await allow_first.wait()
             return json.dumps({"correct": False, "reason": "R1", "reply": "FIRST"})
@@ -3106,8 +3140,8 @@ def test_submit_parallel_late_wrong_results_are_reused_after_first_solve():
 
     async def _mixed_deepseek(messages, model="", task="", temperature=0.7, timeout=120,
                               response_format=None, thinking=None):
-        payload = json.loads(messages[-1]["content"])
-        submission = payload["submission"]
+        payload = _judge_payload(messages)
+        submission = _payload_submission(payload)
         if submission == "first correct":
             await allow_first.wait()
             return json.dumps({"correct": True, "reason": "ok", "reply": ""})
@@ -3167,8 +3201,8 @@ def test_submit_parallel_late_correct_result_does_not_update_scoreboard_twice():
 
     async def _both_correct_deepseek(messages, model="", task="", temperature=0.7, timeout=120,
                                      response_format=None, thinking=None):
-        payload = json.loads(messages[-1]["content"])
-        submission = payload["submission"]
+        payload = _judge_payload(messages)
+        submission = _payload_submission(payload)
         if submission == "first correct":
             await allow_first.wait()
             return json.dumps({"correct": True, "reason": "first ok", "reply": ""})
@@ -3218,19 +3252,19 @@ def test_submit_same_user_includes_previous_submit_history():
 
     async def _history_deepseek(messages, model="", task="", temperature=0.7, timeout=120,
                                 response_format=None, thinking=None):
-        payload = json.loads(messages[-1]["content"])
-        submission = payload["submission"]
-        history = payload["history"] or []
+        payload = _judge_payload(messages)
+        submission = _payload_submission(payload)
+        history = _payload_dialogue(payload)
         if submission == "first solution":
             assert history == [], f"First submit should have empty history, got: {history}"
             return json.dumps({"correct": False, "reason": "R1", "reply": "FIRST"})
         if submission == "second solution":
-            assert any(
-                item.get("content") == "first solution"
-                and item.get("reply") == "FIRST"
-                and item.get("problem") == PID
-                for item in history
-            ), f"Second submit missed first submit history: {history}"
+            assert _dialogue_has_user_claim(history, "first solution", verdict="incorrect"), \
+                f"Second submit missed first submit user claim: {history}"
+            assert (
+                _dialogue_has_assistant_text(history, "FIRST")
+                or any(item.get("reply") == "FIRST" for item in history)
+            ), f"Second submit missed first submit feedback: {history}"
             return json.dumps({"correct": False, "reason": "R2", "reply": "SECOND"})
         return json.dumps({"correct": False, "reason": "RX", "reply": "OTHER"})
 
@@ -3262,9 +3296,9 @@ def test_submit_same_user_later_submit_drops_unanswered_previous_submit():
 
     async def _drop_deepseek(messages, model="", task="", temperature=0.7, timeout=120,
                              response_format=None, thinking=None):
-        payload = json.loads(messages[-1]["content"])
-        submission = payload["submission"]
-        history = payload["history"] or []
+        payload = _judge_payload(messages)
+        submission = _payload_submission(payload)
+        history = _payload_dialogue(payload)
         if submission == "first solution":
             first_started.set()
             try:
@@ -3272,14 +3306,13 @@ def test_submit_same_user_later_submit_drops_unanswered_previous_submit():
             finally:
                 first_cancelled.set()
         if submission == "second solution":
-            superseded = [
-                item.get("content") == "first solution"
-                and item.get("result") == "superseded"
-                and item.get("problem") == PID
+            assert sum(
+                1
                 for item in history
-            ]
-            assert sum(1 for matched in superseded if matched) == 1, \
-                f"Dropped submit should remain visible once as superseded context: {history}"
+                if item.get("role", "user") == "user"
+                and item.get("content") == "first solution"
+                and item.get("verdict", item.get("result")) == "superseded"
+            ) == 1, f"Dropped submit should remain visible once as superseded context: {history}"
             return json.dumps({"correct": False, "reason": "R2", "reply": "SECOND"})
         return json.dumps({"correct": False, "reason": "RX", "reply": "OTHER"})
 
@@ -3349,8 +3382,8 @@ def test_clear_drops_unanswered_same_user_submit():
 
     async def _slow_deepseek(messages, model="", task="", temperature=0.7, timeout=120,
                              response_format=None, thinking=None):
-        payload = json.loads(messages[-1]["content"])
-        if payload["submission"] == "first solution":
+        payload = _judge_payload(messages)
+        if _payload_submission(payload) == "first solution":
             first_started.set()
             await asyncio.Event().wait()
         return json.dumps({"correct": False, "reason": "RX", "reply": "OTHER"})
@@ -3411,8 +3444,8 @@ def test_dropping_unanswered_submit_unblocks_score_resolution():
 
     async def _mixed_deepseek(messages, model="", task="", temperature=0.7, timeout=120,
                               response_format=None, thinking=None):
-        payload = json.loads(messages[-1]["content"])
-        submission = payload["submission"]
+        payload = _judge_payload(messages)
+        submission = _payload_submission(payload)
         if submission == "first maybe correct":
             first_started.set()
             await asyncio.Event().wait()
@@ -3550,11 +3583,11 @@ def test_submit_same_user_includes_previous_clarify_history():
         content = messages[-1]["content"]
         if content.startswith("{"):
             payload = json.loads(content)
-            history = payload["history"] or []
+            history = _payload_dialogue(payload)
             assert any(
-                item.get("result") in {"clarify", "pending"}
+                item.get("role", "user") == "user"
+                and item.get("verdict", item.get("result")) in {"clarify", "pending"}
                 and item.get("content") == "输入格式是啥"
-                and item.get("problem") == PID
                 for item in history
             ), f"Submit missed pending clarify context: {history}"
             return json.dumps({"correct": False, "reason": "R1", "reply": "WITH CLARIFY"})
@@ -3599,8 +3632,8 @@ def test_submit_parallel_different_groups_do_not_block():
 
     async def _grouped_deepseek(messages, model="", task="", temperature=0.7, timeout=120,
                                 response_format=None, thinking=None):
-        payload = json.loads(messages[-1]["content"])
-        submission = payload["submission"]
+        payload = _judge_payload(messages)
+        submission = _payload_submission(payload)
         if submission == "slow group1":
             await release_slow.wait()
             return json.dumps({"correct": False, "reason": "slow", "reply": "SLOW"})

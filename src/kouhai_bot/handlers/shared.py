@@ -701,16 +701,82 @@ def get_judge_prompt() -> str:
     return "You are a competitive programming judge."
 
 
+def _dialogue_kind(item_type: str, result: str) -> str:
+    if item_type in {"submit", "clarify", "review"}:
+        return item_type
+    if result in {"clarify", "review"}:
+        return result
+    return item_type or "interaction"
+
+
+def _history_dialogue(history: list[dict] | None) -> list[dict]:
+    dialogue: list[dict] = []
+    for turn, item in enumerate(history or [], 1):
+        item_type = str(item.get("type", "") or "")
+        result = str(item.get("result", "") or "")
+        kind = _dialogue_kind(item_type, result)
+        content = str(item.get("content", "") or "").strip()
+        if content:
+            user_turn = {
+                "turn": len(dialogue) + 1,
+                "role": "user",
+                "kind": kind,
+                "content": content,
+                "note": "user_claim",
+            }
+            if result:
+                user_turn["verdict"] = result
+            dialogue.append(user_turn)
+
+        reply = str(item.get("reply", "") or "").strip()
+        if reply:
+            dialogue.append({
+                "turn": len(dialogue) + 1,
+                "role": "assistant",
+                "kind": f"{kind}_feedback",
+                "content": reply,
+                "note": "bot_feedback_not_user_claim",
+            })
+
+        reason = str(item.get("reason", "") or "").strip()
+        if reason and not reply:
+            dialogue.append({
+                "turn": len(dialogue) + 1,
+                "role": "assistant",
+                "kind": f"{kind}_verdict_reason",
+                "content": reason,
+                "note": "bot_reason_not_user_claim",
+            })
+    return dialogue
+
+
+def build_judge_context(
+    problem_text: str,
+    submission: str,
+    history: list[dict] | None = None,
+) -> dict:
+    return {
+        "task": "first_pass_judge_complete_solution",
+        "problem_statement": problem_text,
+        "current_submission": submission,
+        "dialogue": _history_dialogue(history),
+        "dialogue_rules": [
+            "role=user entries are user claims and may complete the current submission.",
+            "role=assistant entries are bot feedback or verdict reasons; use them only as context, not as user-stated ideas.",
+            "The current_submission is the claim being judged now.",
+        ],
+    }
+
+
 def build_judge_messages(
     problem_text: str,
     submission: str,
     history: list[dict] | None = None,
 ) -> list[dict]:
-    user_msg = json.dumps({
-        "problem": problem_text,
-        "submission": submission,
-        "history": history,
-    }, ensure_ascii=False)
+    user_msg = json.dumps(
+        build_judge_context(problem_text, submission, history),
+        ensure_ascii=False,
+    )
     return [
         {"role": "system", "content": get_judge_prompt()},
         {"role": "user", "content": user_msg},
@@ -729,12 +795,31 @@ def build_second_judge_messages(
     if len(editorial_body) > 18000:
         editorial_body = editorial_body[:18000] + "\n...(官方题解已截断)"
     user_msg = json.dumps({
-        "problem": problem_text,
-        "submission": submission,
-        "history": history,
-        "first_judge_result": first_judge_result,
-        "official_editorial": editorial_body,
-        "official_editorial_source": editorial_source,
+        "task": "second_review_correctness_only",
+        "problem_statement": problem_text,
+        "current_submission": submission,
+        "dialogue": _history_dialogue(history),
+        "dialogue_rules": [
+            "role=user entries are user claims and may complete the current submission.",
+            "role=assistant entries are bot feedback or verdict reasons; they are not user-stated ideas.",
+            "The current_submission is the claim whose correctness is being reviewed.",
+        ],
+        "first_pass": {
+            "verdict": first_judge_result.get("correct"),
+            "reason_to_audit": first_judge_result.get("reason", ""),
+            "reply": first_judge_result.get("reply", ""),
+            "reaction": first_judge_result.get("reaction", ""),
+        },
+        "official_reference": {
+            "source": editorial_source,
+            "editorial": editorial_body,
+        },
+        "decision_focus": [
+            "Do not judge completeness in second review.",
+            "Do not require matching the official editorial.",
+            "Reject if the user's actual algorithm is wrong or too slow.",
+            "Reject if first_pass.reason repairs the user's claim into a different algorithm.",
+        ],
     }, ensure_ascii=False)
     return [
         {"role": "system", "content": (
@@ -742,18 +827,24 @@ def build_second_judge_messages(
             "一审 bot 的完整 JSON 判定，以及爬取到的 Codeforces 官方题解。"
             "一审 bot 做出判定时看不到官方题解，只能基于题面、用户做法和历史上下文独立推理；"
             "因此一审判为正确并不代表它已被题解验证过。"
-            "你的任务是复核一审判为正确的做法是否真的正确且足够完整。\n\n"
+            "你的任务是复核一审判为正确的做法在正确性上是否站得住，而不是重新审查完整性。\n\n"
             "判定原则：\n"
             "1) 只输出 JSON 对象，字段为 correct、reason、reply、reaction。\n"
-            "2) 如果用户做法正确且完整，即使和官方题解不同，也必须判 correct=true。"
-            "算法题可能有多种完全不同的正确解法，不要把题解做法当成唯一标准。\n"
-            "3) 如果用户做法存在关键漏洞、复杂度不满足、遗漏必要证明或处理不了边界，判 correct=false，"
+            "2) 二审不是题解匹配器。如果用户做法在逻辑上正确，即使和官方题解完全不同、没有使用题解算法，也必须判 correct=true。\n"
+            "3) 二审不因普通实现细节、证明细节、代码细节、命名不严谨或展开不充分而判错；这些完整性问题已经由一审处理。"
+            "只在用户实际说出的核心策略、关键比较量、复杂度主张或边界处理会导致 WA/TLE 时，才判 correct=false。\n"
+            "4) 如果用户做法存在关键漏洞、复杂度不满足、必要边界处理错误，或与题解揭示的关键性质直接冲突，判 correct=false，"
             "reason 写清楚技术原因，reply 写给用户看的简短纠错提示。\n"
-            "4) 爬取到的题解可能与本题不对应，或只是不完整片段。若题解和题面明显冲突、题解中的变量/目标/结论"
-            "对不上本题，请忽略题解，改为基于题面、用户做法和历史上下文独立复核。\n"
-            "5) 不要因为用户没有贴代码、没有展开所有实现细节就判错；只要算法思路、关键不变量、复杂度和边界处理"
-            "足以支持 AC，就应判 correct=true。\n"
-            "6) 一审可能被用户错误说法带偏。你必须独立判断，不要默认赞同一审。\n\n"
+            "5) 一审可能被用户错误说法带偏。你必须独立判断，不要默认赞同一审。\n"
+            "6) 必须区分“用户实际写出的做法”和“你替用户补全后的正确做法”。"
+            "如果需要把用户的关键词重新解释成题解里的另一个关键概念，或补上用户没有说明的关键贪心依据、DP 状态、"
+            "比较函数、复杂度优化、边界处理，才能让做法正确，应判 correct=false。\n"
+            "7) 对优化/贪心题要特别检查优先级或比较函数是否写对。"
+            "不要把“维护当前最大区间/最大代价并从中间截断”自动修补成“维护新增一个操作的边际收益”；"
+            "不要把朴素逐次模拟自动修补成二分阈值、批量计数或数学求和。"
+            "若答案规模可能很大，而用户只描述逐个添加/逐个弹堆，没有说明批量化或对阈值二分，复杂度不满足时应判错。\n"
+            "8) 在判 correct=true 前，主动尝试构造小反例或极端规模反例。"
+            "若能找到与用户描述直接冲突的反例，或用户描述缺少排除该反例的关键条件，应判 correct=false。\n\n"
             "输出示例："
             "{\"correct\": true, \"reason\": \"...\", \"reply\": \"\", \"reaction\": \"\"}"
         )},

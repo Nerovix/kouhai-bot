@@ -9,8 +9,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from kouhai_bot.config import BotConfig
 from kouhai_bot.llm_config import LlmProviderConfig
 from kouhai_bot.handlers.shared import (
+    build_judge_messages,
     build_second_judge_messages,
     call_chat_completion,
+    get_judge_prompt,
     call_chat_completion_result,
     judge_submission_result,
     robust_json_parse,
@@ -19,6 +21,16 @@ from kouhai_bot.handlers.shared import (
     translate_sample_notes,
 )
 from kouhai_bot.llm import ChatCompletionResult, _ChatCompletionAttempt, _post_chat_completion_once
+
+
+def test_judge_prompt_rejects_repaired_greedy_and_unbatched_simulation():
+    prompt = get_judge_prompt()
+
+    assert 'Judge the algorithm the user actually wrote' in prompt
+    assert 'Do not repair "take the current largest interval/cost and split it in the middle"' in prompt
+    assert 'maximum marginal gain' in prompt
+    assert 'step-by-step heap simulation' in prompt
+    assert 'batching or logarithmic optimization' in prompt
 
 
 def test_translate_editorial_to_zh_uses_structured_match_output():
@@ -52,12 +64,41 @@ def test_translate_editorial_to_zh_uses_structured_match_output():
     assert payload["official_editorial"] == "Official editorial"
 
 
+def test_build_judge_messages_uses_structured_dialogue_context():
+    messages = build_judge_messages(
+        "Problem statement",
+        "current idea",
+        [
+            {"type": "clarify", "content": "what is n?", "result": "clarify", "reply": "n is input"},
+            {"type": "submit", "content": "old wrong idea", "result": "incorrect", "reason": "misses edge case"},
+        ],
+    )
+
+    payload = json.loads(messages[1]["content"])
+    assert payload["task"] == "first_pass_judge_complete_solution"
+    assert payload["problem_statement"] == "Problem statement"
+    assert payload["current_submission"] == "current idea"
+    assert payload["dialogue"][0] == {
+        "turn": 1,
+        "role": "user",
+        "kind": "clarify",
+        "content": "what is n?",
+        "note": "user_claim",
+        "verdict": "clarify",
+    }
+    assert payload["dialogue"][1]["role"] == "assistant"
+    assert payload["dialogue"][1]["note"] == "bot_feedback_not_user_claim"
+    assert payload["dialogue"][2]["verdict"] == "incorrect"
+    assert payload["dialogue"][3]["note"] == "bot_reason_not_user_claim"
+    assert "history" not in payload
+
+
 def test_build_second_judge_messages_contains_review_contract():
     messages = build_second_judge_messages(
         "Problem statement",
         "User solution",
-        [{"type": "clarify", "content": "history"}],
-        {"correct": True, "reason": "first pass"},
+        [{"type": "clarify", "content": "history", "result": "clarify", "reply": "bot reply"}],
+        {"correct": True, "reason": "first pass", "reply": "", "reaction": ""},
         "Official editorial text",
         "https://codeforces.com/blog/entry/1",
     )
@@ -65,14 +106,46 @@ def test_build_second_judge_messages_contains_review_contract():
     system_text = messages[0]["content"]
     payload = json.loads(messages[1]["content"])
     assert "一审 bot 做出判定时看不到官方题解" in system_text
-    assert "即使和官方题解不同" in system_text
-    assert "题解可能与本题不对应" in system_text
-    assert payload["problem"] == "Problem statement"
-    assert payload["submission"] == "User solution"
-    assert payload["history"][0]["content"] == "history"
-    assert payload["first_judge_result"]["reason"] == "first pass"
-    assert payload["official_editorial"] == "Official editorial text"
-    assert payload["official_editorial_source"] == "https://codeforces.com/blog/entry/1"
+    assert "不是题解匹配器" in system_text
+    assert "和官方题解完全不同" in system_text
+    assert "不是重新审查完整性" in system_text
+    assert "这些完整性问题已经由一审处理" in system_text
+    assert "题解可能与本题不对应" not in system_text
+    assert "用户实际写出的做法" in system_text
+    assert "维护当前最大区间" in system_text
+    assert "边际收益" in system_text
+    assert "逐个添加/逐个弹堆" in system_text
+    assert payload["task"] == "second_review_correctness_only"
+    assert payload["problem_statement"] == "Problem statement"
+    assert payload["current_submission"] == "User solution"
+    assert payload["dialogue"][0]["content"] == "history"
+    assert payload["dialogue"][1]["note"] == "bot_feedback_not_user_claim"
+    assert payload["first_pass"]["reason_to_audit"] == "first pass"
+    assert payload["official_reference"]["editorial"] == "Official editorial text"
+    assert payload["official_reference"]["source"] == "https://codeforces.com/blog/entry/1"
+    assert "history" not in payload
+    assert "first_judge_result" not in payload
+
+
+def test_second_judge_prompt_rejects_repaired_greedy_for_teleporters():
+    messages = build_second_judge_messages(
+        "CF1661F Teleporters statement",
+        "根据相邻点区间的大小维护一个大根堆，每次取最大值从中间截断，直到能量不超过 m",
+        [],
+        {"correct": True, "reason": "first pass repaired it into marginal gain greedy"},
+        "Official editorial uses f(x,k)-f(x,k+1) marginal gain and binary search over the gain threshold.",
+        "https://codeforces.com/blog/entry/101790",
+    )
+
+    system_text = messages[0]["content"]
+    payload = json.loads(messages[1]["content"])
+    assert "不要把“维护当前最大区间/最大代价并从中间截断”自动修补成“维护新增一个操作的边际收益”" in system_text
+    assert "没有说明批量化或对阈值二分" in system_text
+    assert "主动尝试构造小反例" in system_text
+    assert "二审不因普通实现细节" in system_text
+    assert "从中间截断" in payload["current_submission"]
+    assert "f(x,k)-f(x,k+1)" in payload["official_reference"]["editorial"]
+    assert "different algorithm" in payload["decision_focus"][-1]
 
 
 class _DummySession:

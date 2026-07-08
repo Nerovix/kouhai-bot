@@ -141,13 +141,14 @@ async def process_event(
 
     raw_text, was_mentioned = extract_text(segments)
     raw_text = _normalize_leading_command_junk(raw_text)
-    if not raw_text:
+    if not segments:
         return
 
     if msg_type == "group":
         await echo.check_and_echo(
             group_id=group_id,
             user_id=user_id,
+            segments=segments,
             raw_text=raw_text,
             message_id=message_id,
         )

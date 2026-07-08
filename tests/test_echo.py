@@ -16,6 +16,22 @@ def _plain(text: str) -> list[dict]:
     return [{"type": "text", "data": {"text": text}}]
 
 
+def _face(face_id: int | str) -> list[dict]:
+    return [{"type": "face", "data": {"id": face_id}}]
+
+
+def _text_face(text: str, face_id: int | str) -> list[dict]:
+    return [{"type": "text", "data": {"text": text}}, {"type": "face", "data": {"id": face_id}}]
+
+
+def _raw_text(segments: list[dict]) -> str:
+    return " ".join(
+        seg.get("data", {}).get("text", "").strip()
+        for seg in segments
+        if seg.get("type") == "text" and seg.get("data", {}).get("text", "").strip()
+    ).strip()
+
+
 ECHO_MESSAGE = _plain("复读")
 
 
@@ -24,16 +40,24 @@ class _TestConfig:
     current_group = 123456
 
 
-def _event(text: str, *, user_id: int = 42, group_id: int = _TestConfig.current_group) -> dict:
+def _event(
+    text: str | None = None,
+    *,
+    segments: list[dict] | None = None,
+    user_id: int = 42,
+    group_id: int = _TestConfig.current_group,
+) -> dict:
+    message = segments if segments is not None else _plain(text or "")
+    raw_message = _raw_text(message)
     return {
         "type": "message",
         "message_type": "group",
         "group_id": group_id,
         "user_id": user_id,
         "sender": {"nickname": "Alice", "card": "", "user_id": user_id},
-        "message_id": f"msg_{group_id}_{user_id}_{text}",
-        "raw_message": text,
-        "message": [{"type": "text", "data": {"text": text}}],
+        "message_id": f"msg_{group_id}_{user_id}_{raw_message}",
+        "raw_message": raw_message,
+        "message": message,
     }
 
 
@@ -47,7 +71,12 @@ class _Rng:
         return self.values.pop(0)
 
 
-async def _feed(echo: GroupEcho, texts: list[str], *, users: list[int] | None = None):
+async def _feed(
+    echo: GroupEcho,
+    messages: list[str | list[dict]],
+    *,
+    users: list[int] | None = None,
+):
     sent: list[tuple[int, list[dict]]] = []
 
     async def _send_group_msg(group_id: int, message: list[dict]):
@@ -56,12 +85,14 @@ async def _feed(echo: GroupEcho, texts: list[str], *, users: list[int] | None = 
 
     with patch("kouhai_bot.config._config", _TestConfig()), \
             patch("kouhai_bot.echo.send_group_msg", _send_group_msg):
-        for i, text in enumerate(texts):
+        for i, message in enumerate(messages):
             user_id = users[i] if users is not None else i + 1
+            segments = _plain(message) if isinstance(message, str) else message
             await echo.check_and_echo(
                 group_id=_TestConfig.current_group,
                 user_id=user_id,
-                raw_text=text,
+                segments=segments,
+                raw_text=_raw_text(segments),
                 message_id=f"msg_{i}",
             )
 
@@ -75,7 +106,8 @@ def test_two_identical_messages_can_make_bot_third_repeater():
 
     assert sent == [(_TestConfig.current_group, ECHO_MESSAGE)]
     snapshot = echo.buffer_snapshot()
-    assert [entry.raw_text for entry in snapshot] == ["复读", "复读", "复读"]
+    assert [entry.echo_key for entry in snapshot] == ["text:复读", "text:复读", "text:复读"]
+    assert [entry.segments for entry in snapshot] == [ECHO_MESSAGE, ECHO_MESSAGE, ECHO_MESSAGE]
     assert snapshot[-1].user_id == BOT_QQ
 
 
@@ -86,7 +118,7 @@ def test_missed_echo_can_trigger_on_later_repeater():
 
     assert sent == [(_TestConfig.current_group, ECHO_MESSAGE)]
     snapshot = echo.buffer_snapshot()
-    assert [entry.raw_text for entry in snapshot] == ["复读", "复读", "复读", "复读"]
+    assert [entry.echo_key for entry in snapshot] == ["text:复读", "text:复读", "text:复读", "text:复读"]
     assert snapshot[-1].user_id == BOT_QQ
 
 
@@ -96,7 +128,7 @@ def test_probability_miss_leaves_repeat_streak_in_buffer():
     sent = asyncio.run(_feed(echo, ["复读", "复读"]))
 
     assert sent == []
-    assert [entry.raw_text for entry in echo.buffer_snapshot()] == ["复读", "复读"]
+    assert [entry.echo_key for entry in echo.buffer_snapshot()] == ["text:复读", "text:复读"]
 
 
 def test_bot_in_streak_prevents_duplicate_echo():
@@ -128,13 +160,14 @@ def test_command_messages_break_streak_and_stay_in_buffer():
     sent = asyncio.run(_feed(echo, ["复读", "/submit 复读", "复读", "复读"]))
 
     assert sent == [(_TestConfig.current_group, ECHO_MESSAGE)]
-    assert [entry.raw_text for entry in echo.buffer_snapshot()] == [
-        "复读",
-        "/submit 复读",
-        "复读",
-        "复读",
-        "复读",
+    assert [entry.echo_key for entry in echo.buffer_snapshot()] == [
+        "text:复读",
+        "text:/submit 复读",
+        "text:复读",
+        "text:复读",
+        "text:复读",
     ]
+    assert [entry.is_command for entry in echo.buffer_snapshot()] == [False, True, False, False, False]
 
 
 def test_messages_after_command_can_trigger_echo():
@@ -143,7 +176,15 @@ def test_messages_after_command_can_trigger_echo():
     sent = asyncio.run(_feed(echo, ["msg", "msg", "/cmd", "msg", "msg"]))
 
     assert sent == [(_TestConfig.current_group, _plain("msg")), (_TestConfig.current_group, _plain("msg"))]
-    assert [entry.raw_text for entry in echo.buffer_snapshot()] == ["msg", "msg", "msg", "/cmd", "msg", "msg", "msg"]
+    assert [entry.echo_key for entry in echo.buffer_snapshot()] == [
+        "text:msg",
+        "text:msg",
+        "text:msg",
+        "text:/cmd",
+        "text:msg",
+        "text:msg",
+        "text:msg",
+    ]
 
 
 def test_non_identical_messages_do_not_trigger():
@@ -160,13 +201,62 @@ def test_buffer_is_bounded():
     sent = asyncio.run(_feed(echo, [f"msg {i}" for i in range(8)]))
 
     assert sent == []
-    assert [entry.raw_text for entry in echo.buffer_snapshot()] == [
-        "msg 3",
-        "msg 4",
-        "msg 5",
-        "msg 6",
-        "msg 7",
+    assert [entry.echo_key for entry in echo.buffer_snapshot()] == [
+        "text:msg 3",
+        "text:msg 4",
+        "text:msg 5",
+        "text:msg 6",
+        "text:msg 7",
     ]
+
+
+def test_three_identical_face_only_messages_trigger_echo():
+    echo = GroupEcho(trigger_count=3, rng=lambda: 0.0)
+    message = _face(123)
+
+    sent = asyncio.run(_feed(echo, [message, message, message]))
+
+    assert sent == [(_TestConfig.current_group, message)]
+    snapshot = echo.buffer_snapshot()
+    assert [entry.echo_key for entry in snapshot] == ["face:123", "face:123", "face:123", "face:123"]
+    assert snapshot[-1].segments == message
+    assert snapshot[-1].user_id == BOT_QQ
+
+
+def test_three_identical_text_face_messages_trigger_echo():
+    echo = GroupEcho(trigger_count=3, rng=lambda: 0.0)
+    message = _text_face("复读", 66)
+
+    sent = asyncio.run(_feed(echo, [message, message, message]))
+
+    assert sent == [(_TestConfig.current_group, message)]
+    assert [entry.echo_key for entry in echo.buffer_snapshot()] == [
+        "text:复读\x1fface:66",
+        "text:复读\x1fface:66",
+        "text:复读\x1fface:66",
+        "text:复读\x1fface:66",
+    ]
+
+
+def test_text_face_and_text_only_are_not_same_streak():
+    echo = GroupEcho(rng=lambda: 0.0)
+
+    sent = asyncio.run(_feed(echo, [_text_face("复读", 66), "复读"]))
+
+    assert sent == []
+    assert [entry.echo_key for entry in echo.buffer_snapshot()] == [
+        "text:复读\x1fface:66",
+        "text:复读",
+    ]
+
+
+def test_different_face_ids_break_streak():
+    echo = GroupEcho(rng=lambda: 0.0)
+
+    sent = asyncio.run(_feed(echo, [_face(123), _face(456), _face(123)]))
+
+    assert sent == []
+    assert [entry.echo_key for entry in echo.buffer_snapshot()] == ["face:123", "face:456", "face:123"]
 
 
 def test_process_event_hooks_echo_for_non_command_group_messages():
@@ -186,3 +276,23 @@ def test_process_event_hooks_echo_for_non_command_group_messages():
     asyncio.run(_run())
 
     assert sent == [(_TestConfig.current_group, ECHO_MESSAGE)]
+
+
+def test_process_event_hooks_echo_for_face_only_group_messages():
+    sent: list[tuple[int, list[dict]]] = []
+    message = _face(123)
+
+    async def _send_group_msg(group_id: int, message: list[dict]):
+        sent.append((group_id, message))
+        return len(sent)
+
+    async def _run():
+        with patch("kouhai_bot.config._config", _TestConfig()), \
+                patch("kouhai_bot.echo._echo", GroupEcho(rng=lambda: 0.0)), \
+                patch("kouhai_bot.echo.send_group_msg", _send_group_msg):
+            for i in range(2):
+                await process_event(_event(segments=message, user_id=i + 10), spawn_handlers=False)
+
+    asyncio.run(_run())
+
+    assert sent == [(_TestConfig.current_group, message)]

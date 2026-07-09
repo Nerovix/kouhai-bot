@@ -37,7 +37,7 @@ from ..shared import (
     load_user_submissions,
     rating_to_points,
     remember_problem_rating,
-    robust_json_parse,
+    parse_json_with_llm_repair,
     save_scoreboard,
     save_user_submission,
     second_judge_submission_result,
@@ -805,7 +805,22 @@ class GroupCoordinator:
                 result.failure_kind,
             )
             return {"kind": result.failure_kind or "error", "pid": pid}
-        parsed = robust_json_parse(result.text)
+        parsed, _repair_tag = await parse_json_with_llm_repair(
+            result.text,
+            expected_schema='{ "correct": boolean, "reason": string, "reply": string, "reaction": string }',
+            task="summary",
+            timeout=get_config().summary_timeout_sec,
+        )
+        if not parsed:
+            logger.warning(
+                "[group_%s] first judge malformed JSON after repair pid=%s seq=%s provider=%s model=%s",
+                req.group_id,
+                pid,
+                req.seq,
+                result.provider_name,
+                result.model,
+            )
+            return {"kind": "service_unavailable", "pid": pid}
         logger.info(
             "[group_%s] first judge result pid=%s seq=%s provider=%s model=%s correct=%s reaction=%s reason=%s",
             req.group_id,
@@ -841,7 +856,12 @@ class GroupCoordinator:
                     source,
                 )
                 if second.text:
-                    second_parsed = robust_json_parse(second.text)
+                    second_parsed, _second_repair_tag = await parse_json_with_llm_repair(
+                        second.text,
+                        expected_schema='{ "correct": boolean, "reason": string, "reply": string, "reaction": string }',
+                        task="summary",
+                        timeout=get_config().summary_timeout_sec,
+                    )
                     if "correct" in second_parsed:
                         logger.info(
                             "[group_%s] second judge result pid=%s seq=%s provider=%s model=%s correct=%s reaction=%s reason=%s",
@@ -908,7 +928,12 @@ class GroupCoordinator:
         if not result.text:
             return {"kind": result.failure_kind or "error", "pid": pid}
 
-        parsed = robust_json_parse(result.text)
+        parsed, _repair_tag = await parse_json_with_llm_repair(
+            result.text,
+            expected_schema='{ "reply": string, "reaction": string }',
+            task="summary",
+            timeout=get_config().summary_timeout_sec,
+        )
         if not parsed:
             return {"kind": "unavailable", "pid": pid}
 

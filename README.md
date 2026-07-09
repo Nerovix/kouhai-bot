@@ -61,7 +61,7 @@ cp config.example.yaml config.yaml
 
 > 在我们的测试中，gpt-5.5 high 基本胜任，qwen-3.7-max 也相当不错，Deepseek v4 pro 可用，但由于其 CoT 较长，响应慢，推理能力也确实不及前者，建议只作为 API 连接不稳时的 fallback
 
-ZenMux/Fable 也可以作为 OpenAI-compatible provider 配置。示例见 `config.example.yaml`，推荐放在 fallback 列表靠前位置，使用 `reasoning_effort: "max"` 打开高强度 thinking，并设置 `model_tag: "『Fable』"` 方便在群内识别。Fable 的网关在启用 reasoning 时要求 temperature 为 1，bot 会在检测到 Fable provider 时自动处理这个参数，不需要在配置里额外设置。
+ZenMux 上的体验模型也可以作为 OpenAI-compatible provider 配置。示例见 `config.example.yaml`；例如 Grok 4.5 Free 可使用 `model: "x-ai/grok-4.5-free"`、`reasoning_effort: "xhigh"`、`model_tag: "『∅』"`。如果某个网关需要特殊 payload，可在 provider 上配置 `temperature`、`send_thinking` 或 `extra_body`，避免为每个模型在代码里新增分支。
 
 #### 公式识别
 

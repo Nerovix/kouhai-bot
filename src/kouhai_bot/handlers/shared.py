@@ -138,6 +138,95 @@ def robust_json_parse(text: str) -> dict:
         return result
 
 
+_JSON_REPAIR_MAX_ATTEMPTS = 3
+_JSON_REPAIR_MAX_CHARS = 12000
+
+
+def _json_repair_prompt(text: str, expected_schema: str, parse_note: str) -> str:
+    payload = {
+        "expected_schema": expected_schema or "JSON object",
+        "parse_note": parse_note or "local parser could not read a JSON object",
+        "bad_output": (text or "")[:_JSON_REPAIR_MAX_CHARS],
+    }
+    return (
+        "你是一个 JSON 编写高手。下面是另一个模型本应输出 JSON 对象、但格式不合法的回复。\n"
+        "请只修复格式，不要改写含义，不要补充新事实，不要解释。\n"
+        "必须只输出一个合法 JSON 对象；不要 Markdown、不要代码块、不要前后缀文字。\n"
+        "如果原回复只是纯文本 summary，请按 expected_schema 包成对应字段；"
+        "如果原回复已经包含字段但引号、逗号、布尔值或转义有错，只做最小修复。\n\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+async def parse_json_with_llm_repair(
+    text: str | None,
+    *,
+    expected_schema: str = "JSON object",
+    task: str = "summary",
+    timeout: int | None = None,
+    max_attempts: int = _JSON_REPAIR_MAX_ATTEMPTS,
+) -> tuple[dict, str]:
+    """Parse an LLM JSON object, using general_model to repair malformed output.
+
+    Returns (parsed_object, repair_model_tag). repair_model_tag is non-empty only
+    when a repair model response was used.
+    """
+    current = (text or "").strip()
+    parsed = robust_json_parse(current)
+    if parsed:
+        return parsed, ""
+    if not current:
+        return {}, ""
+
+    cfg = get_config()
+    repair_timeout = timeout or getattr(cfg, "summary_timeout_sec", 120)
+    parse_note = "no valid JSON object found"
+    last_tag = ""
+    attempts = max(0, int(max_attempts or 0))
+    for attempt in range(attempts):
+        logger.info(
+            "json repair requested attempt=%s schema=%s",
+            attempt + 1,
+            expected_schema,
+        )
+        result = await call_chat_completion_result(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你只负责把模型输出修成合法 JSON 对象。"
+                        "禁止解释，禁止改变语义，禁止输出 JSON 以外的文本。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": _json_repair_prompt(current, expected_schema, parse_note),
+                },
+            ],
+            task=task,
+            temperature=0.0,
+            timeout=repair_timeout,
+            response_format={"type": "json_object"},
+        )
+        last_tag = result.model_tag
+        if not result.text:
+            parse_note = f"repair model returned no text ({result.failure_kind or 'unknown failure'})"
+            continue
+        current = result.text.strip()
+        parsed = robust_json_parse(current)
+        if parsed:
+            return parsed, last_tag
+        parse_note = "repair output was still not valid JSON"
+
+    logger.warning(
+        "json repair failed after %s attempts for schema=%s; last_output=%s",
+        attempts,
+        expected_schema,
+        current[:200],
+    )
+    return {}, ""
+
+
 # ── Problem statement loading ───────────────────────────────────────────
 
 def load_problem_statement(pid: str) -> str:
@@ -909,47 +998,321 @@ async def judge_submission(
     result = await judge_submission_result(problem_text, submission, history)
     if not result.text:
         return None
-    return robust_json_parse(result.text)
+    parsed, _repair_tag = await parse_json_with_llm_repair(
+        result.text,
+        expected_schema='{ "correct": boolean, "reason": string, "reply": string, "reaction": string }',
+        task="summary",
+        timeout=get_config().summary_timeout_sec,
+    )
+    return parsed
 
 
 # ── Judge ───────────────────────────────────────────────────────────────
 
+_SUMMARY_TARGET_CHARS = 520
+_SUMMARY_HARD_MAX_CHARS = 700
+_SUMMARY_LEAK_RE = re.compile(
+    r"(题解|解题思路|计数思路|算法思路|复杂度|"
+    r"可以用[^。；\n]*(?:枚举|贪心|动态规划|DP|dp|二分|排序|线段树|树状数组|最短路)|"
+    r"(?:枚举|贪心|动态规划|DP|dp|二分|排序|线段树|树状数组)[^。；\n]*即可)"
+)
+_SUMMARY_FORMAT_RE = re.compile(r"(^|\n)\s*(输入|输出|样例)\s*[:：]", re.I)
+_SUMMARY_MARKDOWN_RE = re.compile(r"(^|\n)\s*(#{1,6}\s+|[-*]\s+|```|\d+\.\s+)")
+_SUMMARY_SIMPLE_SUBSCRIPT_RE = re.compile(r"\b[A-Za-z]_(?:\{[^}]{1,24}\}|[A-Za-z0-9]+)")
+_SUMMARY_UNICODE_SUBSCRIPT_RE = re.compile(r"([A-Za-z])([₀₁₂₃₄₅₆₇₈₉ᵢⱼₖₙ₊₋]+)")
+_SUMMARY_LATEX_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
+_SUMMARY_COMPLEX_LATEX_RE = re.compile(
+    r"\\(?:sum|prod|frac|binom|sqrt|lfloor|rfloor|lceil|rceil|left|right)|[_^]\{[^}]{3,}\}"
+)
+_SUMMARY_UNICODE_NOTATION_GUIDE = (
+    "Unicode 角标弹药表："
+    "下标数字 ₀₁₂₃₄₅₆₇₈₉；"
+    "常用下标字母/符号 ₐ ₑ ₕ ᵢ ⱼ ₖ ₗ ₘ ₙ ₒ ₚ ᵣ ₛ ₜ ᵤ ᵥ ₓ ₊ ₋ ₌ ₍ ₎；"
+    "上标数字 ⁰¹²³⁴⁵⁶⁷⁸⁹；"
+    "常用上标字母/符号 ᵃ ᵇ ᶜ ᵈ ᵉ ᶠ ᵍ ʰ ⁱ ʲ ᵏ ˡ ᵐ ⁿ ᵒ ᵖ ʳ ˢ ᵗ ᵘ ᵛ ʷ ˣ ʸ ᶻ ⁺ ⁻ ⁼ ⁽ ⁾。"
+    "常见写法：aᵢ、aⱼ、aₖ、aₙ、aᵢ₊₁、x²、2ᵏ、10¹⁸、10⁹+7。"
+    "没有常用 Unicode 下标的变量不要硬造；端点下标不确定时优先写成自然语言，如“给定的若干元素/所有给定位置”。"
+)
+_SUBSCRIPT_TRANS = str.maketrans({
+    "0": "₀",
+    "1": "₁",
+    "2": "₂",
+    "3": "₃",
+    "4": "₄",
+    "5": "₅",
+    "6": "₆",
+    "7": "₇",
+    "8": "₈",
+    "9": "₉",
+    "i": "ᵢ",
+    "j": "ⱼ",
+    "k": "ₖ",
+    "n": "ₙ",
+    "+": "₊",
+    "-": "₋",
+})
+_SUPERSCRIPT_TRANS = str.maketrans({
+    "0": "⁰",
+    "1": "¹",
+    "2": "²",
+    "3": "³",
+    "4": "⁴",
+    "5": "⁵",
+    "6": "⁶",
+    "7": "⁷",
+    "8": "⁸",
+    "9": "⁹",
+})
+
+
+def _to_subscript(text: str) -> str:
+    return text.translate(_SUBSCRIPT_TRANS)
+
+
+def _to_superscript(text: str) -> str:
+    return text.translate(_SUPERSCRIPT_TRANS)
+
+
+def _polish_summary_notation(summary: str) -> str:
+    text = summary.strip()
+    if not _SUMMARY_COMPLEX_LATEX_RE.search(text):
+        text = re.sub(
+            r"\b([A-Za-z])_\{([0-9ijkn+-]{1,8})\}",
+            lambda m: m.group(1) + _to_subscript(m.group(2)),
+            text,
+        )
+        text = re.sub(
+            r"\b([A-Za-z])_([0-9ijkn])\b",
+            lambda m: m.group(1) + _to_subscript(m.group(2)),
+            text,
+        )
+    text = re.sub(
+        r"10\^\{?([0-9]{1,3})\}?",
+        lambda m: "10" + _to_superscript(m.group(1)),
+        text,
+    )
+    text = re.sub(
+        r"\b1e([0-9]{1,3})\b",
+        lambda m: "10" + _to_superscript(m.group(1)),
+        text,
+        flags=re.I,
+    )
+    return text
+
+
+def _summary_system_prompt() -> str:
+    return (
+        "你是算法竞赛选手，在 QQ 群用中文介绍每日一题。你的目标不是完整翻译题面，"
+        "而是在不丢失限制和目标的前提下，写出短、自然、让人愿意读题的题意简述。"
+        "必须只输出 JSON 对象，格式为 {\"summary\":\"...\"}。"
+    )
+
+
+def _summary_source_payload(stmt_text: str, input_text: str, limits_text: str) -> dict[str, str]:
+    return {
+        "statement": stmt_text or "",
+        "input": input_text or "",
+        "limits": limits_text or "",
+    }
+
+
+def _build_summary_prompt(stmt_text: str, input_text: str, limits_text: str) -> str:
+    payload = _summary_source_payload(stmt_text, input_text, limits_text)
+    return (
+        "把下面 Codeforces 题面素材压缩转述为中文 QQ 群题意 summary。\n\n"
+        "硬性要求：\n"
+        "1. 只写题意，不写题解、算法、思路、复杂度、样例推导或任何“怎么做”。\n"
+        "2. 读者只看 summary 应该知道：给了什么、允许做什么、要求算/判定/构造什么、输出含义、全部数据范围、时限和内存限制。\n"
+        "3. 不要单列“输入：”“输出：”“样例：”。群友是交流做法，不是写代码；普通读入/输出格式默认省略。"
+        "只保留会影响理解的输出对象/答案含义，以及多测、所有 n 之和这类限制。交互题、构造输出、多答案、YES/NO 判定、特殊输出格式会影响题意时才自然说明。\n"
+        "4. 所有数据范围必须完整出现；可合并压缩但不能丢。题面给了上下界时尽量写完整区间，如 1≤n≤2×10⁵、0≤aᵢ≤10⁹、1≤t≤10⁴、多测且所有 n 之和≤2×10⁵；范围里也使用角标，不要写 a_i。\n"
+        "5. 时限和内存必须写在末尾，例如“时限2s，内存256MB”。\n"
+        "6. 背景故事、角色名、修辞、样例细节能删就删；定义、边界、判定规则、输出目标、数据范围、时空限制不能删。不要改变规则适用对象：若原文说每次操作/每个玩家/任意元素满足某条件，不能误写成只对先手、只对某一次或只对某一类对象成立。\n"
+        "7. LaTeX 是最后手段：普通数组下标和幂次优先用 Unicode 角标，如 aᵢ、a₁、a₂、aₙ、10¹⁸、10⁹+7；也可写“第 i 个/每个位置的 a”。"
+        f"{_SUMMARY_UNICODE_NOTATION_GUIDE}"
+        "严格递增序列写 a₁<a₂<…<aₙ 或“严格递增坐标”。不要猜测列表端点或把原文没有的下标终点写进 summary；端点不适合用 Unicode 角标时改用自然语言。"
+        "简单关系用 ≤、≥、×、mod。只有复杂求和、递推、分式、多重下标、精确定义用中文会失真时，才保留最少必要 LaTeX。\n"
+        f"8. 目标长度不超过 {_SUMMARY_TARGET_CHARS} 个中文字符；复杂题可略长，但完整限制优先于短。\n"
+        "9. 不要 Markdown、标题、列表、代码块、粗体斜体。\n\n"
+        "好风格示例：\n"
+        "给定长度为 n 的数组 a 和 q 个询问。每次询问给出区间 [l,r]，要求把区间划分成尽量少的连续段，"
+        "使每段内所有数的乘积等于它们的 LCM；输出最少段数。1≤n,q≤10⁵，1≤aᵢ≤10⁵，时限1s，内存256MB。\n"
+        "给定多组数据，每组有数组 a。对每个循环移位求某个二元答案 (cnt,cost)，其中 cost 对 10⁹+7 取模；1≤t≤2×10⁴，所有 n 之和≤10⁶，1≤aᵢ≤10⁹，时限3s，内存256MB。\n"
+        "给定递增坐标 1≤a₁<a₂<…<aₙ，可在整数点新增传送器，要求从 0 到 aₙ 的总代价≤m，求最少新增数。1≤n≤2×10⁵，aₙ≤m≤10¹⁸，时限7s，内存512MB。\n\n"
+        "坏风格示例（禁止）：\n"
+        "输入：第一行 n 和 q... 输出：每个询问输出答案... 解题思路是预处理每个位置能延伸到哪里，然后倍增。\n\n"
+        "题面素材 JSON：\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+async def _parse_summary_json(text: str | None, *, timeout: int) -> tuple[str | None, str]:
+    parsed, repair_tag = await parse_json_with_llm_repair(
+        text,
+        expected_schema='{ "summary": string }',
+        task="summary",
+        timeout=timeout,
+    )
+    summary = parsed.get("summary") if isinstance(parsed, dict) else None
+    if not isinstance(summary, str):
+        return None, ""
+    summary = _polish_summary_notation(summary)
+    return summary or None, repair_tag
+
+
+def _limit_values(limits_text: str) -> tuple[str, str]:
+    time_value = ""
+    memory_value = ""
+    time_match = re.search(r"Time:\s*([^,]+)", limits_text or "", re.I)
+    memory_match = re.search(r"Memory:\s*(.+)$", limits_text or "", re.I)
+    if time_match:
+        time_value = time_match.group(1).strip().lower()
+    if memory_match:
+        memory_value = memory_match.group(1).strip().lower()
+    return time_value, memory_value
+
+
+def _limit_value_present(summary: str, value: str, *, kind: str) -> bool:
+    if not value or "?" in value:
+        return True
+    text = summary.lower().replace(" ", "")
+    raw = value.replace(" ", "")
+    if raw and raw in text:
+        return True
+    number_match = re.search(r"\d+(?:\.\d+)?", value)
+    if not number_match:
+        return True
+    number = number_match.group(0)
+    if "." in number:
+        number = number.rstrip("0").rstrip(".")
+    if kind == "time":
+        return bool(re.search(rf"{re.escape(number)}(?:s|秒|second|seconds)", text))
+    return bool(re.search(rf"{re.escape(number)}(?:mb|mib|兆|megabyte|megabytes)", text))
+
+
+def _summary_quality_issues(summary: str, limits_text: str = "") -> list[str]:
+    issues: list[str] = []
+    text = (summary or "").strip()
+    if not text:
+        return ["summary is empty"]
+    if len(text) > _SUMMARY_HARD_MAX_CHARS:
+        issues.append(f"summary is too long ({len(text)} chars)")
+    elif len(text) > _SUMMARY_TARGET_CHARS:
+        issues.append(f"summary should be more compressed ({len(text)} chars)")
+    if _SUMMARY_LEAK_RE.search(text):
+        issues.append("summary appears to include solution/editorial content")
+    if _SUMMARY_FORMAT_RE.search(text):
+        issues.append("summary uses explicit input/output/sample sections")
+    if _SUMMARY_MARKDOWN_RE.search(text):
+        issues.append("summary uses markdown/list formatting")
+
+    time_value, memory_value = _limit_values(limits_text)
+    if not _limit_value_present(text, time_value, kind="time"):
+        issues.append("summary omits time limit")
+    if not _limit_value_present(text, memory_value, kind="memory"):
+        issues.append("summary omits memory limit")
+
+    simple_subscripts = _SUMMARY_SIMPLE_SUBSCRIPT_RE.findall(text)
+    unicode_subscripts = _SUMMARY_UNICODE_SUBSCRIPT_RE.findall(text)
+    generic_i_bases = {base for base, sub in unicode_subscripts if sub == "ᵢ"}
+    latex_commands = _SUMMARY_LATEX_COMMAND_RE.findall(text)
+    has_complex_latex = bool(_SUMMARY_COMPLEX_LATEX_RE.search(text))
+    if (
+        (simple_subscripts and not has_complex_latex)
+        or len(simple_subscripts) >= 6
+        or len(generic_i_bases) >= 5
+        or len(unicode_subscripts) >= 18
+        or len(latex_commands) >= 4
+    ):
+        issues.append("summary overuses LaTeX/simple subscripts")
+    return issues
+
+
+def _build_summary_repair_prompt(
+    stmt_text: str,
+    input_text: str,
+    limits_text: str,
+    summary: str,
+    issues: list[str],
+) -> str:
+    payload = {
+        "source": _summary_source_payload(stmt_text, input_text, limits_text),
+        "bad_summary": summary,
+        "issues": issues,
+    }
+    return (
+        "请修正 bad_summary，并仍然只输出 JSON：{\"summary\":\"...\"}。\n"
+        "修正规则：只压缩、改写、删除违规内容；不要加入 source 中没有的新事实。\n"
+        "必须保留题目目标、关键定义、输出含义、全部数据范围（上下界都保留）、时限和内存；删除题解/思路/复杂度/样例推导；"
+        "修正任何把“每次/任意/双方/所有对象”的规则误写成只对先手、只对一次或只对部分对象成立的表述；"
+        "不要单列输入输出；普通输入格式删掉，只保留答案含义、多测和总和限制；正文和数据范围里的普通 a_i、a_{i+1}、a_1<...<a_n 都改成 aᵢ、aᵢ₊₁、a₁<…<aₙ、相邻位置等角标或自然写法；"
+        f"{_SUMMARY_UNICODE_NOTATION_GUIDE}"
+        "把端点无法从 source 直接确认的角标范围改成自然语言，除非 source 明确给出该终点；"
+        "把 10^18、1e18、10^9+7、1e9+7 等普通幂次改成 10¹⁸、10⁹+7；"
+        "LaTeX 只在复杂公式不可自然中文化时保留。\n\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
 async def summarize_problem(stmt_text: str, input_text: str, limits_text: str) -> tuple[str | None, str]:
     """Generate Chinese summary of a problem via the configured chat provider.
-    
+
     Returns (summary_text, model_tag). model_tag is empty if the LLM call failed.
     """
     cfg = get_config()
-    prompt = (
-        f"下面是需要压缩转述的题面素材（可能含英文，以及从公式图识别得到的 LaTeX；勿臆造素材里未出现的事实）：\n\n"
-        f"【题干主体】\n{stmt_text}\n\n"
-        f"【输入说明】（若几乎为空可略写）\n{input_text}\n\n"
-        f"【时空限制】\n{limits_text}\n\n"
-        "请输出一段连贯的中文题意简述，使群友只读这段也能明白「要算什么 / 判定什么 / 输出什么」并能开始思考做法。\n\n"
-        "完整性（最高优先级）：\n"
-        "1) 只基于上述素材转述与压缩；禁止编造素材未写明的性质、定理、样例推论或「显然」步骤。\n"
-        "2) 禁止为缩短篇幅而删掉题意关键信息。下列若在素材中出现，则简述中必须保留（可用等价中文复述；"
-        "若删掉会改变题目则绝对禁止删）：目标或优化对象；答案/计数/图论对象的精确定义；核心等式、不等式、递推式；"
-        "YES/NO 的判定规则；构造题要输出什么的精确定义；交互题里询问/回答的含义；会改变结论的特例或边界。\n"
-        "3) 素材中的公式（含 LaTeX）凡参与题意定义、而非仅装饰的，必须在简述中体现：优先用清晰中文把关系说完整；"
-        "若仅用中文会产生歧义或无法保留必要的符号结构，允许保留最少必要的 LaTeX 片段（如分式、求和、多重下标），"
-        "禁止大段堆砌 LaTeX、禁止代码围栏或 Markdown 数学块。\n\n"
-        "表达与长度：\n"
-        "1) 背景故事、角色名、与算法无关的修辞可删；定义、约束、关键公式不可删。\n"
-        "2) 默认流畅中文 + 简单符号（如 ≤、≥、×）；非交互且无特殊读入要求时，I/O 格式可点到为止。\n"
-        "3) 数据范围跟在变量后括号里（如 n(1e5)、a_i(0～1e18)）；时空限制写在段末。\n"
-        "4) 交互题在简述末尾加「交互题」。\n"
-        "5) 在保证信息等价、无歧义的前提下尽量短；信息完整优先于「字数减半」类目标。\n"
+    messages = [
+        {"role": "system", "content": _summary_system_prompt()},
+        {"role": "user", "content": _build_summary_prompt(stmt_text, input_text, limits_text)},
+    ]
+    result = await call_chat_completion_result(
+        messages,
+        task="summary",
+        temperature=0.4,
+        timeout=cfg.summary_timeout_sec,
+        response_format={"type": "json_object"},
     )
-    result = await call_chat_completion_result([
-        {"role": "system", "content": (
-            "你是算法竞赛选手，在 QQ 群用中文介绍每日一题。"
-            "输出连贯、可读、信息完整的中文简述；默认少用 LaTeX 以降低阅读成本，但题意所依赖的关键公式与定义必须交代清楚，"
-            "必要时可保留少量 LaTeX。不要使用 Markdown（标题井号、列表语法、代码围栏、粗体斜体）。"
-        )},
-        {"role": "user", "content": prompt},
-    ], task="summary", timeout=cfg.summary_timeout_sec)
-    return result.text, result.model_tag
+    summary, repair_tag = await _parse_summary_json(result.text, timeout=cfg.summary_timeout_sec)
+    tag = repair_tag or result.model_tag
+    if not summary:
+        logger.warning("summary generation returned invalid JSON/object")
+        return None, ""
+
+    issues = _summary_quality_issues(summary, limits_text)
+    if not issues:
+        return summary, tag
+
+    logger.info("summary quality repair requested: %s", "; ".join(issues))
+    repair_result = await call_chat_completion_result(
+        [
+            {"role": "system", "content": _summary_system_prompt()},
+            {
+                "role": "user",
+                "content": _build_summary_repair_prompt(
+                    stmt_text,
+                    input_text,
+                    limits_text,
+                    summary,
+                    issues,
+                ),
+            },
+        ],
+        task="summary",
+        temperature=0.2,
+        timeout=cfg.summary_timeout_sec,
+        response_format={"type": "json_object"},
+    )
+    repaired, repaired_json_tag = await _parse_summary_json(
+        repair_result.text,
+        timeout=cfg.summary_timeout_sec,
+    )
+    if not repaired:
+        logger.warning("summary repair returned invalid JSON/object")
+        return None, ""
+    repair_issues = _summary_quality_issues(repaired, limits_text)
+    if repair_issues:
+        logger.warning("summary repair still failed quality gate: %s", "; ".join(repair_issues))
+        return None, ""
+    return repaired, repaired_json_tag or repair_result.model_tag
 
 
 async def translate_sample_notes(notes_text: str) -> tuple[str | None, str]:
@@ -1010,6 +1373,7 @@ async def translate_editorial_to_zh(
         "problem": problem_body,
         "official_editorial": body,
     }
+    cfg = get_config()
     result = await call_chat_completion_result(
         [
             {
@@ -1047,7 +1411,12 @@ async def translate_editorial_to_zh(
     )
     if not result.text:
         return None, "", None
-    parsed = robust_json_parse(result.text)
+    parsed, repair_tag = await parse_json_with_llm_repair(
+        result.text,
+        expected_schema='{ "matched": "yes" | "no", "result": string }',
+        task="summary",
+        timeout=cfg.summary_timeout_sec,
+    )
     matched = str(parsed.get("matched", "")).strip().lower()
     if matched == "no":
         return None, "", False
@@ -1056,7 +1425,7 @@ async def translate_editorial_to_zh(
     translated = str(parsed.get("result", "") or "").strip()
     if not translated:
         return None, "", None
-    return translated, result.model_tag, True
+    return translated, repair_tag or result.model_tag, True
 
 
 # ── Contest checking ────────────────────────────────────────────────────

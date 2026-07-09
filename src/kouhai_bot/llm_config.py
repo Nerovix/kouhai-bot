@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -36,6 +36,9 @@ class LlmProviderConfig:
     reasoning_effort: str = ""
     model_tag: str = ""
     stream: bool = False
+    send_thinking: bool = True
+    temperature: float | None = None
+    extra_body: dict[str, Any] = field(default_factory=dict)
 
     def model_for(self, explicit_model: str = "") -> str:
         """Resolve the model name for this provider.
@@ -93,6 +96,18 @@ def _build_provider_list(raw: Any, *, section_name: str) -> list[LlmProviderConf
                 f"set base_url (e.g. https://api.deepseek.com) or omit for OpenAI default"
             )
 
+        temperature = None
+        if p.get("temperature") is not None:
+            temperature = float(p["temperature"])
+
+        extra_body = p.get("extra_body", {})
+        if extra_body is None:
+            extra_body = {}
+        if not isinstance(extra_body, dict):
+            raise RuntimeError(
+                f"LLM provider '{name}' in llm.{section_name} has non-mapping extra_body"
+            )
+
         providers.append(
             LlmProviderConfig(
                 name=name,
@@ -102,6 +117,9 @@ def _build_provider_list(raw: Any, *, section_name: str) -> list[LlmProviderConf
                 reasoning_effort=str(p.get("reasoning_effort", "")).strip(),
                 model_tag=str(p.get("model_tag", "")).strip(),
                 stream=_parse_bool(p.get("stream", False)),
+                send_thinking=_parse_bool(p.get("send_thinking", True), default=True),
+                temperature=temperature,
+                extra_body=dict(extra_body),
             )
         )
     return providers

@@ -8,7 +8,6 @@ from collections import Counter
 
 from .. import registry
 from ..registry import CommandDef
-from ...eventlog import EVENT_META_KEY, log_command_finished
 from ...napcat.client import build_at, build_plain_message, build_text, react_emoji, send_group_msg, send_private_msg
 from ...private_judge import (
     GROUP_SCOPE,
@@ -240,16 +239,6 @@ async def handle(group_id: int, user_id: int, sender: dict,
 
     if target_scope == GROUP_SCOPE:
         await _react_group_success(message_id)
-        log_command_finished(
-            event.get(EVENT_META_KEY),
-            status="correct" if scored_correct else "synced",
-            problem=pid,
-            extra={
-                **_synced_record_counts(source_records, scored_correct=scored_correct),
-                "source_scope": source_scope,
-                "target_scope": target_scope,
-            },
-        )
         if extra:
             await _send_text(target_scope, group_id, user_id, extra)
     elif extra:

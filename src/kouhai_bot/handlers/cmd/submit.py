@@ -52,7 +52,6 @@ from ...user_groups import (
     settle_dynamic_submit_wait_for_problem,
 )
 from ...curfew import is_curfew_active, format_curfew_message
-from ...eventlog import EVENT_META_KEY, log_command_finished
 from ...editorial_followup import schedule_post_solve_editorial_followup
 from ...private_judge import (
     GROUP_SCOPE,
@@ -112,7 +111,7 @@ def _log_preview(value: object, limit: int = 240) -> str:
     return text[:limit] + "..."
 
 
-CLARIFY_PROMPT = """你是一个算法竞赛群的选手，群友对当前的每日一题有疑问，需要你帮他澄清题目细节。
+CLARIFY_PROMPT = """你是一个算法竞赛群的选手，群友对当前题目有疑问，需要你帮他澄清题目细节。
 
 ## 你的任务
 
@@ -200,7 +199,6 @@ class PendingRequest:
     review_pid: str = ""
     review_mentioned_user_ids: list[int] = field(default_factory=list)
     target_pid: str = ""
-    event_log: dict | None = None
     seq: int = 0
     admitted_at: float = field(default_factory=time.monotonic)
     admitted_wall: datetime = field(default_factory=lambda: datetime.now(timezone(timedelta(hours=8))))
@@ -443,9 +441,6 @@ def _unique_user_ids(user_ids: list[int] | None) -> list[int]:
 
 
 def _request_id(req: PendingRequest) -> str:
-    request_id = str((req.event_log or {}).get("request_id", "") or "")
-    if request_id:
-        return request_id
     if req.seq:
         return f"local-{req.group_id}-{req.user_id}-{req.command}-{req.message_id}-{req.seq}"
     return ""
@@ -632,12 +627,7 @@ class GroupCoordinator:
         problem: str = "",
         extra: dict | None = None,
     ) -> None:
-        log_command_finished(
-            req.event_log,
-            status=status,
-            problem=problem,
-            extra=extra,
-        )
+        return
 
     def _finish_request_locked(self, req: PendingRequest) -> str:
         self.active.pop(req.seq, None)
@@ -1586,7 +1576,6 @@ async def enqueue_submit_request(
     sender: dict,
     message_id: str,
     submission: str,
-    event_log: dict | None = None,
     *,
     scope: str = GROUP_SCOPE,
 ) -> str:
@@ -1633,7 +1622,6 @@ async def enqueue_submit_request(
             target_pid=submit_pid,
             submit_already_solved_at_enqueue=already_solved,
             submit_score_candidate=bool(scope == GROUP_SCOPE and submit_pid and not already_solved),
-            event_log=event_log,
         )
         coord._enqueue_locked(req)
     await req.done_event.wait()
@@ -1646,7 +1634,6 @@ async def enqueue_clarify_request(
     sender: dict,
     message_id: str,
     question: str,
-    event_log: dict | None = None,
     *,
     scope: str = GROUP_SCOPE,
 ) -> None:
@@ -1664,7 +1651,6 @@ async def enqueue_clarify_request(
         scope=scope,
         payload=question,
         target_pid=pid,
-        event_log=event_log,
     )
     await coord.enqueue(req)
     await req.done_event.wait()
@@ -1678,7 +1664,6 @@ async def enqueue_review_request(
     question: str,
     review_pid: str,
     mentioned_user_ids: list[int] | None = None,
-    event_log: dict | None = None,
     *,
     scope: str = GROUP_SCOPE,
 ) -> None:
@@ -1696,7 +1681,6 @@ async def enqueue_review_request(
         review_pid=review_pid,
         review_mentioned_user_ids=_unique_user_ids(mentioned_user_ids),
         target_pid=review_pid,
-        event_log=event_log,
     )
     await coord.enqueue(req)
     await req.done_event.wait()
@@ -1707,7 +1691,6 @@ async def enqueue_clear_request(
     user_id: int,
     sender: dict,
     message_id: str,
-    event_log: dict | None = None,
     *,
     scope: str = GROUP_SCOPE,
 ) -> None:
@@ -1724,7 +1707,6 @@ async def enqueue_clear_request(
         nickname=get_display_name(sender),
         scope=scope,
         target_pid=pid,
-        event_log=event_log,
     )
     await coord.enqueue(req)
     await req.done_event.wait()
@@ -1783,7 +1765,6 @@ async def _redirect_blocked_group_submit_to_private(
         sender,
         message_id,
         submission,
-        event_log=None,
         scope=PRIVATE_SCOPE,
     )
     return True
@@ -1833,7 +1814,6 @@ async def handle(group_id: int, user_id: int, sender: dict,
         sender,
         message_id,
         submission,
-        event_log=event.get(EVENT_META_KEY),
         scope=scope,
     )
     if blocked_message:

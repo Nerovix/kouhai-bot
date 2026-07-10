@@ -1,4 +1,4 @@
-"""Job scheduler — cron-like task execution for daily posts and checks.
+"""Job scheduler — cron-like task execution for group checks.
 
 Jobs are defined in jobs.py and configured for CURRENT_GROUP via scheduler_config.json.
 """
@@ -18,7 +18,8 @@ from typing import Awaitable, Callable
 from ..config import get_config
 
 logger = logging.getLogger("kouhai-bot.scheduler")
-DEFAULT_ENABLED_JOBS = ["daily_achievements", "daily_post", "contest_check"]
+DEFAULT_ENABLED_JOBS = ["contest_check"]
+REMOVED_JOBS = {"daily_achievements", "daily_post"}
 
 # ── Job registry ────────────────────────────────────────────────────────
 
@@ -59,21 +60,19 @@ def _normalize_enabled_jobs(
     enabled_jobs: list[str],
     disabled_jobs: list[str] | None = None,
 ) -> list[str]:
-    """Keep old configs getting the new daily achievement report by default."""
+    """Drop jobs removed from older scheduler configs."""
     disabled = set(disabled_jobs or [])
-    jobs = list(enabled_jobs)
-    if "daily_achievements" in disabled:
-        return [job for job in jobs if job != "daily_achievements"]
-    if "daily_post" in jobs and "daily_achievements" not in jobs:
-        jobs.insert(jobs.index("daily_post"), "daily_achievements")
-    return jobs
+    return [
+        job for job in enabled_jobs
+        if job not in REMOVED_JOBS and job not in disabled
+    ]
 
 
 def load_group_configs() -> dict[int, GroupSchedulerConfig]:
     """Load scheduler configs. Creates a default for CURRENT_GROUP if missing."""
     path = _config_path()
     if not os.path.exists(path):
-        # Default: the current group gets achievements, daily_post, and contest checks.
+        # Default: the current group gets contest checks.
         cfg = get_config()
         gid = cfg.current_group
         defaults = {

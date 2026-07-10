@@ -11,11 +11,6 @@ from . import registry
 from .registry import CommandDef
 from ..config import get_config
 from .. import echo
-from ..eventlog import (
-    EVENT_META_KEY,
-    log_command_finished,
-    log_command_received,
-)
 from ..friend_requests import handle_friend_request_event, is_service_group_member
 from ..napcat.client import (
     build_plain_message,
@@ -198,19 +193,6 @@ async def process_event(
     if original_cmd_name != cmd_def.name:
         handler_raw_text = f"/{cmd_def.name}{raw_text[len(cmd_token):]}"
 
-    try:
-        if msg_type == "group":
-            event[EVENT_META_KEY] = log_command_received(
-                group_id=group_id,
-                user_id=user_id,
-                sender=sender,
-                command=cmd_def.name,
-                message_id=message_id,
-                raw_text=raw_text,
-            )
-    except Exception as e:
-        logger.warning(f"Failed to write received event for /{cmd_name}: {e}")
-
     async def _run_handler() -> None:
         try:
             await cmd_def.handler(
@@ -222,14 +204,8 @@ async def process_event(
                 segments=segments,
                 event=event,
             )
-            log_command_finished(event.get(EVENT_META_KEY), status="ok")
         except Exception as e:
             logger.error(f"Handler error for /{cmd_name}: {e}", exc_info=True)
-            log_command_finished(
-                event.get(EVENT_META_KEY),
-                status="error",
-                extra={"error": str(e)[:500]},
-            )
 
     if spawn_handlers:
         return asyncio.create_task(

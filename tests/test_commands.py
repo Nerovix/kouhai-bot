@@ -870,7 +870,7 @@ def test_submit_correct_schedules_editorial_without_blocking():
     print("✅ submit: editorial followup does not block coordinator")
 
 
-def test_do_daily_post_schedules_editorial_prefetch():
+def test_newproblem_post_schedules_editorial_prefetch():
   _reset_state()
   pid = "542D"
   state_dir = os.path.join(_data_dir(), "groups", str(GID))
@@ -912,8 +912,8 @@ def test_do_daily_post_schedules_editorial_prefetch():
               patch("kouhai_bot.handlers.cmd.newproblem.summarize_problem", _slow_summary), \
               patch("kouhai_bot.handlers.cmd.newproblem._send_problem_forward_card", AsyncMock(return_value=(123, {}))), \
               patch("kouhai_bot.handlers.cmd.newproblem.schedule_prefetch_editorial", _record_prefetch):
-          from kouhai_bot.handlers.cmd.newproblem import do_daily_post
-          await do_daily_post(GID, prefix="test")
+          from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
+          await _post_new_problem_locked(GID, prefix="test")
 
   asyncio.run(_run())
   assert scheduled == [pid]
@@ -923,7 +923,7 @@ def test_do_daily_post_schedules_editorial_prefetch():
   print("✅ newproblem: schedules editorial prefetch early")
 
 
-def test_do_daily_post_does_not_switch_state_when_send_fails():
+def test_newproblem_post_does_not_switch_state_when_send_fails():
   _reset_state()
   old_pid = "542D"
   new_pid = "100A"
@@ -958,8 +958,8 @@ def test_do_daily_post_does_not_switch_state_when_send_fails():
               patch("kouhai_bot.handlers.cmd.newproblem.summarize_problem", AsyncMock(return_value=("summary", ""))), \
               patch("kouhai_bot.handlers.cmd.newproblem._send_problem_forward_card", AsyncMock(return_value=(None, {}))), \
               patch("kouhai_bot.handlers.cmd.newproblem.send_group_msg", _fail_send_group):
-          from kouhai_bot.handlers.cmd.newproblem import do_daily_post
-          await do_daily_post(GID, prefix="test")
+          from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
+          await _post_new_problem_locked(GID, prefix="test")
 
   asyncio.run(_run())
   with open(os.path.join(state_dir, "state.json")) as f:
@@ -1394,7 +1394,7 @@ def test_review_uses_referenced_history_card_even_if_unsolved():
     })
     _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
     _write_group_file(GID, "problem_card_refs.json", {
-        "card_old": {"problem": PID, "source": "daily_post", "created_at": 1},
+        "card_old": {"problem": PID, "source": "newproblem", "created_at": 1},
     })
     global _deepseek_response
     _deepseek_response = "这是老题的复盘。"
@@ -1423,7 +1423,7 @@ def test_review_rejects_current_problem_card():
     _setup_problem()
     _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
     _write_group_file(GID, "problem_card_refs.json", {
-        "card_today": {"problem": PID, "source": "daily_post", "created_at": 1},
+        "card_today": {"problem": PID, "source": "newproblem", "created_at": 1},
     })
 
     with _all_patches():
@@ -1456,7 +1456,7 @@ def test_review_allows_current_problem_card_after_solve():
         "user_submissions": {},
     })
     _write_group_file(GID, "problem_card_refs.json", {
-        "card_today": {"problem": PID, "source": "daily_post", "created_at": 1},
+        "card_today": {"problem": PID, "source": "newproblem", "created_at": 1},
     })
     global _deepseek_response
     _deepseek_response = "当前题已经解出，可以正常复盘。"
@@ -2591,7 +2591,7 @@ def test_newproblem_cooldown():
             ran.append(gid)
             return True
 
-        with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
+        with patch("kouhai_bot.handlers.cmd.newproblem._post_new_problem_locked", _mock_post):
             ev = _kwargs(_make_event("/newproblem"))
             asyncio.run(handle(**ev))
             asyncio.run(handle(**ev))
@@ -2626,7 +2626,7 @@ def test_newproblem_busy_rejects_concurrent_force():
             ev = _kwargs(_make_event("/newproblem --force"))
             await asyncio.gather(handle(**ev), handle(**ev))
 
-        with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
+        with patch("kouhai_bot.handlers.cmd.newproblem._post_new_problem_locked", _mock_post):
             asyncio.run(_run())
     assert ran == [GID], f"Concurrent force should post once: {ran}"
     assert "正在准备中" in _last_text(), f"No busy rejection: {_last_text()}"
@@ -2647,7 +2647,7 @@ def test_newproblem_unsolved_rejects():
             ran.append(gid)
             return True
 
-        with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
+        with patch("kouhai_bot.handlers.cmd.newproblem._post_new_problem_locked", _mock_post):
             asyncio.run(handle(**_kwargs(_make_event("/newproblem"))))
     assert not ran, f"Unsolved should not post: {ran}"
     assert "/newproblem --force" in _last_text(), _last_text()
@@ -2669,7 +2669,7 @@ def test_newproblem_force_posts_when_unsolved():
             ran.append(gid)
             return True
 
-        with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
+        with patch("kouhai_bot.handlers.cmd.newproblem._post_new_problem_locked", _mock_post):
             asyncio.run(handle(**_kwargs(_make_event("/newproblem --force"))))
     assert ran == [GID], f"Force should post: {ran}"
     _cleanup()
@@ -2692,7 +2692,7 @@ def test_newproblem_alias_force_posts_when_unsolved():
             ran.append(gid)
             return True
 
-        with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
+        with patch("kouhai_bot.handlers.cmd.newproblem._post_new_problem_locked", _mock_post):
             asyncio.run(process_event(_make_event("/np --force"), spawn_handlers=False))
     assert ran == [GID], f"Alias force should post: {ran}"
     _cleanup()
@@ -2712,7 +2712,7 @@ def test_newproblem_force_requires_space():
             ran.append(gid)
             return True
 
-        with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
+        with patch("kouhai_bot.handlers.cmd.newproblem._post_new_problem_locked", _mock_post):
             asyncio.run(handle(**_kwargs(_make_event("/newproblem--force"))))
     assert not ran, f"Missing space should not post: {ran}"
     assert "用法" in _last_text(), _last_text()
@@ -2737,7 +2737,7 @@ def test_newproblem_solved_posts():
             ran.append(gid)
             return True
 
-        with patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
+        with patch("kouhai_bot.handlers.cmd.newproblem._post_new_problem_locked", _mock_post):
             asyncio.run(handle(**_kwargs(_make_event("/newproblem"))))
     assert ran == [GID], f"Solved should post: {ran}"
     _cleanup()
@@ -2845,17 +2845,17 @@ def test_newproblem_notify_group_on_pick_failure():
     ), patch(
         "asyncio.sleep", AsyncMock()
     ):
-        from kouhai_bot.handlers.cmd.newproblem import _do_daily_post_locked
+        from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
 
         # Test 1: notify_group=True → should send error message
         _sent.clear()
-        asyncio.run(_do_daily_post_locked(GID, notify_group=True))
+        asyncio.run(_post_new_problem_locked(GID, notify_group=True))
         assert _has_sent("刷题失败了"), f"No error msg: {_last_text()}"
         assert _has_sent("3 次"), f"No retry mention: {_last_text()}"
 
         # Test 2: notify_group=False → should NOT send error message
         _sent.clear()
-        asyncio.run(_do_daily_post_locked(GID, notify_group=False))
+        asyncio.run(_post_new_problem_locked(GID, notify_group=False))
         assert not _sent, f"Unexpected msg with notify_group=False: {_last_text()}"
 
     _cleanup()
@@ -2905,8 +2905,8 @@ def test_newproblem_fallback_direct_saves_daily_msg_for_current_pid():
             patch("asyncio.create_subprocess_exec", _mock_subprocess), \
             patch("kouhai_bot.handlers.cmd.newproblem.send_group_forward_msg", _fail_forward), \
             patch("kouhai_bot.handlers.cmd.newproblem.asyncio.sleep", AsyncMock()):
-        from kouhai_bot.handlers.cmd.newproblem import _do_daily_post_locked
-        posted = asyncio.run(_do_daily_post_locked(GID, prefix="刷新了一道新题🌟", notify_group=True))
+        from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
+        posted = asyncio.run(_post_new_problem_locked(GID, prefix="刷新了一道新题🌟", notify_group=True))
 
     assert posted is True
     assert _has_sent("刷新了一道新题"), _sent
@@ -3049,7 +3049,7 @@ def test_status_reports_newproblem_busy():
     async def _run():
         with _all_patches(), \
                 patch("kouhai_bot.handlers.cmd.submit.get_group_lock_status", return_value=None), \
-                patch("kouhai_bot.handlers.cmd.newproblem._do_daily_post_locked", _mock_post):
+                patch("kouhai_bot.handlers.cmd.newproblem._post_new_problem_locked", _mock_post):
             from kouhai_bot.handlers.cmd.newproblem import (
                 handle as newproblem_handle,
                 _cooldowns,
@@ -3318,21 +3318,10 @@ def test_submit_same_user_later_submit_drops_unanswered_previous_submit():
 
     async def _run():
         with _all_patches():
-            from kouhai_bot.eventlog import EVENT_META_KEY, log_command_received, load_events
             from kouhai_bot.handlers.cmd.submit import handle
 
             ev1_raw = _make_event("/submit first solution", group_id=GID, user_id=UID, message_id="drop_1")
             ev2_raw = _make_event("/submit second solution", group_id=GID, user_id=UID, message_id="drop_2")
-            ev1_raw[EVENT_META_KEY] = log_command_received(
-                group_id=GID,
-                user_id=UID,
-                sender=ev1_raw["sender"],
-                command="submit",
-                message_id=ev1_raw["message_id"],
-                raw_text=ev1_raw["raw_message"],
-            )
-            stale_request_id = ev1_raw[EVENT_META_KEY]["request_id"]
-            event_date = ev1_raw[EVENT_META_KEY]["date"]
 
             with patch("kouhai_bot.handlers.cmd.submit.judge_submission_result", _wrap_deepseek_as_judge_result(_drop_deepseek)):
                 t1 = asyncio.create_task(handle(**_kwargs(ev1_raw)))
@@ -3341,13 +3330,7 @@ def test_submit_same_user_later_submit_drops_unanswered_previous_submit():
                 await asyncio.wait_for(asyncio.gather(t1, t2), timeout=1.0)
                 await asyncio.sleep(0)
 
-            return [
-                item for item in load_events(GID, event_date)
-                if item.get("request_id") == stale_request_id
-                and item.get("type") == "finished"
-            ]
-
-    stale_events = asyncio.run(_run())
+    asyncio.run(_run())
 
     texts = []
     for item in _sent:
@@ -3357,7 +3340,6 @@ def test_submit_same_user_later_submit_drops_unanswered_previous_submit():
             texts.append(text)
     assert texts == [" SECOND"], f"Only the second submit should reply, got: {texts}"
     assert first_cancelled.is_set(), "First submit task should be cancelled locally"
-    assert stale_events and stale_events[-1]["status"] == "stale", stale_events
 
     with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
         saved = json.load(f)
@@ -3390,21 +3372,10 @@ def test_clear_drops_unanswered_same_user_submit():
 
     async def _run():
         with _all_patches():
-            from kouhai_bot.eventlog import EVENT_META_KEY, log_command_received, load_events
             from kouhai_bot.handlers.cmd.clear import handle as clear_handle
             from kouhai_bot.handlers.cmd.submit import handle as submit_handle
 
             ev1_raw = _make_event("/submit first solution", group_id=GID, user_id=UID, message_id="clear_drop_1")
-            ev1_raw[EVENT_META_KEY] = log_command_received(
-                group_id=GID,
-                user_id=UID,
-                sender=ev1_raw["sender"],
-                command="submit",
-                message_id=ev1_raw["message_id"],
-                raw_text=ev1_raw["raw_message"],
-            )
-            stale_request_id = ev1_raw[EVENT_META_KEY]["request_id"]
-            event_date = ev1_raw[EVENT_META_KEY]["date"]
             ev2 = _kwargs(_make_event("/clear", group_id=GID, user_id=UID, message_id="clear_drop_2"))
 
             with patch("kouhai_bot.handlers.cmd.submit.judge_submission_result", _wrap_deepseek_as_judge_result(_slow_deepseek)):
@@ -3414,17 +3385,10 @@ def test_clear_drops_unanswered_same_user_submit():
                 await asyncio.wait_for(asyncio.gather(t1, t2), timeout=1.0)
                 await asyncio.sleep(0)
 
-            return [
-                item for item in load_events(GID, event_date)
-                if item.get("request_id") == stale_request_id
-                and item.get("type") == "finished"
-            ]
-
-    stale_events = asyncio.run(_run())
+    asyncio.run(_run())
 
     assert not _sent, f"Discarded submit should not send a verdict: {_sent}"
     assert ("clear_drop_2", "128076") in _reacted, f"Clear should still react OK: {_reacted}"
-    assert stale_events and stale_events[-1]["status"] == "stale", stale_events
 
     with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
         saved = json.load(f)
@@ -4608,20 +4572,10 @@ def test_sync_private_correct_current_problem_scores_for_normal_user():
     ):
         from kouhai_bot.private_judge import save_private_submission
         from kouhai_bot.handlers.cmd.sync import handle
-        from kouhai_bot.eventlog import EVENT_META_KEY, load_events, log_command_received
 
         save_private_submission(UID, private_record)
         event = _make_event("/sync")
-        event[EVENT_META_KEY] = log_command_received(
-            group_id=GID,
-            user_id=UID,
-            sender=event["sender"],
-            command="sync",
-            message_id=event["message_id"],
-            raw_text=event["raw_message"],
-        )
         asyncio.run(handle(**_kwargs(event)))
-        logged_events = load_events(GID, event[EVENT_META_KEY]["date"])
 
     with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
         saved = json.load(f)
@@ -4632,10 +4586,6 @@ def test_sync_private_correct_current_problem_scores_for_normal_user():
     assert "本题来自 CF542D" in text, text
     assert "已同步完成" not in text, text
     assert ("msg_001", "128076") in _reacted, _reacted
-    finished = [item for item in logged_events if item.get("type") == "finished"]
-    assert finished and finished[-1]["status"] == "correct", finished
-    assert finished[-1]["synced_submit_count"] == 1, finished[-1]
-    assert finished[-1]["synced_correct_count"] == 1, finished[-1]
     _cleanup()
     print("✅ sync: private AC scores current group problem for normal user")
 
@@ -4975,7 +4925,7 @@ if __name__ == "__main__":
     test_newproblem_force_requires_space()
     test_newproblem_solved_posts()
     test_newproblem_fallback_direct_saves_daily_msg_for_current_pid()
-    test_do_daily_post_does_not_switch_state_when_send_fails()
+    test_newproblem_post_does_not_switch_state_when_send_fails()
     test_status_ignores_other_groups_and_reports_idle()
     test_status_reports_newproblem_busy()
     test_submit_parallel_replies_follow_completion_order()

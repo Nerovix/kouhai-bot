@@ -86,8 +86,6 @@ async def handle(group_id: int, user_id: int, sender: dict,
         lines.append(
             "🔒 private judge：可以私聊我单独选题、提交和复盘；当前群题可同步回来，详细用法请私聊发 /help。"
         )
-        lines.append("")
-        lines.append("💡 每天中午12点，如果当前题还没人做出来会提醒大家继续肝；做出来了就自动刷新一道新题～")
     text = "\n".join(lines)
     msg = build_plain_message(text)
 

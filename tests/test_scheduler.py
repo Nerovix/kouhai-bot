@@ -8,7 +8,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from kouhai_bot.scheduler.engine import scheduler_loop
+from kouhai_bot.scheduler.engine import (
+    DEFAULT_ENABLED_JOBS,
+    _normalize_enabled_jobs,
+    scheduler_loop,
+)
 
 
 def test_scheduler_loop_stops_when_stop_event_is_set():
@@ -26,3 +30,15 @@ def test_scheduler_loop_stops_when_stop_event_is_set():
 
     asyncio.run(_run())
     assert seen == [2468]
+
+
+def test_scheduler_defaults_to_contest_check_only():
+    assert DEFAULT_ENABLED_JOBS == ["contest_check"]
+
+
+def test_scheduler_filters_removed_daily_jobs_from_old_configs():
+    jobs = _normalize_enabled_jobs(["daily_achievements", "daily_post", "contest_check"])
+    assert jobs == ["contest_check"]
+
+    disabled = _normalize_enabled_jobs(["daily_post", "contest_check"], ["contest_check"])
+    assert disabled == []

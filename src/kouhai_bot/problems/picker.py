@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-每日一题 — 选题+发题+揭晓
+题目选择工具 — 选题+揭晓
 Usage:
-  python3 daily_picker.py pick          # 选题并打印题目描述
-  python3 daily_picker.py post          # 选题并生成发群消息
-  python3 daily_picker.py reveal        # 揭晓前一天的题目
+  python3 picker.py pick          # 选题并打印题目描述
+  python3 picker.py reveal        # 揭晓上一道题
 """
 
 import hashlib
@@ -459,18 +458,8 @@ def format_problem_for_qq(p: dict) -> str:
     return f"CF{contest_id}{index} — {name} (rating {rating})"
 
 
-def post() -> str:
-    """Generate the daily post message (just greeting, no problem info)."""
-    problem = pick(with_statement=True)
-    msg = (
-        f"中午好呀☀️ 今天的每日一题来咯～\n\n"
-        f"欢迎@我交流做法～💪"
-    )
-    return msg
-
-
 def reveal() -> str:
-    """Reveal yesterday's problem."""
+    """Reveal the previous problem."""
     if not os.path.exists(_state_file()):
         return "还没有发过题哦"
 
@@ -541,7 +530,7 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(GROUPS_DIR, group_id), exist_ok=True)
 
     if len(cmd_args) < 1:
-        print("Usage: daily_picker.py [--group <id>] [--data-dir <path>] [--min-rating <n>] [--max-rating <n>] pick|post|reveal")
+        print("Usage: picker.py [--group <id>] [--data-dir <path>] [--min-rating <n>] [--max-rating <n>] pick|reveal")
         sys.exit(1)
 
     cmd = cmd_args[0]
@@ -579,8 +568,6 @@ if __name__ == "__main__":
                     if stmt.get("notes"):
                         print("\nNotes:")
                         print(stmt["notes"][:500])
-        elif cmd == "post":
-            print(post())
         elif cmd == "reveal":
             print(reveal())
         elif cmd == "statement":

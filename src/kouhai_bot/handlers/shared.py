@@ -1018,86 +1018,25 @@ _SUMMARY_LEAK_RE = re.compile(
 )
 _SUMMARY_FORMAT_RE = re.compile(r"(^|\n)\s*(输入|输出|样例)\s*[:：]", re.I)
 _SUMMARY_MARKDOWN_RE = re.compile(r"(^|\n)\s*(#{1,6}\s+|[-*]\s+|```|\d+\.\s+)")
-_SUMMARY_SIMPLE_SUBSCRIPT_RE = re.compile(r"\b[A-Za-z]_(?:\{[^}]{1,24}\}|[A-Za-z0-9]+)")
-_SUMMARY_UNICODE_SUBSCRIPT_RE = re.compile(r"([A-Za-z])([₀₁₂₃₄₅₆₇₈₉ᵢⱼₖₙ₊₋]+)")
-_SUMMARY_LATEX_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
-_SUMMARY_COMPLEX_LATEX_RE = re.compile(
-    r"\\(?:sum|prod|frac|binom|sqrt|lfloor|rfloor|lceil|rceil|left|right)|[_^]\{[^}]{3,}\}"
-)
 _SUMMARY_UNICODE_NOTATION_GUIDE = (
-    "Unicode 角标弹药表："
-    "下标数字 ₀₁₂₃₄₅₆₇₈₉；"
-    "常用下标字母/符号 ₐ ₑ ₕ ᵢ ⱼ ₖ ₗ ₘ ₙ ₒ ₚ ᵣ ₛ ₜ ᵤ ᵥ ₓ ₊ ₋ ₌ ₍ ₎；"
-    "上标数字 ⁰¹²³⁴⁵⁶⁷⁸⁹；"
-    "常用上标字母/符号 ᵃ ᵇ ᶜ ᵈ ᵉ ᶠ ᵍ ʰ ⁱ ʲ ᵏ ˡ ᵐ ⁿ ᵒ ᵖ ʳ ˢ ᵗ ᵘ ᵛ ʷ ˣ ʸ ᶻ ⁺ ⁻ ⁼ ⁽ ⁾。"
-    "常见写法：aᵢ、aⱼ、aₖ、aₙ、aᵢ₊₁、x²、2ᵏ、10¹⁸、10⁹+7。"
-    "没有常用 Unicode 下标的变量不要硬造；端点下标不确定时优先写成自然语言，如“给定的若干元素/所有给定位置”。"
+    "Unicode 角标白名单：只使用下面明确列出的字符，不要自己创造看起来像角标的字母。"
+    "下标数字：₀₁₂₃₄₅₆₇₈₉；"
+    "下标拉丁字母：ₐ ₑ ₕ ᵢ ⱼ ₖ ₗ ₘ ₙ ₒ ₚ ᵣ ₛ ₜ ᵤ ᵥ ₓ；"
+    "下标希腊字母：ᵦ ᵧ ᵨ ᵩ ᵪ；"
+    "下标其他字母：ₔ；"
+    "下标符号：₊ ₋ ₌ ₍ ₎；"
+    "上标数字：⁰¹²³⁴⁵⁶⁷⁸⁹；"
+    "上标小写拉丁字母：ᵃ ᵇ ᶜ ᵈ ᵉ ᶠ ᵍ ʰ ⁱ ʲ ᵏ ˡ ᵐ ⁿ ᵒ ᵖ ʳ ˢ ᵗ ᵘ ᵛ ʷ ˣ ʸ ᶻ；"
+    "上标大写拉丁字母：ᴬ ᴮ ᴰ ᴱ ᴳ ᴴ ᴵ ᴶ ᴷ ᴸ ᴹ ᴺ ᴼ ᴾ ᴿ ᵀ ᵁ ⱽ ᵂ；"
+    "上标希腊字母：ᵅ ᵝ ᵞ ᵟ ᵋ ᶿ ᵠ ᵡ；"
+    "上标其他字母：ᵊ ᵌ ᵸ ᵎ ᵔ ᵕ ᵙ ᵜ ᵚ ᶛ；"
+    "上标符号：⁺ ⁻ ⁼ ⁽ ⁾。"
+    "常见写法：aᵢ、aⱼ、aₖ、aₙ、aᵢ₊₁、dpᵢⱼ、x²、2ᵏ、10¹⁸、10⁹+7。"
+    "没有列出的下标/上标字母（例如下标 b/c/d/f/g/q/w/y/z，或上标 q）不要硬造；"
+    "端点下标不确定或字符白名单不够用时，优先改成自然语言，如“给定的若干元素/所有给定位置”。"
 )
-_SUBSCRIPT_TRANS = str.maketrans({
-    "0": "₀",
-    "1": "₁",
-    "2": "₂",
-    "3": "₃",
-    "4": "₄",
-    "5": "₅",
-    "6": "₆",
-    "7": "₇",
-    "8": "₈",
-    "9": "₉",
-    "i": "ᵢ",
-    "j": "ⱼ",
-    "k": "ₖ",
-    "n": "ₙ",
-    "+": "₊",
-    "-": "₋",
-})
-_SUPERSCRIPT_TRANS = str.maketrans({
-    "0": "⁰",
-    "1": "¹",
-    "2": "²",
-    "3": "³",
-    "4": "⁴",
-    "5": "⁵",
-    "6": "⁶",
-    "7": "⁷",
-    "8": "⁸",
-    "9": "⁹",
-})
-
-
-def _to_subscript(text: str) -> str:
-    return text.translate(_SUBSCRIPT_TRANS)
-
-
-def _to_superscript(text: str) -> str:
-    return text.translate(_SUPERSCRIPT_TRANS)
-
-
 def _polish_summary_notation(summary: str) -> str:
-    text = summary.strip()
-    if not _SUMMARY_COMPLEX_LATEX_RE.search(text):
-        text = re.sub(
-            r"\b([A-Za-z])_\{([0-9ijkn+-]{1,8})\}",
-            lambda m: m.group(1) + _to_subscript(m.group(2)),
-            text,
-        )
-        text = re.sub(
-            r"\b([A-Za-z])_([0-9ijkn])\b",
-            lambda m: m.group(1) + _to_subscript(m.group(2)),
-            text,
-        )
-    text = re.sub(
-        r"10\^\{?([0-9]{1,3})\}?",
-        lambda m: "10" + _to_superscript(m.group(1)),
-        text,
-    )
-    text = re.sub(
-        r"\b1e([0-9]{1,3})\b",
-        lambda m: "10" + _to_superscript(m.group(1)),
-        text,
-        flags=re.I,
-    )
-    return text
+    return summary.strip()
 
 
 def _summary_system_prompt() -> str:
@@ -1211,20 +1150,6 @@ def _summary_quality_issues(summary: str, limits_text: str = "") -> list[str]:
         issues.append("summary omits time limit")
     if not _limit_value_present(text, memory_value, kind="memory"):
         issues.append("summary omits memory limit")
-
-    simple_subscripts = _SUMMARY_SIMPLE_SUBSCRIPT_RE.findall(text)
-    unicode_subscripts = _SUMMARY_UNICODE_SUBSCRIPT_RE.findall(text)
-    generic_i_bases = {base for base, sub in unicode_subscripts if sub == "ᵢ"}
-    latex_commands = _SUMMARY_LATEX_COMMAND_RE.findall(text)
-    has_complex_latex = bool(_SUMMARY_COMPLEX_LATEX_RE.search(text))
-    if (
-        (simple_subscripts and not has_complex_latex)
-        or len(simple_subscripts) >= 6
-        or len(generic_i_bases) >= 5
-        or len(unicode_subscripts) >= 18
-        or len(latex_commands) >= 4
-    ):
-        issues.append("summary overuses LaTeX/simple subscripts")
     return issues
 
 
@@ -1323,13 +1248,20 @@ async def translate_sample_notes(notes_text: str) -> tuple[str | None, str]:
     cfg = get_config()
     prompt = (
         "下面是题目中与样例相关的解释（Notes）。\n"
-        "请把它翻译为自然、准确的中文，保持原意，不要扩写，不要加入原文没有的结论。\n"
+        "请把它忠实翻译为自然、准确的中文；只做翻译，不要总结、点评、补充解释、改写成题解，"
+        "也不要加入原文没有的结论。\n"
         "输出约束（严格执行）：\n"
         "1) 只输出纯文本正文，不要标题或前言。\n"
-        "2) 禁止 Markdown：不要代码块、反引号、粗体、列表语法。\n"
-        "3) 禁止 LaTeX 命令：不要出现反斜杠命令（例如 \\xrightarrow、\\lt、\\gt、\\leq）。\n"
-        "4) 需要表达符号时，直接使用可读字符：→、<、>、≤、≥、≠、×、÷、⊕ 等。\n"
-        "5) 若原文是公式/符号，优先改写为中文句子或上述可读符号；不要保留 LaTeX 形式。\n\n"
+        "2) 保留原文段落结构；逐句翻译，不要把多句样例解释压成一句概述。不要使用 Markdown 标题、代码块、反引号、粗体、列表语法。\n"
+        "3) 样例中的枚举、集合、操作序列、答案数值必须完整保留；不要写省略号，不要用“等”“若干”代替原文列出的对象，不要中途截断。\n"
+        "4) LaTeX 是最后手段：普通数组下标和幂次优先用 Unicode 角标，如 aᵢ、a₁、a₂、aₙ、10¹⁸、10⁹+7；"
+        "不要输出普通下划线下标，如 a_i、dp_i_j、inc_i、pref_i；改写成 aᵢ、dpᵢⱼ、incᵢ、prefᵢ，或用自然语言。"
+        f"{_SUMMARY_UNICODE_NOTATION_GUIDE}"
+        "5) 简单关系和运算直接使用可读字符：→、<、>、≤、≥、≠、×、÷、⊕、mod 等；"
+        "\\{a,b\\} 写成集合 {a,b}，O(n^2) 写成 O(n²) 或 O(n^2)。\n"
+        "6) 禁止不必要的 LaTeX 命令，不要出现 \\( \\)、$$、代码围栏，"
+        "不要把简单的 \\lt、\\gt、\\leq、\\geq、\\times、\\oplus 原样留下；"
+        "只有复杂求和、递推、分式、多重下标、精确定义用中文或 Unicode 会失真时，才保留最少必要 LaTeX。\n\n"
         f"{content}"
     )
     result = await call_chat_completion_result(
@@ -1338,8 +1270,8 @@ async def translate_sample_notes(notes_text: str) -> tuple[str | None, str]:
                 "role": "system",
                 "content": (
                     "你是算法竞赛选手。你要把题目样例解释忠实翻译成中文，"
-                    "要求简洁、可读，且不得编造信息。"
-                    "你必须输出纯文本，禁止 Markdown 和 LaTeX 命令。"
+                    "要求简洁、可读，且不得编造信息。只做翻译，不做总结；长枚举和操作序列也必须完整翻译，不得截断。"
+                    "你必须输出纯文本；LaTeX 只在不用会失真时保留，普通下标和幂次优先使用 Unicode 角标。"
                 ),
             },
             {"role": "user", "content": prompt},
@@ -1389,17 +1321,23 @@ async def translate_editorial_to_zh(
                     "如果题解明显在讲另一道题，或题解内容与题面目标/变量/结论对不上，输出 matched=no，"
                     "不要翻译、不要解释。"
                     "如果只是题解使用了不同记号、只覆盖核心思路、或题面与题解能合理对应，输出 matched=yes。"
-                    "matched=yes 时，result 是可在 QQ 群直接阅读的中文题解译文（仅思路与算法说明，不要贴代码）。"
+                    "matched=yes 时，result 是可在 QQ 群直接阅读的中文题解译文。"
+                    "只做忠实翻译，不要总结、压缩成提纲、点评、扩写、补充原文没有的做法或结论。"
+                    "如果 official_editorial 是整场比赛的多题合集，只翻译 pid 对应的当前题章节，不要翻译其他题；"
+                    "但当前题章节内除代码外的每个非空段落都要覆盖，按原文顺序逐段翻译，不要合并删段。"
+                    "每个算法步骤、定义、转移、复杂度说明都至少要有对应译文；不要把多个步骤压成一句概述，也不要用省略号。"
                     "只翻译思路、做法、复杂度等文字说明；原文中的代码、伪代码、"
                     "以反引号或代码块形式出现的程序片段一律不要输出，可用一句「实现见官方代码」带过。"
                     "不要增删关键算法步骤，不要添加原文没有的内容。"
-                    "LaTeX/公式处理（重要）：默认不要用 LaTeX，不要输出 \\( \\)、$$、$$$ 或代码围栏。"
-                    "把公式改写成流畅中文或简单符号，例如："
-                    "\\{a,b\\} 写成集合 {a,b}；"
-                    "O(n^2) 写成 O(n²) 或 O(n^2)；\\le \\lt 写成 ≤ <。"
-                    "仅当不用 LaTeX 会产生歧义、且无法用中文说清楚时，才保留最少量的 LaTeX 片段。"
-                    "result 输出连贯纯文本，不要 Markdown 标题、列表语法。"
-                    "不要写「以下是翻译」等套话。"
+                    "result 输出连贯纯文本，尽量保留当前题章节的自然段；不要 Markdown 标题、列表语法、代码围栏，"
+                    "不要写「以下是翻译」「总结」等套话。"
+                    "LaTeX/公式处理（重要）：默认不要用 LaTeX，不要输出 \\( \\)、$$ 或 $$$。"
+                    "普通数组下标和幂次优先用 Unicode 角标，如 aᵢ、aⱼ、a₁、a₂、aₙ、aᵢ₊₁、x²、2ᵏ、10¹⁸、10⁹+7。"
+                    "不要输出普通下划线下标，如 a_i、dp_i_j、inc_i、pref_i；改写成 aᵢ、dpᵢⱼ、incᵢ、prefᵢ，或用自然语言。"
+                    f"{_SUMMARY_UNICODE_NOTATION_GUIDE}"
+                    "简单关系和运算直接使用可读字符：≤、≥、<、>、≠、×、÷、⊕、mod；"
+                    "\\{a,b\\} 写成集合 {a,b}，O(n^2) 写成 O(n²) 或 O(n^2)。"
+                    "只有复杂求和、递推、分式、多重下标、精确定义用中文或 Unicode 会失真时，才保留最少必要 LaTeX。"
                 ),
             },
             {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)},

@@ -551,15 +551,17 @@ def test_summary_prompt_lists_unicode_notation_inventory():
     repair = _build_summary_repair_prompt("stmt", "input", "limits", "bad", ["issue"])
 
     for text in (prompt, repair):
-        assert "Unicode 角标弹药表" in text
-        assert "₀₁₂₃₄₅₆₇₈₉" in text
-        assert "⁰¹²³⁴⁵⁶⁷⁸⁹" in text
-        assert "ᵢ ⱼ ₖ" in text
-        assert "ᵃ ᵇ ᶜ" in text
+        assert "Unicode 角标白名单" in text
+        assert "下标数字：₀₁₂₃₄₅₆₇₈₉" in text
+        assert "上标数字：⁰¹²³⁴⁵⁶⁷⁸⁹" in text
+        assert "下标拉丁字母：ₐ ₑ ₕ ᵢ ⱼ ₖ" in text
+        assert "上标小写拉丁字母：ᵃ ᵇ ᶜ" in text
+        assert "上标大写拉丁字母：ᴬ ᴮ ᴰ" in text
         assert "aᵢ₊₁" in text
         assert "10¹⁸" in text
         assert "10⁹+7" in text
-        assert "端点下标不确定时优先写成自然语言" in text
+        assert "不要自己创造看起来像角标的字母" in text
+        assert "字符白名单不够用时，优先改成自然语言" in text
 
 
 def test_summarize_problem_uses_configured_timeout():
@@ -649,47 +651,18 @@ def test_summarize_problem_repairs_missing_time_and_memory_limits():
     assert "summary omits memory limit" in calls[1]
 
 
-def test_summarize_problem_repairs_ordinary_subscript_clutter_but_allows_complex_formula():
+def test_summarize_problem_does_not_rewrite_formula_notation_with_regex():
     cfg = _openai_cfg(summary_timeout_sec=321)
-    calls = []
-    clutter = "给定 a_i、b_i、c_i、d_i、e_i、f_i，要求对每个 i 输出答案。"
-    repaired = "给定每个位置的若干参数，要求逐位置计算并输出答案。"
+    summary_text = "给定 a_i、a_n、1e18、10^9+7，以及 f(x)=\\sum_{i=1}^{n} floor(x / p_i)。"
 
     async def fake_call_chat(messages, **kwargs):
-        calls.append(messages[-1]["content"])
-        text = clutter if len(calls) == 1 else repaired
-        return ChatCompletionResult(text=json.dumps({"summary": text}), model_tag="🐳")
+        return ChatCompletionResult(text=json.dumps({"summary": summary_text}), model_tag="🐳")
 
     with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
             patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
         summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
 
-    assert summary == repaired
-    assert tag == "🐳"
-    assert len(calls) == 2
-
-    simple = "给定 a_i、a_n、1e18 和 10^9+7。"
-
-    async def fake_simple_call(messages, **kwargs):
-        return ChatCompletionResult(text=json.dumps({"summary": simple}), model_tag="🐳")
-
-    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
-            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_simple_call):
-        summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
-
-    assert summary == "给定 aᵢ、aₙ、10¹⁸ 和 10⁹+7。"
-    assert tag == "🐳"
-
-    complex_formula = r"定义 f(x)=\sum_{i=1}^{n} floor(x / p_i)，要求对每个询问计算满足条件的最小 x。"
-
-    async def fake_formula_call(messages, **kwargs):
-        return ChatCompletionResult(text=json.dumps({"summary": complex_formula}), model_tag="🐳")
-
-    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
-            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_formula_call):
-        summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
-
-    assert summary == complex_formula
+    assert summary == summary_text
     assert tag == "🐳"
 
 

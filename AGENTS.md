@@ -21,7 +21,6 @@ NapCat (QQ) ──WS──> worker.py
   Group and private help are both delivered as merged-forward cards, with direct text
   only as fallback.
 - **Scheduler current-group config**: `~/.kouhai-bot/scheduler_config.json` stores job list + time overrides for `CURRENT_GROUP`. Jobs are defined in `scheduler/jobs.py`.
-- **Command event log**: `eventlog.py` writes append-only JSONL command events by real local date. `achievements.py` reads those events for the 04:00-to-04:00 daily report. `eventlog_backfill.py` and `tools/backfill_command_events.py` can reconstruct recent saved submit/clarify/review events from `scoreboard.json`.
 - **Formula VL**: `problems/fetcher.py` handles CF formula images → Qwen-VL → inline LaTeX. Has white-bg preprocessing, hallucination detection, retry.
 - **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before VL pipeline via `_vl_processed` flag. Stale caches with images are re-fetched with Qwen-VL. Problems with non-formula images (tex-graphics / diagrams) are skipped.
 - **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
@@ -33,7 +32,7 @@ NapCat (QQ) ──WS──> worker.py
   the configured value is the floor, the first solver's next wait doubles, and other
   configured users' waits halve down to the floor. Runtime wait state lives in
   `scoreboard.json.user_group_waits`; real QQ IDs belong only in local config/runtime data.
-  `do_daily_post` writes `state.json` `posted_at`; if missing, cooldown falls back
+  `/newproblem` writes `state.json` `posted_at`; if missing, cooldown falls back
   to matching `daily_msg.json` mtime. Dynamic-wait users who submit before their group
   wait expires are redirected to private judge instead of being judged in the group.
 - **Curfew (宵禁)**: `curfew.py` — `/submit` is blocked during a daily quiet window defined
@@ -53,7 +52,7 @@ NapCat (QQ) ──WS──> worker.py
   or rejected by upstream APIs.
 - **Official CF tutorials**: Scraped editorials live under `{data_dir}/tutorials/{pid}.json`
   (see `tools/cf_tutorial_agent.py`; low-level CF HTML helpers live in `tools/scrape_cf_tutorial.py`). Runtime extraction is in `tutorials.py`. On the
-  On **new problem** (`do_daily_post` / `/newproblem`), `schedule_prefetch_editorial(pid)`
+  On **new problem** (`/newproblem`), `schedule_prefetch_editorial(pid)`
   starts background translation (using the `llm.general_model` queue) into `tutorial_translations/` so first AC
   can deliver without waiting. On **first AC**, congrats is sent in `_finalize_submit`, then
   `schedule_post_solve_editorial_followup()` only **delivers** (awaits in-flight prefetch if
@@ -130,7 +129,6 @@ Each provider in `llm.smart_model` or `llm.general_model`:
 | `problem.max_rating` | 3000 | Max CF rating |
 | `problem.newproblem_cooldown` | 300 | `/newproblem` cooldown (seconds) |
 | `problem.submit_ac_backdoor` | `""` | If non-empty, matching `/submit` skips judge |
-| `problem.daily_post_cron` | `"0 12 * * *"` | Cron expression for daily post |
 
 #### `curfew` section
 
@@ -313,7 +311,7 @@ an administrator rather than claiming the model is "thinking too long".
 
 Each provider can have a `model_tag` — a short emoji/string (e.g. `🐳`, `֎AI`). When
 non-empty, it is appended directly (no newline) to every LLM-generated user message:
-`/submit` results (correct and incorrect), `/clarify`, `/review`, daily-problem
+`/submit` results (correct and incorrect), `/clarify`, `/review`, LLM-generated
 summaries, and official editorial translations. The LLM has no knowledge of the tag —
 tagging is done entirely by the framework after the response is received.
 
@@ -331,7 +329,6 @@ groups/<gid>/daily_msg.json  # forward card payload (msg_id/sample_msg_ids/note_
 groups/<gid>/problem_summaries.json # saved Chinese problem summaries keyed by pid
 groups/<gid>/used.json       # used problem IDs
 groups/<gid>/groupctx_*.json # group message context
-groups/<gid>/command_events/YYYY-MM-DD.jsonl # structured command event log by real local date
 groups/<gid>/problem_ratings.json # cached problem rating by pid for weighted scoreboard totals
 private_judge/users/<uid>.json # per-user private judge current problem, history, solved markers, redirect state
 annotations/pending/<gid>/<pid>.json # pending human-label bundle for solved problems
@@ -374,7 +371,7 @@ Stateful commands (`/submit`, `/clarify`, `/review`, `/clear`) no longer seriali
 through one global lock or one per-group FIFO execution queue. Group requests run
 through a **per-group state scheduler** implemented in `submit.py`; private judge
 requests run through a separate **per-user private coordinator**. `/newproblem` and
-`daily_post` use their own per-group post lock and commit current-problem state only
+`/newproblem` uses its own per-group post lock and commits current-problem state only
 after delivery.
 
 Key rules:
@@ -416,14 +413,14 @@ Key rules:
   same-problem scenario. When superseded by another `/submit`, the older submit's
   persisted pending record is updated to `result="superseded"` so a quick correction or
   addendum can refer to it after a restart, and the received `/submit` still counts as a
-  submit attempt in daily achievements for group commands. When superseded by `/clear`,
+  submit attempt in saved user history. When superseded by `/clear`,
   it is removed with the rest of that user's current-problem context.
-- **New problem visibility**: `/newproblem` / `daily_post` pick and summarize a candidate
+- **New problem visibility**: `/newproblem` picks and summarizes a candidate
   without changing `state.json`. Until the new card is successfully delivered, all
   commands still see the old problem. Failed delivery leaves the old current problem
   intact.
 - **New problem serialization/status**: `/newproblem`, `/newproblem --force`, and
-  scheduler `daily_post` share a per-group post lock. User-triggered new-problem
+  `/newproblem` uses a per-group post lock. User-triggered new-problem
   commands are rejected immediately with a busy reminder while another new problem is
   being prepared. `/status` reports this post work as busy while the lock holder is
   building/sending the card.
@@ -432,7 +429,7 @@ Status helpers used by `/status`:
 
 - `get_group_lock_status(group_id)` — earliest active stateful request for that group, if any
 - `get_private_lock_status(user_id, group_id)` — earliest active private request for that user, if any
-- `get_newproblem_status(group_id)` — active `/newproblem`/daily post for that group, if any
+- `get_newproblem_status(group_id)` — active `/newproblem` for that group, if any
 
 ### `/clear` — Clear current-problem user context
 
@@ -466,61 +463,7 @@ runs every 60 seconds. Both paths accept only confirmed `CURRENT_GROUP` members 
 otherwise return silently; requests already consumed by another QQ client may not be
 visible to the poller.
 
-### Command Event Log
 
-`eventlog.py` owns the append-only structured command log under
-`groups/<gid>/command_events/YYYY-MM-DD.jsonl`.
-
-- Dispatch writes a `received` event after a group command is recognized. Private
-  commands are not written to group command event logs.
-- Dispatch writes generic `finished` events (`ok` / `error`) for commands that do not
-  publish detailed status themselves.
-- Group `/submit`, `/clarify`, and `/review` carry the same event metadata through the group
-  state scheduler and write detailed final statuses such as `correct`, `incorrect`,
-  `post_solve_correct`, `timeout`, `offtopic`, `stale`, `no_problem`, and
-  `no_review_problem`. `post_solve_correct` means a concurrent `/submit` was judged
-  correct after an earlier admitted submit had already solved the same problem; it is
-  saved to user history but not counted as a new solve and does not send an extra
-  user-visible message.
-- Group `/sync` writes `status="synced"` or `status="correct"` itself on success. Its
-  finished event includes `synced_submit_count`, `synced_clarify_count`,
-  `synced_review_count`, and `synced_correct_count` so private-judge records imported
-  into the group count in daily achievements.
-- Event files are partitioned by the event's real Asia/Shanghai date. Do not store
-  04:00 logical-day values in the log; achievement/reporting code should read the
-  relevant real-date files and filter by `timestamp`.
-
-`tools/backfill_command_events.py` can backfill recent event logs from existing
-`scoreboard.json` `user_submissions`:
-
-```bash
-uv run python tools/backfill_command_events.py --days 2
-```
-
-Backfilled events use `source="backfill_scoreboard"` and a stable `source_key`, so
-the tool is safe to run repeatedly. It only reconstructs saved submit/clarify/review
-records; it cannot recover off-topic/no-problem/timeout requests that were never
-written to `user_submissions`.
-
-### Daily Achievements
-
-`achievements.py` computes the daily achievement report from command events. It uses
-the previous 04:00-to-04:00 window, but that logical window is computed at read time
-only. The event log still stores real timestamps and real local-date file partitions.
-
-The built-in scheduler job `daily_achievements` runs at 12:00 and reports:
-
-- earliest/latest `/submit`, including group `/sync` commands that import submit records
-- most solved problems (`/submit status="correct"` plus successful scoring `/sync`)
-- most `/submit` attempts (received `/submit` commands plus submit records imported by
-  `/sync`; superseded `status="stale"` submits still count as attempts)
-- most `/review`, including review records imported by `/sync`
-- most `/clarify`, including clarify records imported by `/sync`
-
-Existing group scheduler configs that already enable `daily_post` are normalized to
-run `daily_achievements` immediately before it. Set
-`"disabled_jobs": ["daily_achievements"]` for a group if it should not receive
-achievement reports.
 
 ### `/submit` — Judge Flow
 
@@ -568,7 +511,7 @@ achievement reports.
 
 Private `/submit` uses the same judge path and private history, but a correct result
 only marks the problem solved in `private_judge/users/<uid>.json`; it does not update
-the group scoreboard or daily achievements. The private success message includes the
+the group scoreboard. The private success message includes the
 problem id (for example `做对了 1234A！`) so users can tell which private problem was
 accepted. If the private problem is the current group problem, the success message
 tells the user they can `/sync` in the service group to score it if the group has not
@@ -667,7 +610,6 @@ commands are rejected in private with a friendly message.
   group `/sync` if the group has not already solved that pid. Scoring is performed under
   the group coordinator lock, reveals the original problem source, schedules the official
   editorial follow-up, writes the private records into group `scoreboard.json`, and logs
-  the imported records for daily achievements.
 - Dynamic-wait/starred users redirected to private judge can still `/sync`. While
   their current group problem submit CD is active, only `clarify` records are copied
   in either direction and submit/review/correct records are ignored. Once the CD
@@ -680,7 +622,7 @@ re-read `get_latest_solved_problem_id()` during review compute. Snapshot the tar
 pid when admitting the request and carry that pid through compute + finalize, or a
 newer AC can silently retarget an older review request.
 
-### `/newproblem` & Daily Post
+### `/newproblem`
 
 `/newproblem` vs `/newproblem --force` when today's problem is unsolved:
 
@@ -689,14 +631,7 @@ newer AC can silently retarget an older review request.
   (shared cooldown + per-group post lock).
 - Plain `/problem` (or `/pb`) still resends the current problem card.
 
-`/newproblem` and scheduler `daily_post` share the same locked post implementation.
-The command path first checks the per-group post lock. If another `/newproblem` or
-`daily_post` is already preparing a card, the user gets a short "新的题目正在准备中，别急～"
-reply and the request is not queued. Otherwise the command holds the lock while checking
-cooldown, checking whether plain `/newproblem` is allowed, and building/sending the card.
-Cooldown starts only after a new problem card is successfully delivered and committed.
-The scheduler path enters via `do_daily_post(group_id, prefix)`, which waits on the same
-lock and wraps the same locked implementation:
+`/newproblem` uses a per-group post lock. If another `/newproblem` is already preparing a card, the user gets a short "新的题目正在准备中，别急～" reply and the request is not queued. Otherwise the command holds the lock while checking cooldown, checking whether plain `/newproblem` is allowed, and building/sending the card. Cooldown starts only after a new problem card is successfully delivered and committed. The locked implementation:
 1. Reveal yesterday's problem via `picker.py reveal`
 2. Pick a candidate problem via `picker.py pick-json --with-statement`; this marks used
    problems and caches statements but does **not** write `state.json`
@@ -714,7 +649,7 @@ lock and wraps the same locked implementation:
 6. Save the Chinese summary to `problem_summaries.json` keyed by pid for later reuse
 7. `schedule_prefetch_editorial(pid)` — background editorial translation (not sent yet)
 
-`/newproblem` and scheduler `daily_post` share a per-group post lock so two new posts
+`/newproblem` uses a per-group post lock so two new posts
 do not overlap. They no longer block `/submit`, `/clarify`, or `/review`; those commands
 continue using their admission-time problem snapshot while the new card is being built.
 
@@ -761,7 +696,7 @@ uv run python tools/tutorial_tools.py validate --heuristic-only
 
 **Prefetch** (on new problem + active-worker startup):
 
-- `do_daily_post` calls `schedule_prefetch_editorial(pid)` **immediately after pick** (in parallel
+- `/newproblem` calls `schedule_prefetch_editorial(pid)` **immediately after pick** (in parallel
   with `summarize_problem`, not after it — otherwise first AC waits for summary+translation)
 - `worker.py` bootstraps `schedule_prefetch_for_current_group()` on startup (covers worker restart without new post)
 - Background `prefetch_editorial_zh(pid)` → `tutorial_translations/{pid}.txt` or `{pid}.no_editorial`
@@ -804,10 +739,8 @@ Local HTML labeling UI:
 - **Engine**: `scheduler/engine.py` — loop at 60s intervals, runs due jobs per group
   configured by `CURRENT_GROUP`; accepts `stop_event` so the single worker can stop cleanly
 - **Jobs** (defined in `scheduler/jobs.py`):
-  - `daily_achievements` — 12:00: posts yesterday's 04:00-to-04:00 achievement report.
-  - `daily_post` — 12:00: checks `should_post_today`. Solved → new problem. Unsolved → reminder.
   - `contest_check` — 12:01: checks CF API for 24h upcoming contests, @all notification with 2s delay.
-- Daily post uses the same `do_daily_post` path as `/newproblem`; the post path has a
+- `/newproblem` has a
   per-group lock and commits `state.json` only after successful delivery.
 
 ## Adding a New Command
@@ -941,8 +874,8 @@ The summary shown in the group post is now persisted in `groups/<gid>/problem_su
 Annotation export and the HTML labeling UI reuse this first before attempting any new
 translation. Do not force synchronous translation on detail-page clicks.
 
-### 12. Daily post uses merged-forward
-`do_daily_post()` self-sends summary text, sample nodes, optional translated notes node,
+### 12. `/newproblem` uses merged-forward
+`/newproblem` self-sends summary text, sample nodes, optional translated notes node,
 and snake image, then forwards them as one merged card. `daily_msg.json` must persist
 all node references (`msg_id`, `sample_msg_ids`, optional `note_msg_id`, `snake_msg_id`)
 so `/problem` can resend the same card. If merged-forward fails but direct group text
@@ -1187,10 +1120,10 @@ selected by the `--group` flag.
 
 ## Design Decisions
 
-- **No catch_up_daily_post**: The old bridge had a startup catch-up that posted if
+- **No auto daily post catch-up**: The old bridge had a startup catch-up that posted if
   started after 12:00 with no problem. This was intentionally REMOVED — it makes
   workflow unpredictable. Missed is missed; don't auto-recover.
-- **Daily post delivery**: Must use merged-forward (self-send text + snake image →
+- **New problem delivery**: Must use merged-forward (self-send text + snake image →
   forward card + daily_msg.json). Plain-text direct send is fallback-only; if it
   succeeds, it still needs current-problem `daily_msg.json` so `/problem` never resends
   stale cached cards.

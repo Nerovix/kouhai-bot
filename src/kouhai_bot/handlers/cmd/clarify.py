@@ -8,7 +8,6 @@ import re
 from .. import registry
 from ..registry import CommandDef
 from ...context import get_display_name
-from ...eventlog import EVENT_META_KEY
 from ...napcat.client import (
     build_plain_message,
     send_group_msg,
@@ -53,7 +52,6 @@ async def handle(group_id: int, user_id: int, sender: dict,
         sender,
         message_id,
         question,
-        event_log=event.get(EVENT_META_KEY),
         scope=scope,
     )
 

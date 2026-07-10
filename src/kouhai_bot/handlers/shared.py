@@ -1102,7 +1102,7 @@ def _polish_summary_notation(summary: str) -> str:
 
 def _summary_system_prompt() -> str:
     return (
-        "你是算法竞赛选手，在 QQ 群用中文介绍每日一题。你的目标不是完整翻译题面，"
+        "你是算法竞赛选手，在 QQ 群用中文介绍一道题的题意。你的目标不是完整翻译题面，"
         "而是在不丢失限制和目标的前提下，写出短、自然、让人愿意读题的题意简述。"
         "必须只输出 JSON 对象，格式为 {\"summary\":\"...\"}。"
     )

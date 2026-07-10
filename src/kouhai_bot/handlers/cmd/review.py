@@ -15,7 +15,6 @@ from ..shared import (
 )
 from ...napcat.client import build_plain_message, send_group_msg, send_private_msg
 from ...context import get_display_name
-from ...eventlog import EVENT_META_KEY
 from ...private_judge import (
     GROUP_SCOPE,
     PRIVATE_SCOPE,
@@ -129,7 +128,6 @@ async def handle(group_id: int, user_id: int, sender: dict,
         question,
         review_pid=review_pid,
         mentioned_user_ids=_mentioned_user_ids(segments, requester_id=user_id),
-        event_log=event.get(EVENT_META_KEY),
         scope=scope,
     )
 

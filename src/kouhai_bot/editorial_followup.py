@@ -62,7 +62,7 @@ def _prefetch_needed(pid: str, *, run_agent: bool) -> bool:
 
 
 def schedule_prefetch_editorial(pid: str, *, run_agent: bool = True) -> None:
-    """Start translating editorial when today's problem is set (/newproblem, daily_post)."""
+    """Start translating editorial when a new problem is set."""
     pid = (pid or "").strip()
     if not pid or not _prefetch_needed(pid, run_agent=run_agent):
         return

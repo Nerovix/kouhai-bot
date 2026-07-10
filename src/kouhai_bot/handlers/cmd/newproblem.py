@@ -1,7 +1,4 @@
-"""/newproblem command — force post a new daily problem.
-
-Also imported by scheduler for the daily 12:00 post (via do_daily_post).
-"""
+"""/newproblem command — post a new problem on demand."""
 
 from __future__ import annotations
 
@@ -116,7 +113,7 @@ async def enqueue_force_new_problem(
             "admitted_at": now,
         }
         try:
-            posted = await _do_daily_post_locked(
+            posted = await _post_new_problem_locked(
                 group_id,
                 prefix="刷新了一道新题🌟",
                 notify_group=True,
@@ -375,28 +372,10 @@ async def _send_problem_forward_card(
     }
     return fwd_resp, payload
 
-# ── Daily post ──────────────────────────────────────────────────────────
-
-async def do_daily_post(group_id: int, prefix: str | None = None) -> None:
-    """Pick a new problem, summarize, post to group.
-
-    This is the core logic shared between /newproblem and the daily cron.
-    """
-    async with _newproblem_lock(group_id):
-        _newproblem_active[group_id] = {
-            "group_id": group_id,
-            "user_id": 0,
-            "message_id": "",
-            "command": "daily_post",
-            "admitted_at": time.monotonic(),
-        }
-        try:
-            await _do_daily_post_locked(group_id, prefix)
-        finally:
-            _newproblem_active.pop(group_id, None)
+# ── New problem posting ─────────────────────────────────────────────────
 
 
-async def _do_daily_post_locked(
+async def _post_new_problem_locked(
     group_id: int, prefix: str | None = None, *, notify_group: bool = False,
 ) -> bool:
     cfg = get_config()
@@ -499,7 +478,7 @@ async def _do_daily_post_locked(
         logger.warning(f"[group_{group_id}] Summary error: {e}")
 
     # Step 4: Compose and deliver via merged-forward card
-    greeting = prefix if prefix else "中午好呀☀️ 先前题目已解出，来看看今天的每日一题吧！"
+    greeting = prefix if prefix else "来看看这道新题吧！"
     post_msg = f"{greeting}\n\n{desc}" if desc else greeting
     if model_tag:
         post_msg += model_tag
@@ -535,19 +514,19 @@ async def _do_daily_post_locked(
             except Exception as e:
                 logger.warning(f"[group_{group_id}] Failed to save fallback daily_msg.json: {e}")
             append_group_ctx(group_id, {"role": "assistant", "content": post_msg})
-            logger.info(f"[group_{group_id}] Daily post sent (fallback) ✓")
+            logger.info(f"[group_{group_id}] New problem post sent (fallback) ✓")
             return True
         else:
-            logger.error(f"[group_{group_id}] Daily post send failed")
+            logger.error(f"[group_{group_id}] New problem post send failed")
         return False
     append_group_ctx(group_id, {"role": "assistant", "content": post_msg})
     logger.info(
-        f"[group_{group_id}] Daily post forwarded ✓ "
+        f"[group_{group_id}] New problem post forwarded ✓ "
         f"({1 + len(sample_messages) + (1 if node_payload.get('note_msg_id') else 0) + (1 if node_payload.get('snake_msg_id') else 0)} msgs)"
     )
     await _commit_problem_state(group_id, picked_state)
     if pid:
-        save_problem_card_ref(group_id, fwd_resp, pid, "daily_post" if prefix is None else "newproblem")
+        save_problem_card_ref(group_id, fwd_resp, pid, "newproblem")
     await _send_high_difficulty_notice_group(group_id, picked_state)
 
     try:

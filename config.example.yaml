@@ -107,7 +107,6 @@ problem:
   max_rating: 2800
   newproblem_cooldown: 60    # /newproblem cooldown in seconds
   submit_ac_backdoor: "..."  # optional: if non-empty, matching /submit skips judge
-  daily_post_cron: "0 12 * * *"
 
 # ── Curfew (宵禁) ──
 # Block /submit during quiet hours (Beijing time).

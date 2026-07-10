@@ -131,7 +131,6 @@ class BotConfig:
     max_rating: int = 3000
     newproblem_cooldown: int = 300
     submit_ac_backdoor: str = ""
-    daily_post_cron: str = "0 12 * * *"
 
     # --- User groups ---
     user_groups: list[UserGroupConfig] = field(default_factory=list)
@@ -224,9 +223,6 @@ class BotConfig:
             c.submit_ac_backdoor = str(
                 problem.get("submit_ac_backdoor", c.submit_ac_backdoor)
             ).strip()
-            c.daily_post_cron = str(
-                problem.get("daily_post_cron", c.daily_post_cron)
-            )
         if "submit_ac_backdoor" in data:
             c.submit_ac_backdoor = str(data.get("submit_ac_backdoor", "")).strip()
 

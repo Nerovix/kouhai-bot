@@ -7,7 +7,6 @@ import re
 
 from .. import registry
 from ..registry import CommandDef
-from ...eventlog import EVENT_META_KEY
 from ...napcat.client import (
     build_private_reaction_message,
     send_private_msg,
@@ -36,7 +35,6 @@ async def handle(group_id: int, user_id: int, sender: dict,
         user_id,
         sender,
         message_id,
-        event_log=event.get(EVENT_META_KEY),
         scope=scope,
     )
 

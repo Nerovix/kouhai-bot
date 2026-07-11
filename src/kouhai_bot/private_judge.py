@@ -17,6 +17,7 @@ from typing import Any
 import cloudscraper
 
 from .config import get_config
+from .llm import strip_leaked_thinking
 from .handlers.shared import (
     get_problem_summary,
     get_today_problem,
@@ -536,7 +537,7 @@ async def _build_notes_message(stmt: dict) -> str:
         translated, _tag = await translate_sample_notes(raw_notes)
     except Exception:
         translated = ""
-    text = (translated or raw_notes).strip()
+    text = strip_leaked_thinking(translated or raw_notes)
     return f"样例解释：\n{text}" if text else ""
 
 

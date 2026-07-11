@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -13,6 +14,9 @@ import aiohttp
 from .config import get_config
 
 logger = logging.getLogger("kouhai-bot.llm")
+
+_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
+_THINK_TAG_RE = re.compile(r"</?think\b[^>]*>", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -48,10 +52,19 @@ def _chat_completions_url(base_url: str) -> str:
     return f"{base}/chat/completions"
 
 
+def strip_leaked_thinking(text: str) -> str:
+    """Remove provider-leaked thinking tags from user-visible content."""
+    if not text:
+        return ""
+    text = _THINK_BLOCK_RE.sub("", text)
+    text = _THINK_TAG_RE.sub("", text)
+    return text.strip()
+
+
 def _message_content_text(message: dict) -> str:
     content = message.get("content", "")
     if isinstance(content, str):
-        return content.strip()
+        return strip_leaked_thinking(content)
     if isinstance(content, list):
         parts: list[str] = []
         for item in content:
@@ -60,10 +73,10 @@ def _message_content_text(message: dict) -> str:
             text = item.get("text", "")
             if isinstance(text, str):
                 parts.append(text)
-        return "".join(parts).strip()
+        return strip_leaked_thinking("".join(parts))
     if content is None:
         return ""
-    return str(content).strip()
+    return strip_leaked_thinking(str(content))
 
 
 def _provider_uses_stream(
@@ -274,6 +287,7 @@ async def _read_streaming_chat_completion(
     usage: dict | None = None
 
     def finish(text: str) -> _ChatCompletionAttempt:
+        text = strip_leaked_thinking(text)
         if not text:
             logger.warning(
                 "%s API stream returned no text finish_reason=%s usage=%s",
@@ -443,8 +457,17 @@ async def _post_chat_completion_once(
                     failure_kind="service_unavailable",
                 )
             message = choices[0].get("message", {})
+            content_text = _message_content_text(message)
+            if not content_text:
+                logger.warning("%s API returned no text after cleanup", provider_name)
+                return _ChatCompletionAttempt(
+                    text=None,
+                    retryable=True,
+                    retry_after_sec=None,
+                    failure_kind="service_unavailable",
+                )
             return _ChatCompletionAttempt(
-                text=_message_content_text(message),
+                text=content_text,
                 retryable=False,
                 retry_after_sec=None,
                 failure_kind=None,

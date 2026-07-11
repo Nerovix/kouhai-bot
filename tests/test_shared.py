@@ -280,6 +280,78 @@ def test_general_model_tasks_preserve_provider_model_tag():
     assert calls[0]["model"] == "general"
 
 
+def test_multimodal_task_uses_multimodal_provider_and_preserves_image_content():
+    provider = LlmProviderConfig(
+        name="mmx",
+        api_key="sk-test",
+        base_url="http://localhost:8080/v1",
+        model="mmx-vision",
+        model_tag="『MMx』",
+    )
+    cfg = _openai_cfg(llm_multimodal_providers=[provider])
+    content = [
+        {"type": "text", "text": "Read this statement."},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+    ]
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["payload"].copy())
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion_result(
+            [{"role": "user", "content": content}],
+            task="multimodal_clarify",
+        ))
+
+    assert result.text == "OK"
+    assert result.model == "mmx-vision"
+    assert result.model_tag == "『MMx』"
+    assert calls[0]["messages"][0]["content"] == content
+    assert "max_tokens" not in calls[0]
+    assert "max_completion_tokens" not in calls[0]
+
+
+def test_summarize_problem_with_images_uses_multimodal_task():
+    provider = LlmProviderConfig(
+        name="mmx",
+        api_key="sk-test",
+        base_url="http://localhost:8080/v1",
+        model="mmx-vision",
+        model_tag="『MMx』",
+    )
+    cfg = _openai_cfg(llm_multimodal_providers=[provider], summary_timeout_sec=123)
+    calls = []
+
+    async def fake_call(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        return ChatCompletionResult(
+            text=json.dumps({"summary": "带图题意"}),
+            model_tag="『MMx』",
+        )
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared._download_image_data_url", return_value="data:image/png;base64,abc"), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call):
+        summary, tag = asyncio.run(summarize_problem(
+            "stmt",
+            "input",
+            "limits",
+            [{"src": "https://codeforces.com/p.png", "kind": "graphic"}],
+        ))
+
+    assert summary == "带图题意"
+    assert tag == "『MMx』"
+    assert calls[0]["task"] == "multimodal_summary"
+    content = calls[0]["messages"][1]["content"]
+    assert isinstance(content, list)
+    assert content[0]["type"] == "text"
+    assert content[-1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
+
+
 def test_task_entrypoints_are_blackbox_except_model_class_and_tag():
     smart_provider = LlmProviderConfig(
         name="deepseek-smart",

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cf_statement.py — Fetch CF problem statement, handle formula images via VL.
+cf_statement.py — Fetch CF problem statement and collect image metadata.
 
 Usage:
   python cf_statement.py 542 D                    # contestId + index
@@ -13,7 +13,8 @@ VL backends (set via --vl-backend or CF_VL_BACKEND env):
   - none     Dry-run only
 
 Returns:
-  - has_non_formula_images: True if problem contains tex-graphics diagrams → filter out
+  - images: tex-formula / tex-graphics metadata for multimodal consumers
+  - has_non_formula_images: True if problem contains tex-graphics diagrams
 """
 
 import argparse
@@ -24,6 +25,7 @@ import re
 import sys
 import urllib.request
 from io import BytesIO
+from urllib.parse import urljoin
 
 import cloudscraper
 from PIL import Image
@@ -107,11 +109,21 @@ def extract_problem_statement(html: str) -> str | None:
 
 # ── Find formula / graphics images ──────────────────────────────────────
 
+def normalize_image_src(src: str) -> str:
+    """Return an absolute Codeforces image URL."""
+    value = (src or "").strip()
+    if not value:
+        return ""
+    if value.startswith("//"):
+        return "https:" + value
+    return urljoin("https://codeforces.com", value)
+
+
 def find_all_tex_images(ps_html: str) -> tuple[list[dict], list[dict]]:
     """Find all tex-formula and tex-graphics images.
     Returns (formulas, graphics) — each a list of {tag, src, class, start, end}.
-    tex-formula = math formula images (should convert to LaTeX)
-    tex-graphics = diagrams/charts/drawings (should filter out the problem)
+    tex-formula = math formula images.
+    tex-graphics = diagrams/charts/drawings.
     """
     formulas = []
     graphics = []
@@ -125,7 +137,7 @@ def find_all_tex_images(ps_html: str) -> tuple[list[dict], list[dict]]:
         cls = cls_m.group(1) if cls_m else ""
         entry = {
             "tag": tag,
-            "src": src_m.group(1) if src_m else "",
+            "src": normalize_image_src(src_m.group(1) if src_m else ""),
             "class": cls,
             "start": m.start(),
             "end": m.end(),
@@ -352,7 +364,7 @@ def process_problem(
       - pid, url, text, text_length
       - formulas_found, formulas_processed
       - formula_details: list of {src, latex}
-      - has_non_formula_images: True if tex-graphics (diagrams) found → filter out
+      - has_non_formula_images: True if tex-graphics (diagrams) found
       - formulas_failed: number of formulas that couldn't be converted after retries
     """
     html, pid = fetch_problem_html(contest_id, index)
@@ -367,7 +379,7 @@ def process_problem(
           file=sys.stderr)
 
     if has_non_formula_images:
-        print(f"  [{pid}] ⚠ contains tex-graphics (diagrams) — will be filtered",
+        print(f"  [{pid}] ⚠ contains tex-graphics (diagrams)",
               file=sys.stderr)
 
     # Process formula images
@@ -418,7 +430,7 @@ def process_problem(
     for gm in graphics:
         formula_results.append({
             "src": gm["src"],
-            "latex": "[DIAGRAM — non-formula image]",
+            "latex": "[DIAGRAM IMAGE]",
         })
 
     # Replace all image tags with their text representation (reverse order)
@@ -450,6 +462,15 @@ def process_problem(
         "formulas_processed": len(formulas) - formulas_failed,
         "formulas_failed": formulas_failed,
         "formula_details": formula_results,
+        "images": [
+            {
+                "src": item["src"],
+                "kind": "formula" if item in formulas else "graphic",
+                "class": item.get("class", ""),
+                "context": extract_context(ps_html, item["start"], item["end"]),
+            }
+            for item in formulas + graphics
+        ],
         "text": plain_text,
         "text_length": len(plain_text),
     }
@@ -520,7 +541,7 @@ def main():
         print(f"URL: {result['url']}")
         print(f"Formulas: {result['formulas_found']} found, {result['formulas_processed']} processed")
         if result["has_non_formula_images"]:
-            print("⚠ Contains non-formula images (diagrams) — recommend filtering")
+            print("⚠ Contains statement images (diagrams) — requires multimodal model")
         if result["formulas_failed"]:
             print(f"⚠ {result['formulas_failed']} formula(s) failed")
         for fr in result.get("formula_details", []):

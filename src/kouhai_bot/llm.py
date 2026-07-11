@@ -533,6 +533,8 @@ async def chat_completion(
     task_name = (task or "").strip().lower()
     if task_name in {"judge", "review"}:
         providers = cfg.llm_smart_providers
+    elif task_name in {"multimodal", "multimodal_summary", "multimodal_clarify"}:
+        providers = cfg.llm_multimodal_providers
     else:
         providers = cfg.llm_general_providers
     if provider_name:

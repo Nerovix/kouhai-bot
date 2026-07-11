@@ -14,7 +14,7 @@ import random
 import re
 import sys
 
-# Import cf_statement for VL-powered formula processing
+# Import cf_statement for Codeforces statement/image extraction
 sys.path.insert(0, os.path.dirname(__file__))
 import fetcher as cf_statement
 import time
@@ -116,6 +116,15 @@ def _load_solved_problem_ids() -> set[str]:
 
 def _problem_id(p: dict) -> str:
     return f"{p['contestId']}{p['index']}"
+
+
+def _multimodal_model_configured() -> bool:
+    try:
+        from ..config import get_config
+
+        return bool(get_config().llm_multimodal_providers)
+    except Exception:
+        return False
 
 
 # ── Selection ───────────────────────────────────────────────────────────
@@ -239,10 +248,11 @@ def _normalize_samples(samples: list[dict]) -> tuple[list[dict], bool]:
 
 def fetch_statement(problem: dict) -> object:
     """
-    Fetch full problem statement from Codeforces using cf_statement with Qwen-VL.
-    Formula images are converted to LaTeX text via VL; non-formula diagrams are filtered.
+    Fetch full problem statement from Codeforces.
+    Image metadata is preserved for multimodal summary/clarify. If images are
+    present but no multimodal model queue is configured, the problem is skipped.
     Returns dict with keys: name, time_limit, memory_limit, description,
-    input, samples, notes. Or None on failure / diagram problem.
+    input, samples, notes, images. Or None on failure / unsupported image problem.
     Caches locally so we only process each problem once.
     """
     contest_id = problem.get("contestId")
@@ -262,20 +272,22 @@ def fetch_statement(problem: dict) -> object:
             if changed:
                 cached["samples"] = normalized_samples
                 cached_changed = True
-        # Detect stale cache (created before VL pipeline existed) —
-        # dry-run to check for images, re-process with VL if needed
-        if not cached.get("_vl_processed"):
+        # Detect stale cache (created before image metadata was cached) —
+        # dry-run to check for images, re-process if needed.
+        if not cached.get("_images_collected"):
             try:
                 dry = cf_statement.process_problem(contest_id, index, vl_backend="none")
                 has_images = dry.get("formulas_found", 0) + dry.get("graphics_found", 0) > 0
                 if has_images:
-                    print(f"[{pid}] stale cache (no VL), re-fetching with Qwen-VL",
+                    print(f"[{pid}] stale cache (no image metadata), re-fetching",
                           file=sys.stderr)
                     os.remove(cache_file)
                     # Fall through to re-process below
                 else:
-                    # Text-only problem, mark as processed and use as-is
+                    # Text-only problem, mark as processed and use as-is.
+                    cached["_images_collected"] = True
                     cached["_vl_processed"] = True
+                    cached.setdefault("images", [])
                     with open(cache_file, "w") as f:
                         json.dump(cached, f, ensure_ascii=False)
                     return cached
@@ -289,24 +301,27 @@ def fetch_statement(problem: dict) -> object:
             if cached_changed:
                 with open(cache_file, "w") as f:
                     json.dump(cached, f, ensure_ascii=False)
+            if cached.get("images") and not _multimodal_model_configured():
+                print(
+                    f"Warning: {pid} cached statement has image(s), but llm.multimodal_model is not configured; skipping",
+                    file=sys.stderr,
+                )
+                return None
             return cached
 
-    # Step 1: Process problem with Qwen-VL for formula recognition
-    cf_result = cf_statement.process_problem(contest_id, index, vl_backend="qwen")
+    # Step 1: Process problem text and collect image metadata.
+    cf_result = cf_statement.process_problem(contest_id, index, vl_backend="none")
 
     if "error" in cf_result:
         print(f"Warning: {pid} cf_statement error: {cf_result['error']}", file=sys.stderr)
         return None
 
-    # Filter: skip problems with non-formula images (diagrams)
-    if cf_result.get("has_non_formula_images"):
-        print(f"Warning: {pid} has non-formula images (diagrams), skipping", file=sys.stderr)
-        return None
-
-    # Filter: skip if any formula failed after retries
-    if cf_result.get("formulas_failed", 0) > 0:
-        print(f"Warning: {pid} has {cf_result['formulas_failed']} failed formula(s), skipping",
-              file=sys.stderr)
+    images = cf_result.get("images", [])
+    if images and not _multimodal_model_configured():
+        print(
+            f"Warning: {pid} has {len(images)} image(s), but llm.multimodal_model is not configured; skipping",
+            file=sys.stderr,
+        )
         return None
 
     # Step 2: Fetch raw HTML for metadata (title, limits, samples)
@@ -335,9 +350,11 @@ def fetch_statement(problem: dict) -> object:
     if m:
         result["memory_limit"] = m.group(1) + "MB"
 
-    # Description: use VL-processed text (formulas converted to LaTeX inline)
+    # Description: text with image placeholders; image metadata is stored separately.
     desc = cf_result.get("text", "")
     result["description"] = desc
+    result["images"] = images if isinstance(images, list) else []
+    result["has_images"] = bool(result["images"])
 
     # Extract Input spec from raw HTML
     inp_m = re.search(
@@ -387,6 +404,7 @@ def fetch_statement(problem: dict) -> object:
 
     # Cache and return
     result["_vl_processed"] = True
+    result["_images_collected"] = True
     with open(cache_file, "w") as f:
         json.dump(result, f, ensure_ascii=False)
 

@@ -63,13 +63,15 @@ cp config.example.yaml config.yaml
 
 ZenMux 上的体验模型也可以作为 OpenAI-compatible provider 配置。示例见 `config.example.yaml`；例如 Grok 4.5 Free 可使用 `model: "x-ai/grok-4.5-free"`、`reasoning_effort: "xhigh"`、`model_tag: "『∅』"`。如果某个网关需要特殊 payload，可在 provider 上配置 `temperature`、`send_thinking` 或 `extra_body`，避免为每个模型在代码里新增分支。
 
-#### 公式识别
+#### 多模态题面
 
 ```
-# ── Qwen-VL (formula image recognition) ──
+# Optional multimodal fallback queue
 ```
 
-bot 需要一个视觉模型才能阅读被渲染成图像的公式。实测 `qwen-vl-max` 效果很好，且阿里云提供了足够的免费额度。你也可以使用其他视觉模型。
+如果希望 bot 选择和澄清包含公式图、示意图的 Codeforces 题面，请配置 `llm.multimodal_model`。带图题的中文题意摘要和 `/clarify` 会走这个队列；未配置时，选题会跳过带图候选，已有带图题的 `/clarify` 会提示当前缺少多模态模型。
+
+旧的 `qwen` / Qwen-VL 公式 OCR 配置不再是运行时必需项，保留只是为了兼容旧工具。
 
 #### 配置群聊
 

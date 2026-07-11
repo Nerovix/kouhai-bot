@@ -13,6 +13,7 @@ import os
 import random
 import re
 import time
+import urllib.request
 from pathlib import Path
 
 from ..config import get_config
@@ -240,15 +241,32 @@ async def parse_json_with_llm_repair(
 
 # ── Problem statement loading ───────────────────────────────────────────
 
-def load_problem_statement(pid: str) -> str:
-    """Load full problem statement from cache, formatted for LLM."""
+_MAX_MULTIMODAL_IMAGES = 8
+
+
+def multimodal_model_configured() -> bool:
+    return bool(get_config().llm_multimodal_providers)
+
+
+def load_problem_statement_json(pid: str) -> dict:
+    """Load raw problem statement cache JSON."""
     cfg = get_config()
     stmt_path = os.path.join(cfg.data_dir, "statements", f"{pid}.json")
     if not os.path.exists(stmt_path):
-        return ""
+        return {}
 
-    with open(stmt_path) as f:
-        stmt = json.load(f)
+    try:
+        with open(stmt_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def format_problem_statement_for_llm(stmt: dict) -> str:
+    """Format statement cache JSON as text for LLM context."""
+    if not isinstance(stmt, dict):
+        return ""
 
     parts = []
     if stmt.get("name"):
@@ -280,6 +298,49 @@ def load_problem_statement(pid: str) -> str:
         parts.append(f"\nNote:\n{notes}")
 
     return "\n".join(parts)
+
+
+def load_problem_statement(pid: str) -> str:
+    """Load full problem statement from cache, formatted for LLM."""
+    return format_problem_statement_for_llm(load_problem_statement_json(pid))
+
+
+def statement_images(stmt: dict) -> list[dict]:
+    images = stmt.get("images", []) if isinstance(stmt, dict) else []
+    return [item for item in images if isinstance(item, dict) and item.get("src")]
+
+
+def _download_image_data_url(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = resp.read()
+        content_type = str(resp.headers.get("Content-Type") or "").split(";", 1)[0]
+    mime = content_type if content_type.startswith("image/") else "image/png"
+    import base64
+
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+
+def build_multimodal_user_content(text: str, images: list[dict]) -> list[dict]:
+    """Build OpenAI-compatible text+image content parts."""
+    content: list[dict] = [{"type": "text", "text": text}]
+    for idx, image in enumerate(images[:_MAX_MULTIMODAL_IMAGES], 1):
+        src = str(image.get("src", "") or "").strip()
+        if not src:
+            continue
+        kind = str(image.get("kind", "") or "image")
+        context = str(image.get("context", "") or "").strip()
+        label = f"题面图片 {idx}（{kind}）"
+        if context:
+            label += f"，附近文本：{context[:500]}"
+        content.append({"type": "text", "text": "\n\n" + label})
+        try:
+            image_url = _download_image_data_url(src)
+        except Exception as e:
+            logger.warning("failed to download statement image %s: %s", src, e)
+            image_url = src
+        content.append({"type": "image_url", "image_url": {"url": image_url}})
+    return content
 
 
 # ── Today's problem ─────────────────────────────────────────────────────
@@ -1217,19 +1278,34 @@ def _build_summary_repair_prompt(
     )
 
 
-async def summarize_problem(stmt_text: str, input_text: str, limits_text: str) -> tuple[str | None, str]:
+async def summarize_problem(
+    stmt_text: str,
+    input_text: str,
+    limits_text: str,
+    images: list[dict] | None = None,
+) -> tuple[str | None, str]:
     """Generate Chinese summary of a problem via the configured chat provider.
 
     Returns (summary_text, model_tag). model_tag is empty if the LLM call failed.
     """
     cfg = get_config()
+    image_items = [item for item in images or [] if isinstance(item, dict) and item.get("src")]
+    if image_items and not multimodal_model_configured():
+        logger.warning("summary requested for image statement without llm.multimodal_model")
+        return None, ""
+    user_prompt = _build_summary_prompt(stmt_text, input_text, limits_text)
+    user_content: str | list[dict] = (
+        build_multimodal_user_content(user_prompt, image_items)
+        if image_items
+        else user_prompt
+    )
     messages = [
         {"role": "system", "content": _summary_system_prompt()},
-        {"role": "user", "content": _build_summary_prompt(stmt_text, input_text, limits_text)},
+        {"role": "user", "content": user_content},
     ]
     result = await call_chat_completion_result(
         messages,
-        task="summary",
+        task="multimodal_summary" if image_items else "summary",
         temperature=0.4,
         timeout=cfg.summary_timeout_sec,
         response_format={"type": "json_object"},

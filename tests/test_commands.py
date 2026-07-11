@@ -2013,6 +2013,63 @@ def test_private_clarify_uses_private_problem_summary():
     print("✅ private clarify: uses pid-specific summary")
 
 
+def test_clarify_image_statement_uses_multimodal_model():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_statement(PID, {
+        "name": "A. Image Problem",
+        "time_limit": "1s",
+        "memory_limit": "256MB",
+        "description": "Statement refers to the diagram.",
+        "input": "n",
+        "output": "answer",
+        "samples": [{"input": "1", "output": "1"}],
+        "images": [{"src": "https://codeforces.com/image.png", "kind": "graphic"}],
+    })
+    global _deepseek_response
+    _deepseek_response = '{"reply": "图中边表示可走关系。", "reaction": ""}'
+
+    with _all_patches(), \
+            patch("kouhai_bot.handlers.cmd.submit.multimodal_model_configured", return_value=True), \
+            patch("kouhai_bot.handlers.shared._download_image_data_url", return_value="data:image/png;base64,abc"):
+        from kouhai_bot.handlers.cmd.clarify import handle
+        asyncio.run(handle(**_kwargs(_make_event("/clarify 图是什么意思？"))))
+
+    clarify_calls = [call for call in _deepseek_calls if call.get("task") == "multimodal_clarify"]
+    assert clarify_calls, _deepseek_calls
+    content = clarify_calls[-1]["messages"][-1]["content"]
+    assert isinstance(content, list), content
+    assert any(part.get("type") == "image_url" for part in content), content
+    assert "图中边" in _last_text(), _last_text()
+    _cleanup()
+    print("✅ clarify: image statement uses multimodal model")
+
+
+def test_clarify_image_statement_without_multimodal_model_does_not_call_llm():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_statement(PID, {
+        "name": "A. Image Problem",
+        "time_limit": "1s",
+        "memory_limit": "256MB",
+        "description": "Statement refers to the diagram.",
+        "input": "n",
+        "output": "answer",
+        "samples": [{"input": "1", "output": "1"}],
+        "images": [{"src": "https://codeforces.com/image.png", "kind": "graphic"}],
+    })
+
+    with _all_patches(), \
+            patch("kouhai_bot.handlers.cmd.submit.multimodal_model_configured", return_value=False):
+        from kouhai_bot.handlers.cmd.clarify import handle
+        asyncio.run(handle(**_kwargs(_make_event("/clarify 图是什么意思？"))))
+
+    assert not _deepseek_calls, _deepseek_calls
+    assert "多模态模型" in _last_text(), _last_text()
+    _cleanup()
+    print("✅ clarify: image statement without multimodal model skips LLM")
+
+
 def test_clarify_llm_failure_shows_admin_message():
     _reset_state()
     _setup_problem()
@@ -4155,21 +4212,21 @@ def test_private_setproblem_non_formula_image_hint():
         from kouhai_bot.handlers.cmd.setproblem import handle
         from kouhai_bot.private_judge import NonFormulaImageProblem
 
-        with patch(
-            "kouhai_bot.handlers.cmd.setproblem.resolve_problem_by_pid",
-            side_effect=NonFormulaImageProblem("1065C"),
-        ):
+        async def _raise_image_problem(func, *args):
+            raise NonFormulaImageProblem("1065C")
+
+        with patch("kouhai_bot.handlers.cmd.setproblem.asyncio.to_thread", _raise_image_problem):
             asyncio.run(handle(**_kwargs(_make_private_event("/setproblem 1065C"))))
 
     private_text = "\n".join(
         " ".join(seg.get("data", {}).get("text", "") for seg in item["message"] if seg.get("type") == "text")
         for item in _private_sent
     )
-    assert "非公式图片" in private_text, private_text
-    assert "处理能力有限" in private_text, private_text
+    assert "包含图片" in private_text, private_text
+    assert "多模态模型" in private_text, private_text
     assert "换一道题" in private_text, private_text
     _cleanup()
-    print("✅ private setproblem: explains non-formula image limitation")
+    print("✅ private setproblem: explains missing multimodal image support")
 
 
 def test_build_problem_card_payload_revalidates_cached_statement():

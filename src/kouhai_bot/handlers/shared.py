@@ -329,8 +329,10 @@ def build_multimodal_user_content(text: str, images: list[dict]) -> list[dict]:
         if not src:
             continue
         kind = str(image.get("kind", "") or "image")
+        marker = str(image.get("marker", "") or f"IMAGE_{idx}")
+        placeholder = str(image.get("placeholder", "") or f"[[{marker}: {kind}]]")
         context = str(image.get("context", "") or "").strip()
-        label = f"题面图片 {idx}（{kind}）"
+        label = f"题面图片 {marker}（{kind}），对应原文占位符：{placeholder}"
         if context:
             label += f"，附近文本：{context[:500]}"
         content.append({"type": "text", "text": "\n\n" + label})

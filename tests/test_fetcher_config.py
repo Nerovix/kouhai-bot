@@ -24,3 +24,30 @@ def test_qwen_config_uses_yaml_config_when_env_missing(monkeypatch):
         "https://dashscope.example/v1",
         "qwen-vl-test",
     )
+
+
+def test_process_problem_marks_inline_image_position(monkeypatch):
+    problem_html = (
+        '<div class="problem-statement">'
+        '<p>Choose x <img class="tex-formula" src="/predownloaded/a.png"> such that y.</p>'
+        "</div><script>"
+    )
+    monkeypatch.setattr(
+        fetcher,
+        "fetch_problem_html",
+        lambda contest_id, index: (problem_html, f"{contest_id}{index}"),
+    )
+
+    result = fetcher.process_problem(1, "A", vl_backend="none")
+
+    assert "Choose x [[IMAGE_1: formula]] such that y." in result["text"]
+    assert result["images"] == [
+        {
+            "src": "https://codeforces.com/predownloaded/a.png",
+            "kind": "formula",
+            "class": "tex-formula",
+            "context": "Choose x such that y.",
+            "marker": "IMAGE_1",
+            "placeholder": "[[IMAGE_1: formula]]",
+        }
+    ]

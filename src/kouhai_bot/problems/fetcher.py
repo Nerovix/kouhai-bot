@@ -433,20 +433,27 @@ def process_problem(
             "latex": "[DIAGRAM IMAGE]",
         })
 
-    # Replace all image tags with their text representation (reverse order)
+    # Replace image tags with stable inline markers, so multimodal consumers can
+    # align each image with its exact location in the statement text.
     result_html = ps_html
-    all_images = sorted(formulas + graphics, key=lambda x: x["start"], reverse=True)
-    all_results_iter = iter(sorted(
-        formula_results,
-        key=lambda x: _find_match_index(x["src"], formulas + graphics),
-        reverse=True,
-    ))
+    ordered_images = sorted(formulas + graphics, key=lambda x: x["start"])
+    image_entries: list[dict] = []
+    for i, item in enumerate(ordered_images, 1):
+        kind = "formula" if item in formulas else "graphic"
+        marker = f"IMAGE_{i}"
+        image_entries.append({
+            "src": item["src"],
+            "kind": kind,
+            "class": item.get("class", ""),
+            "context": extract_context(ps_html, item["start"], item["end"]),
+            "marker": marker,
+            "placeholder": f"[[{marker}: {kind}]]",
+            "start": item["start"],
+            "end": item["end"],
+        })
 
-    for img_entry in all_images:
-        # Find matching result by src URL
-        matching = [r for r in formula_results if r["src"] == img_entry["src"]]
-        latex = matching[0]["latex"] if matching else "[IMAGE]"
-        replacement = f'<span class="tex-formula-text">({latex})</span>'
+    for img_entry in sorted(image_entries, key=lambda x: x["start"], reverse=True):
+        replacement = f'<span class="tex-formula-text">{img_entry["placeholder"]}</span>'
         result_html = (
             result_html[:img_entry["start"]] + replacement + result_html[img_entry["end"]:]
         )
@@ -463,25 +470,12 @@ def process_problem(
         "formulas_failed": formulas_failed,
         "formula_details": formula_results,
         "images": [
-            {
-                "src": item["src"],
-                "kind": "formula" if item in formulas else "graphic",
-                "class": item.get("class", ""),
-                "context": extract_context(ps_html, item["start"], item["end"]),
-            }
-            for item in formulas + graphics
+            {k: v for k, v in item.items() if k not in {"start", "end"}}
+            for item in image_entries
         ],
         "text": plain_text,
         "text_length": len(plain_text),
     }
-
-
-def _find_match_index(src: str, items: list[dict]) -> int:
-    """Find index of item with matching src, or -1."""
-    for i, item in enumerate(items):
-        if item["src"] == src:
-            return i
-    return -1
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────

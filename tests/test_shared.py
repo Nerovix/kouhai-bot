@@ -1152,6 +1152,31 @@ def test_non_streaming_chat_completion_strips_leaked_thinking_tag():
     assert result.retryable is False
 
 
+def test_non_streaming_chat_completion_drops_unclosed_leaked_thinking():
+    response = _DummyResponse(json_data={
+        "choices": [
+            {
+                "message": {
+                    "content": "Visible prefix\n<think>hidden reasoning without close"
+                }
+            }
+        ]
+    })
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="openai",
+        base_url="https://api.openai.com/v1",
+        headers={},
+        payload={},
+        timeout=120,
+    ))
+
+    assert result.text == "Visible prefix"
+    assert result.retryable is False
+
+
 def test_non_streaming_chat_completion_retries_when_only_leaked_thinking(caplog):
     caplog.set_level("WARNING", logger="kouhai-bot.llm")
     response = _DummyResponse(json_data={
@@ -1259,6 +1284,32 @@ def test_streaming_chat_completion_strips_leaked_thinking_blocks():
     ))
 
     assert result.text == "Visible answer"
+    assert result.retryable is False
+
+
+def test_streaming_chat_completion_drops_unclosed_leaked_thinking_block():
+    response = _DummyResponse(lines=[
+        'data: {"choices":[{"delta":{"content":"Visible prefix"}}]}\n',
+        '\n',
+        'data: {"choices":[{"delta":{"content":"<think>hidden"}}]}\n',
+        '\n',
+        'data: {"choices":[{"delta":{"content":" reasoning without close"}}]}\n',
+        '\n',
+        'data: [DONE]\n',
+        '\n',
+    ])
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="qwen",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        headers={},
+        payload={"stream": True},
+        timeout=120,
+    ))
+
+    assert result.text == "Visible prefix"
     assert result.retryable is False
 
 

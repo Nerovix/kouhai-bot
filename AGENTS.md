@@ -2,6 +2,22 @@
 
 Instructions for AI coding assistants working on this codebase.
 
+
+## Operational Constraints
+
+- Code changes must be prepared on a branch and merged by PR. Do not make direct
+  code/config edits on the live `master` checkout.
+- The live service checkout must remain on `master`. Do not use `uv run restart`
+  or otherwise change live service state unless explicitly asked. Running tests is
+  allowed.
+- Judge and review tasks must use the configured highest reasoning capability. Do
+  not lower `reasoning_effort`, disable thinking, or switch to a weaker effort to
+  work around latency/cost.
+- Do not set client-side output token caps, `max_tokens`, or
+  `max_completion_tokens` for judge/review requests. For DashScope/百炼 thinking
+  models only, set `thinking_budget=100000` so reasoning cannot consume the
+  entire upstream output window before `content` starts.
+
 ## Architecture
 
 ```

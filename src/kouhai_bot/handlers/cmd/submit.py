@@ -873,7 +873,7 @@ class GroupCoordinator:
                             "second_judge": True,
                         }
                 logger.warning(
-                    "[group_%s] second judge unavailable or malformed for %s seq=%s provider=%s model=%s failure=%s has_text=%s; blocking first-pass correct verdict",
+                    "[group_%s] second judge unavailable or malformed for %s seq=%s provider=%s model=%s failure=%s has_text=%s; falling back to first-pass correct verdict",
                     req.group_id,
                     pid,
                     req.seq,
@@ -882,7 +882,13 @@ class GroupCoordinator:
                     second.failure_kind,
                     bool(second.text),
                 )
-                return {"kind": second.failure_kind or "service_unavailable", "pid": pid}
+                return {
+                    "kind": "judge",
+                    "pid": pid,
+                    "result": parsed,
+                    "model_tag": result.model_tag,
+                    "second_judge_failure": second.failure_kind or "service_unavailable",
+                }
         return {"kind": "judge", "pid": pid, "result": parsed, "model_tag": result.model_tag}
 
 

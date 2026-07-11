@@ -753,6 +753,7 @@ def test_zenmux_minimax_m3_payload_accepts_adaptive_thinking():
     assert calls[0]["model"] == "minimax/minimax-m3"
     assert calls[0]["thinking"] == {"type": "adaptive"}
     assert "enable_thinking" not in calls[0]
+    assert "thinking_budget" not in calls[0]
     assert "reasoning_effort" not in calls[0]
 
 
@@ -796,6 +797,7 @@ def test_provider_payload_options_control_thinking_temperature_and_extra_body():
     assert calls[0]["service_tier"] == "priority"
     assert "thinking" not in calls[0]
     assert "enable_thinking" not in calls[0]
+    assert "thinking_budget" not in calls[0]
     assert "stream" not in calls[0]
 
 
@@ -829,6 +831,7 @@ def test_zenmux_grok45free_payload_uses_xhigh_reasoning_and_tag():
     assert calls[0]["model"] == "x-ai/grok-4.5-free"
     assert calls[0]["reasoning_effort"] == "xhigh"
     assert calls[0]["thinking"] == {"type": "enabled"}
+    assert "thinking_budget" not in calls[0]
 
 
 def test_non_dashscope_provider_payload_does_not_enable_stream():
@@ -955,6 +958,46 @@ def test_non_streaming_chat_completion_does_not_use_sock_read_idle_timeout():
     assert timeout.sock_read is None
 
 
+def test_dashscope_stream_payload_requests_usage_without_token_caps():
+    provider = LlmProviderConfig(
+        name="glm52",
+        api_key="sk-test",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="glm-5.2",
+        reasoning_effort="max",
+    )
+    cfg = _openai_cfg(llm_smart_providers=[provider])
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["payload"].copy())
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion_result(
+            [{"role": "user", "content": "Reply OK."}],
+            task="judge",
+            response_format={"type": "json_object"},
+            thinking={"type": "enabled"},
+        ))
+
+    assert result.text == "OK"
+    assert calls[0]["stream"] is True
+    assert calls[0]["stream_options"] == {"include_usage": True}
+    assert calls[0]["enable_thinking"] is True
+    assert calls[0]["thinking_budget"] == 100000
+    assert calls[0]["reasoning_effort"] == "max"
+    forbidden = {
+        "max_tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
+        "reasoning_budget",
+    }
+    assert forbidden.isdisjoint(calls[0])
+
+
 def test_streaming_chat_completion_reads_sse_delta_chunks(caplog):
     caplog.set_level("INFO", logger="kouhai-bot.llm")
     response = _DummyResponse(lines=[
@@ -983,6 +1026,36 @@ def test_streaming_chat_completion_reads_sse_delta_chunks(caplog):
     assert result.retryable is False
     assert session.calls[0][1]["json"] == {"stream": True}
     assert "reasoning_content chars=8" in caplog.text
+
+
+def test_streaming_chat_completion_empty_after_reasoning_is_not_retried(caplog):
+    caplog.set_level("INFO", logger="kouhai-bot.llm")
+    response = _DummyResponse(lines=[
+        'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n',
+        '\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"completion_tokens_details":{"reasoning_tokens":1}}}\n',
+        '\n',
+        'data: [DONE]\n',
+        '\n',
+    ])
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="glm52",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        headers={},
+        payload={"stream": True},
+        timeout=120,
+    ))
+
+    assert result.text is None
+    assert result.retryable is False
+    assert result.failure_kind == "length"
+    assert result.finish_reason == "length"
+    assert result.reasoning_chars == 8
+    assert result.usage == {"completion_tokens_details": {"reasoning_tokens": 1}}
+    assert "finish_reason=length" in caplog.text
 
 
 def test_streaming_chat_completion_ignores_metadata_events():

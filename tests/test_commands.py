@@ -686,7 +686,7 @@ def test_submit_second_judge_overturns_correct_verdict():
     print("✅ submit: second judge can overturn correct verdict")
 
 
-def test_submit_second_judge_failure_blocks_first_correct_verdict():
+def test_submit_second_judge_failure_falls_back_to_first_correct_verdict():
     _reset_state()
     _setup_problem()
     _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
@@ -715,12 +715,14 @@ def test_submit_second_judge_failure_blocks_first_correct_verdict():
     with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
         saved = json.load(f)
     assert len(_second_judge_calls) == 1
-    assert saved["solves"] == []
+    assert len(saved["solves"]) == 1
+    assert saved["solves"][0]["user_id"] == UID
     records = saved["user_submissions"][str(UID)]
-    assert records[-1]["result"] == "service_unavailable"
-    assert "模型服务出故障了" in _last_text()
+    assert records[-1]["result"] == "correct"
+    assert records[-1]["reason"] == "first pass accepted"
+    assert "模型服务出故障了" not in _last_text()
     _cleanup()
-    print("✅ submit: second judge failure blocks first correct verdict")
+    print("✅ submit: second judge failure falls back to first correct verdict")
 
 
 def test_submit_correct_uses_fresh_top5_nicknames_and_points():

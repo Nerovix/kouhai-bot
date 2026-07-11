@@ -30,6 +30,9 @@ class _ChatCompletionAttempt:
     retryable: bool
     retry_after_sec: float | None
     failure_kind: str | None = None
+    finish_reason: str | None = None
+    reasoning_chars: int = 0
+    usage: dict | None = None
 
 
 def _chat_completions_url(base_url: str) -> str:
@@ -267,21 +270,52 @@ async def _read_streaming_chat_completion(
     parts: list[str] = []
     event_lines: list[str] = []
     reasoning_chars = 0
+    finish_reason: str | None = None
+    usage: dict | None = None
 
     def finish(text: str) -> _ChatCompletionAttempt:
         if not text:
-            logger.warning("%s API stream returned no text", provider_name)
+            logger.warning(
+                "%s API stream returned no text finish_reason=%s usage=%s",
+                provider_name,
+                finish_reason,
+                usage,
+            )
         if reasoning_chars:
             logger.info(
                 "%s API stream returned reasoning_content chars=%s",
                 provider_name,
                 reasoning_chars,
             )
+        if finish_reason or usage:
+            logger.info(
+                "%s API stream finished finish_reason=%s usage=%s",
+                provider_name,
+                finish_reason,
+                usage,
+            )
+        empty_after_reasoning = not text and reasoning_chars > 0
+        length_stopped = not text and finish_reason == "length"
         return _ChatCompletionAttempt(
             text=text or None,
-            retryable=not bool(text),
+            retryable=(
+                not bool(text)
+                and not empty_after_reasoning
+                and not length_stopped
+            ),
             retry_after_sec=None,
-            failure_kind=None if text else "service_unavailable",
+            failure_kind=(
+                None
+                if text
+                else "length"
+                if length_stopped
+                else "empty_content_after_reasoning"
+                if empty_after_reasoning
+                else "service_unavailable"
+            ),
+            finish_reason=finish_reason,
+            reasoning_chars=reasoning_chars,
+            usage=usage,
         )
 
     def stream_failure(reason: str) -> _ChatCompletionAttempt:
@@ -291,10 +325,13 @@ async def _read_streaming_chat_completion(
             retryable=True,
             retry_after_sec=None,
             failure_kind="service_unavailable",
+            finish_reason=finish_reason,
+            reasoning_chars=reasoning_chars,
+            usage=usage,
         )
 
     def handle_event(raw_data: str) -> tuple[bool, _ChatCompletionAttempt | None]:
-        nonlocal reasoning_chars
+        nonlocal finish_reason, reasoning_chars, usage
         data_text = raw_data.strip()
         if not data_text:
             return False, None
@@ -306,6 +343,12 @@ async def _read_streaming_chat_completion(
             return False, stream_failure("invalid json")
 
         reasoning_chars += len(_stream_event_reasoning_text(data))
+        event_usage = data.get("usage")
+        if isinstance(event_usage, dict):
+            usage = event_usage
+        for choice in data.get("choices", []) or []:
+            if isinstance(choice, dict) and choice.get("finish_reason") is not None:
+                finish_reason = str(choice.get("finish_reason"))
         text, valid_event, error_message = _stream_event_text(data)
         if error_message:
             return False, stream_failure(error_message)
@@ -496,17 +539,21 @@ async def chat_completion(
                 payload["thinking"] = thinking
                 if _provider_is_dashscope(provider.name, provider.base_url):
                     payload["enable_thinking"] = True
+                    payload.setdefault("thinking_budget", 100000)
             reasoning_effort = provider.reasoning_effort.strip().lower()
             if reasoning_effort and send_reasoning_effort:
                 payload["reasoning_effort"] = reasoning_effort
             if provider.extra_body:
                 payload.update(provider.extra_body)
-            if _provider_uses_stream(
+            uses_stream = _provider_uses_stream(
                 provider.name,
                 provider.base_url,
                 explicit_stream=provider.stream,
-            ):
+            )
+            if uses_stream:
                 payload["stream"] = True
+                if _provider_is_dashscope(provider.name, provider.base_url):
+                    payload.setdefault("stream_options", {"include_usage": True})
 
             for attempt in range(max_retries + 1):
                 result = await _post_chat_completion_once(

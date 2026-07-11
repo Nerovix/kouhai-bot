@@ -44,12 +44,17 @@ def test_build_notes_message_falls_back_to_normalized_original():
     asyncio.run(_run())
 
 
-def test_build_notes_message_keeps_model_output_verbatim():
+def test_build_notes_message_strips_leaked_thinking_without_rewriting_text():
     from kouhai_bot.handlers.cmd import newproblem
 
     async def _run():
         stmt = {"notes": "placeholder"}
         raw = (
+            "<think>internal translation notes</think>"
+            "A \\xrightarrow[l=1,\\,r=6]{} B, and x \\lt y \\gt z, "
+            "with p \\leq q \\ge r and s \\oplus t."
+        )
+        expected = (
             "A \\xrightarrow[l=1,\\,r=6]{} B, and x \\lt y \\gt z, "
             "with p \\leq q \\ge r and s \\oplus t."
         )
@@ -59,7 +64,7 @@ def test_build_notes_message_keeps_model_output_verbatim():
             AsyncMock(return_value=(raw, "")),
         ):
             result = await newproblem._build_notes_message(stmt)
-        assert result == f"样例解释：\n{raw}"
+        assert result == f"样例解释：\n{expected}"
 
     asyncio.run(_run())
 

@@ -998,6 +998,59 @@ def test_dashscope_stream_payload_requests_usage_without_token_caps():
     assert forbidden.isdisjoint(calls[0])
 
 
+def test_non_streaming_chat_completion_strips_leaked_thinking():
+    response = _DummyResponse(json_data={
+        "choices": [
+            {
+                "message": {
+                    "content": "<think>hidden reasoning</think>Visible answer"
+                }
+            }
+        ]
+    })
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="openai",
+        base_url="https://api.openai.com/v1",
+        headers={},
+        payload={},
+        timeout=120,
+    ))
+
+    assert result.text == "Visible answer"
+    assert result.retryable is False
+
+
+def test_non_streaming_chat_completion_retries_when_only_leaked_thinking(caplog):
+    caplog.set_level("WARNING", logger="kouhai-bot.llm")
+    response = _DummyResponse(json_data={
+        "choices": [
+            {
+                "message": {
+                    "content": "<think>hidden reasoning</think>"
+                }
+            }
+        ]
+    })
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="openai",
+        base_url="https://api.openai.com/v1",
+        headers={},
+        payload={},
+        timeout=120,
+    ))
+
+    assert result.text is None
+    assert result.retryable is True
+    assert result.failure_kind == "service_unavailable"
+    assert "returned no text after cleanup" in caplog.text
+
+
 def test_streaming_chat_completion_reads_sse_delta_chunks(caplog):
     caplog.set_level("INFO", logger="kouhai-bot.llm")
     response = _DummyResponse(lines=[
@@ -1026,6 +1079,32 @@ def test_streaming_chat_completion_reads_sse_delta_chunks(caplog):
     assert result.retryable is False
     assert session.calls[0][1]["json"] == {"stream": True}
     assert "reasoning_content chars=8" in caplog.text
+
+
+def test_streaming_chat_completion_strips_leaked_thinking_blocks():
+    response = _DummyResponse(lines=[
+        'data: {"choices":[{"delta":{"content":"<think>hidden"}}]}\n',
+        '\n',
+        'data: {"choices":[{"delta":{"content":" reasoning</think>Visible"}}]}\n',
+        '\n',
+        'data: {"choices":[{"delta":{"content":" answer"}}]}\n',
+        '\n',
+        'data: [DONE]\n',
+        '\n',
+    ])
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="qwen",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        headers={},
+        payload={"stream": True},
+        timeout=120,
+    ))
+
+    assert result.text == "Visible answer"
+    assert result.retryable is False
 
 
 def test_streaming_chat_completion_empty_after_reasoning_is_not_retried(caplog):

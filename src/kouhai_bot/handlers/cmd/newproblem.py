@@ -26,6 +26,7 @@ from ..shared import (
 from ...config import get_config
 from ...context import append_group_ctx
 from ...editorial_followup import schedule_prefetch_editorial
+from ...llm import strip_leaked_thinking
 from ...user_groups import settle_dynamic_submit_wait_for_problem
 from ...napcat.client import (
     build_plain_message,
@@ -305,7 +306,7 @@ async def _build_notes_message(stmt: dict) -> str:
     except Exception as e:
         logger.warning("Notes translation failed, skipping notes node: %s", e)
         return ""
-    final_notes = (translated_notes or normalized_notes).strip()
+    final_notes = strip_leaked_thinking(translated_notes or normalized_notes)
     if not final_notes:
         return ""
     return f"样例解释：\n{final_notes}"

@@ -537,7 +537,7 @@ async def _build_notes_message(stmt: dict) -> str:
     if not raw_notes:
         return ""
     try:
-        translated, _tag = await translate_sample_notes(raw_notes)
+        translated, _tag = await translate_sample_notes(raw_notes, statement_images(stmt))
     except Exception:
         translated = ""
     text = strip_leaked_thinking(translated or raw_notes)

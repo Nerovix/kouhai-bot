@@ -345,6 +345,14 @@ def build_multimodal_user_content(text: str, images: list[dict]) -> list[dict]:
     return content
 
 
+def _usable_statement_images(images: list[dict] | None) -> list[dict]:
+    return [item for item in images or [] if isinstance(item, dict) and item.get("src")]
+
+
+def _multimodal_content_or_text(text: str, images: list[dict]) -> str | list[dict]:
+    return build_multimodal_user_content(text, images) if images else text
+
+
 # ── Today's problem ─────────────────────────────────────────────────────
 
 def _today_state_file(group_id: int) -> str:
@@ -1291,16 +1299,12 @@ async def summarize_problem(
     Returns (summary_text, model_tag). model_tag is empty if the LLM call failed.
     """
     cfg = get_config()
-    image_items = [item for item in images or [] if isinstance(item, dict) and item.get("src")]
+    image_items = _usable_statement_images(images)
     if image_items and not multimodal_model_configured():
         logger.warning("summary requested for image statement without llm.multimodal_model")
         return None, ""
     user_prompt = _build_summary_prompt(stmt_text, input_text, limits_text)
-    user_content: str | list[dict] = (
-        build_multimodal_user_content(user_prompt, image_items)
-        if image_items
-        else user_prompt
-    )
+    user_content = _multimodal_content_or_text(user_prompt, image_items)
     messages = [
         {"role": "system", "content": _summary_system_prompt()},
         {"role": "user", "content": user_content},
@@ -1356,12 +1360,19 @@ async def summarize_problem(
     return repaired, repaired_json_tag or repair_result.model_tag
 
 
-async def translate_sample_notes(notes_text: str) -> tuple[str | None, str]:
+async def translate_sample_notes(
+    notes_text: str,
+    images: list[dict] | None = None,
+) -> tuple[str | None, str]:
     """Translate sample notes/explanations into concise Chinese plain text."""
     content = (notes_text or "").strip()
     if not content:
         return None, ""
     cfg = get_config()
+    image_items = _usable_statement_images(images)
+    if image_items and not multimodal_model_configured():
+        logger.warning("sample notes translation requested with images without llm.multimodal_model")
+        image_items = []
     prompt = (
         "下面是题目中与样例相关的解释（Notes）。\n"
         "请把它忠实翻译为自然、准确的中文；只做翻译，不要总结、点评、补充解释、改写成题解，"
@@ -1390,9 +1401,9 @@ async def translate_sample_notes(notes_text: str) -> tuple[str | None, str]:
                     "你必须输出纯文本；LaTeX 只在不用会失真时保留，普通下标和幂次优先使用 Unicode 角标。"
                 ),
             },
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": _multimodal_content_or_text(prompt, image_items)},
         ],
-        task="summary",
+        task="multimodal_summary" if image_items else "summary",
         timeout=cfg.summary_timeout_sec,
     )
     return result.text, result.model_tag
@@ -1402,6 +1413,7 @@ async def translate_editorial_to_zh(
     editorial_text: str,
     pid: str = "",
     problem_text: str = "",
+    images: list[dict] | None = None,
 ) -> tuple[str | None, str, bool | None]:
     """Validate and translate a Codeforces editorial to Chinese for group delivery.
 
@@ -1422,6 +1434,11 @@ async def translate_editorial_to_zh(
         "official_editorial": body,
     }
     cfg = get_config()
+    image_items = _usable_statement_images(images)
+    if image_items and not multimodal_model_configured():
+        logger.warning("editorial translation requested with images without llm.multimodal_model")
+        image_items = []
+    user_prompt = json.dumps(prompt_payload, ensure_ascii=False)
     result = await call_chat_completion_result(
         [
             {
@@ -1456,9 +1473,9 @@ async def translate_editorial_to_zh(
                     "只有复杂求和、递推、分式、多重下标、精确定义用中文或 Unicode 会失真时，才保留最少必要 LaTeX。"
                 ),
             },
-            {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)},
+            {"role": "user", "content": _multimodal_content_or_text(user_prompt, image_items)},
         ],
-        task="summary",
+        task="multimodal_summary" if image_items else "summary",
         timeout=600,
         response_format={"type": "json_object"},
         thinking={"type": "enabled"},

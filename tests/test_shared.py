@@ -352,6 +352,76 @@ def test_summarize_problem_with_images_uses_multimodal_task():
     assert content[-1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
 
 
+def test_translate_sample_notes_with_images_uses_multimodal_task():
+    provider = LlmProviderConfig(
+        name="mmx",
+        api_key="sk-test",
+        base_url="http://localhost:8080/v1",
+        model="mmx-vision",
+        model_tag="『MMx』",
+    )
+    cfg = _openai_cfg(llm_multimodal_providers=[provider], summary_timeout_sec=123)
+    calls = []
+
+    async def fake_call(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        return ChatCompletionResult(text="样例图解释", model_tag="『MMx』")
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared._download_image_data_url", return_value="data:image/png;base64,abc"), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call):
+        text, tag = asyncio.run(translate_sample_notes(
+            "The diagram is [[IMAGE_1: graphic]].",
+            [{"src": "https://codeforces.com/p.png", "kind": "graphic", "marker": "IMAGE_1"}],
+        ))
+
+    assert text == "样例图解释"
+    assert tag == "『MMx』"
+    assert calls[0]["task"] == "multimodal_summary"
+    content = calls[0]["messages"][1]["content"]
+    assert isinstance(content, list)
+    assert "IMAGE_1" in content[1]["text"]
+    assert content[-1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
+
+
+def test_translate_editorial_with_images_uses_multimodal_task():
+    provider = LlmProviderConfig(
+        name="mmx",
+        api_key="sk-test",
+        base_url="http://localhost:8080/v1",
+        model="mmx-vision",
+        model_tag="『MMx』",
+    )
+    cfg = _openai_cfg(llm_multimodal_providers=[provider], summary_timeout_sec=123)
+    calls = []
+
+    async def fake_call(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        return ChatCompletionResult(
+            text=json.dumps({"matched": "yes", "result": "中文题解"}),
+            model_tag="『MMx』",
+        )
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared._download_image_data_url", return_value="data:image/png;base64,abc"), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call):
+        translated, tag, matched = asyncio.run(translate_editorial_to_zh(
+            "Official editorial",
+            pid="1A",
+            problem_text="Problem uses [[IMAGE_1: formula]].",
+            images=[{"src": "https://codeforces.com/f.png", "kind": "formula", "marker": "IMAGE_1"}],
+        ))
+
+    assert translated == "中文题解"
+    assert tag == "『MMx』"
+    assert matched is True
+    assert calls[0]["task"] == "multimodal_summary"
+    content = calls[0]["messages"][1]["content"]
+    assert isinstance(content, list)
+    assert "official_editorial" in content[0]["text"]
+    assert "IMAGE_1" in content[1]["text"]
+
+
 def test_task_entrypoints_are_blackbox_except_model_class_and_tag():
     smart_provider = LlmProviderConfig(
         name="deepseek-smart",
@@ -379,6 +449,12 @@ def test_task_entrypoints_are_blackbox_except_model_class_and_tag():
         text = "OK"
         if payload.get("response_format") == {"type": "json_object"}:
             user_content = payload["messages"][-1]["content"]
+            if isinstance(user_content, list):
+                user_content = "".join(
+                    item.get("text", "")
+                    for item in user_content
+                    if isinstance(item, dict)
+                )
             system_content = payload["messages"][0]["content"]
             if "official_editorial" in user_content:
                 text = json.dumps({"matched": "yes", "result": "中文题解"})

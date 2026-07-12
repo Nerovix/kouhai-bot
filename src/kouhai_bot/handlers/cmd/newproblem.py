@@ -303,7 +303,7 @@ async def _build_notes_message(stmt: dict) -> str:
     if not normalized_notes:
         return ""
     try:
-        translated_notes, _model_tag = await translate_sample_notes(normalized_notes)
+        translated_notes, _model_tag = await translate_sample_notes(normalized_notes, statement_images(stmt))
     except Exception as e:
         logger.warning("Notes translation failed, skipping notes node: %s", e)
         return ""

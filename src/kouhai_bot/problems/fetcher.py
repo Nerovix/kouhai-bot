@@ -19,6 +19,7 @@ Returns:
 
 import argparse
 import base64
+import html as html_lib
 import json
 import os
 import re
@@ -134,11 +135,13 @@ def find_all_tex_images(ps_html: str) -> tuple[list[dict], list[dict]]:
         tag = m.group(0)
         src_m = re.search(r'src="([^"]+)"', tag)
         cls_m = re.search(r'class="([^"]+)"', tag)
+        alt_m = re.search(r'alt="([^"]*)"', tag)
         cls = cls_m.group(1) if cls_m else ""
         entry = {
             "tag": tag,
             "src": normalize_image_src(src_m.group(1) if src_m else ""),
             "class": cls,
+            "alt": html_lib.unescape(alt_m.group(1)).strip() if alt_m else "",
             "start": m.start(),
             "end": m.end(),
         }
@@ -346,6 +349,7 @@ def call_vl_with_retry(
 def html_to_text(ps_html: str) -> str:
     """Strip HTML tags, normalize whitespace."""
     text = re.sub(r"<[^>]+>", "", ps_html)
+    text = html_lib.unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"\$\$\$|\$\$|\$", "", text)
     return text
@@ -441,19 +445,26 @@ def process_problem(
     for i, item in enumerate(ordered_images, 1):
         kind = "formula" if item in formulas else "graphic"
         marker = f"IMAGE_{i}"
+        alt = str(item.get("alt", "") or "").strip()
+        inline_hint = f": {alt}" if kind == "formula" and 0 < len(alt) <= 500 else ""
         image_entries.append({
             "src": item["src"],
             "kind": kind,
             "class": item.get("class", ""),
+            "alt": alt,
             "context": extract_context(ps_html, item["start"], item["end"]),
             "marker": marker,
-            "placeholder": f"[[{marker}: {kind}]]",
+            "placeholder": f"[[{marker}: {kind}{inline_hint}]]",
             "start": item["start"],
             "end": item["end"],
         })
 
     for img_entry in sorted(image_entries, key=lambda x: x["start"], reverse=True):
-        replacement = f'<span class="tex-formula-text">{img_entry["placeholder"]}</span>'
+        replacement = (
+            '<span class="tex-formula-text">'
+            f'{html_lib.escape(img_entry["placeholder"])}'
+            '</span>'
+        )
         result_html = (
             result_html[:img_entry["start"]] + replacement + result_html[img_entry["end"]:]
         )

@@ -2031,7 +2031,7 @@ def test_clarify_image_statement_uses_multimodal_model():
 
     with _all_patches(), \
             patch("kouhai_bot.handlers.cmd.submit.multimodal_model_configured", return_value=True), \
-            patch("kouhai_bot.handlers.shared._download_image_data_url", return_value="data:image/png;base64,abc"):
+            patch("kouhai_bot.handlers.shared._download_image_data_url_async", AsyncMock(return_value="data:image/png;base64,abc")):
         from kouhai_bot.handlers.cmd.clarify import handle
         asyncio.run(handle(**_kwargs(_make_event("/clarify 图是什么意思？"))))
 

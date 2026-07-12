@@ -921,7 +921,7 @@ class GroupCoordinator:
             f"群友的问题：\n{req.payload}"
         )
         user_content: str | list[dict] = (
-            build_multimodal_user_content(user_prompt, images)
+            await build_multimodal_user_content(user_prompt, images)
             if images
             else user_prompt
         )

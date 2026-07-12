@@ -10,6 +10,7 @@ from kouhai_bot.config import BotConfig
 from kouhai_bot.llm_config import LlmProviderConfig
 from kouhai_bot.handlers.shared import (
     build_judge_messages,
+    build_multimodal_user_content,
     build_second_judge_messages,
     _build_summary_prompt,
     _build_summary_repair_prompt,
@@ -334,7 +335,7 @@ def test_summarize_problem_with_images_uses_multimodal_task():
         )
 
     with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
-            patch("kouhai_bot.handlers.shared._download_image_data_url", return_value="data:image/png;base64,abc"), \
+            patch("kouhai_bot.handlers.shared._download_image_data_url_async", AsyncMock(return_value="data:image/png;base64,abc")), \
             patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call):
         summary, tag = asyncio.run(summarize_problem(
             "stmt",
@@ -368,7 +369,7 @@ def test_translate_sample_notes_with_images_uses_multimodal_task():
         return ChatCompletionResult(text="样例图解释", model_tag="『MMx』")
 
     with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
-            patch("kouhai_bot.handlers.shared._download_image_data_url", return_value="data:image/png;base64,abc"), \
+            patch("kouhai_bot.handlers.shared._download_image_data_url_async", AsyncMock(return_value="data:image/png;base64,abc")), \
             patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call):
         text, tag = asyncio.run(translate_sample_notes(
             "The diagram is [[IMAGE_1: graphic]].",
@@ -403,7 +404,7 @@ def test_translate_editorial_with_images_uses_multimodal_task():
         )
 
     with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
-            patch("kouhai_bot.handlers.shared._download_image_data_url", return_value="data:image/png;base64,abc"), \
+            patch("kouhai_bot.handlers.shared._download_image_data_url_async", AsyncMock(return_value="data:image/png;base64,abc")), \
             patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call):
         translated, tag, matched = asyncio.run(translate_editorial_to_zh(
             "Official editorial",
@@ -420,6 +421,58 @@ def test_translate_editorial_with_images_uses_multimodal_task():
     assert isinstance(content, list)
     assert "official_editorial" in content[0]["text"]
     assert "IMAGE_1" in content[1]["text"]
+
+
+def test_multimodal_content_prioritizes_images_without_text_fallback():
+    images = [
+        {
+            "src": f"https://codeforces.com/{idx}.png",
+            "kind": "formula",
+            "marker": f"IMAGE_{idx}",
+            "placeholder": f"[[IMAGE_{idx}: formula: x_{idx}]]",
+            "alt": f"x_{idx}",
+        }
+        for idx in range(1, 9)
+    ] + [
+        {
+            "src": "https://codeforces.com/9.png",
+            "kind": "graphic",
+            "marker": "IMAGE_9",
+            "placeholder": "[[IMAGE_9: graphic]]",
+        },
+        {
+            "src": "https://codeforces.com/10.png",
+            "kind": "formula",
+            "marker": "IMAGE_10",
+            "placeholder": "[[IMAGE_10: formula]]",
+        },
+    ]
+
+    with patch(
+        "kouhai_bot.handlers.shared._download_image_data_url_async",
+        AsyncMock(side_effect=lambda url: f"data:image/png;base64,{url.rsplit('/', 1)[-1]}"),
+    ) as download:
+        content = asyncio.run(build_multimodal_user_content("statement", images))
+
+    image_parts = [part for part in content if part.get("type") == "image_url"]
+    attached_labels = "\n".join(
+        content[idx]["text"]
+        for idx in range(1, len(content) - 1, 2)
+        if content[idx].get("type") == "text"
+    )
+    omitted_note = content[-1]["text"]
+    downloaded_urls = {call.args[0] for call in download.call_args_list}
+
+    assert len(image_parts) == 8
+    assert "IMAGE_9" in attached_labels
+    assert "IMAGE_10" in attached_labels
+    assert "IMAGE_7" not in attached_labels
+    assert "IMAGE_8" not in attached_labels
+    assert "IMAGE_7" in omitted_note
+    assert "IMAGE_8" in omitted_note
+    assert "未随请求发送" in omitted_note
+    assert "https://codeforces.com/7.png" not in downloaded_urls
+    assert "https://codeforces.com/8.png" not in downloaded_urls
 
 
 def test_task_entrypoints_are_blackbox_except_model_class_and_tag():

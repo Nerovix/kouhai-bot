@@ -16,11 +16,12 @@ from .config import get_config
 logger = logging.getLogger("kouhai-bot.llm")
 
 _THINK_TAG_NAMES_RE = r"(?:think(?:ing)?|thoughts?|reasoning|analysis|cot|chain[-_]?of[-_]?thought)"
+_ORPHAN_THINK_TAG_NAMES_RE = r"(?:think(?:ing)?)"
 _THINK_BLOCK_RE = re.compile(
     rf"<\s*(?P<tag>{_THINK_TAG_NAMES_RE})\b[^>]*>.*?</\s*(?P=tag)\s*>",
     re.IGNORECASE | re.DOTALL,
 )
-_THINK_TAG_RE = re.compile(rf"</?\s*{_THINK_TAG_NAMES_RE}\b[^>]*>", re.IGNORECASE)
+_THINK_TAG_RE = re.compile(rf"</?\s*{_ORPHAN_THINK_TAG_NAMES_RE}\b[^>]*>", re.IGNORECASE)
 
 
 @dataclass(frozen=True)

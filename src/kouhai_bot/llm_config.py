@@ -127,11 +127,19 @@ def _build_provider_list(raw: Any, *, section_name: str) -> list[LlmProviderConf
 
 def build_provider_queues_from_yaml(
     llm_section: dict[str, Any],
-) -> tuple[list[LlmProviderConfig], list[LlmProviderConfig]]:
-    """Build smart/general provider fallback queues from the YAML ``llm`` section.
+) -> tuple[
+    list[LlmProviderConfig],
+    list[LlmProviderConfig],
+    list[LlmProviderConfig],
+]:
+    """Build provider fallback queues from the YAML ``llm`` section.
 
-    Raises RuntimeError if either queue is empty or required fields are missing.
+    Raises RuntimeError if required queues are empty or required fields are missing.
+    ``multimodal_model`` is optional; an empty/missing section disables image tasks.
     """
+    multimodal_raw = llm_section.get("multimodal_model", [])
+    if multimodal_raw in (None, ""):
+        multimodal_raw = []
     return (
         _build_provider_list(
             llm_section.get("smart_model", []),
@@ -140,5 +148,13 @@ def build_provider_queues_from_yaml(
         _build_provider_list(
             llm_section.get("general_model", []),
             section_name="general_model",
+        ),
+        (
+            _build_provider_list(
+                multimodal_raw,
+                section_name="multimodal_model",
+            )
+            if multimodal_raw
+            else []
         ),
     )

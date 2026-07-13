@@ -23,6 +23,7 @@ from .. import registry
 from ..registry import CommandDef
 from ..shared import (
     build_scoreboard_entries,
+    build_multimodal_user_content,
     call_chat_completion_result,
     clear_user_problem_submissions,
     fetch_group_member_nickname_map,
@@ -34,13 +35,16 @@ from ..shared import (
     load_known_problem_ratings,
     load_scoreboard,
     load_problem_statement,
+    load_problem_statement_json,
     load_user_submissions,
+    multimodal_model_configured,
     rating_to_points,
     remember_problem_rating,
     parse_json_with_llm_repair,
     save_scoreboard,
     save_user_submission,
     second_judge_submission_result,
+    statement_images,
 )
 from ...config import get_config
 from ...context import get_display_name, load_group_ctx
@@ -896,27 +900,37 @@ class GroupCoordinator:
         pid = req.target_pid
         if not pid:
             return {"kind": "no_problem"}
+        stmt = load_problem_statement_json(pid)
         problem_text = load_problem_statement(pid)
         if not problem_text:
             return {"kind": "no_statement", "pid": pid}
 
         cfg = get_config()
+        images = statement_images(stmt)
+        if images and not multimodal_model_configured():
+            return {"kind": "image_unsupported", "pid": pid}
         summary = (
             get_problem_summary(req.group_id, pid)
             if req.is_private
             else _load_latest_group_summary(req.group_id)
         )
         await _react_req(req, random.choice(["128064", "289"]))
+        user_prompt = (
+            f"题目中文简述：\n{summary[:2000] if summary else '(暂无简述)'}\n\n"
+            f"题目英文原文：\n{problem_text[:5000]}\n\n"
+            f"群友的问题：\n{req.payload}"
+        )
+        user_content: str | list[dict] = (
+            await build_multimodal_user_content(user_prompt, images)
+            if images
+            else user_prompt
+        )
         result = await _call_llm_limited(
             [
                 {"role": "system", "content": CLARIFY_PROMPT},
-                {"role": "user", "content": (
-                    f"题目中文简述：\n{summary[:2000] if summary else '(暂无简述)'}\n\n"
-                    f"题目英文原文：\n{problem_text[:5000]}\n\n"
-                    f"群友的问题：\n{req.payload}"
-                )},
+                {"role": "user", "content": user_content},
             ],
-            task="clarify",
+            task="multimodal_clarify" if images else "clarify",
             timeout=cfg.clarify_timeout_sec,
             response_format={"type": "json_object"},
             thinking={"type": "enabled"},
@@ -1314,6 +1328,15 @@ class GroupCoordinator:
             await self._save_context_record(
                 req,
                 _context_record(req, result="no_statement", problem=result.get("pid", "")),
+            )
+            await self._finish_request(req)
+            return
+        if kind == "image_unsupported":
+            self._log_finished(req, "image_unsupported", problem=result.get("pid", ""))
+            await _send_req_plain(req, "这道题包含图片，当前没有配置多模态模型，暂时没法可靠澄清题面～")
+            await self._save_context_record(
+                req,
+                _context_record(req, result="image_unsupported", problem=result.get("pid", "")),
             )
             await self._finish_request(req)
             return

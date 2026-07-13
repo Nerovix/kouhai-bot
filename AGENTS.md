@@ -37,8 +37,8 @@ NapCat (QQ) ──WS──> worker.py
   Group and private help are both delivered as merged-forward cards, with direct text
   only as fallback.
 - **Scheduler current-group config**: `~/.kouhai-bot/scheduler_config.json` stores job list + time overrides for `CURRENT_GROUP`. Jobs are defined in `scheduler/jobs.py`.
-- **Formula VL**: `problems/fetcher.py` handles CF formula images → Qwen-VL → inline LaTeX. Has white-bg preprocessing, hallucination detection, retry.
-- **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before VL pipeline via `_vl_processed` flag. Stale caches with images are re-fetched with Qwen-VL. Problems with non-formula images (tex-graphics / diagrams) are skipped.
+- **Multimodal statements**: `problems/fetcher.py` collects CF `tex-formula` and `tex-graphics` image metadata with statement text. Formula images and diagrams are passed to `llm.multimodal_model` for new-problem summaries and `/clarify`; without that queue, picker logs and skips image-bearing problems.
+- **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before image metadata via `_images_collected`. Stale caches with images are re-fetched so image metadata is available for multimodal tasks.
 - **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
 - **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection, dispatches commands, and owns the scheduler in one process. There is no SQLite event queue, ingress supervisor, worker hot-swap, or auto-update loop.
 - **Friend request auto-approval**: Normal OneBot `post_type="request"` / `request_type="friend"` events are parsed by `napcat/client.py`, routed by `handlers.process_event()`, and approved via `set_friend_add_request`. QQ/NapCat "doubtful" friend requests are not reliably pushed as request events, so `worker.py` also runs `friend_requests.doubt_friend_request_loop()`, which polls `get_doubt_friends_add_request` every 60 seconds and approves with `set_doubt_friends_add_request`. Both paths approve only after the requester is confirmed to be a member of `CURRENT_GROUP`; lookup failure, malformed events, non-friend requests, and non-members are ignored without approving. Requests that were already consumed by another QQ client may not appear in the doubtful-request poll.
@@ -55,9 +55,10 @@ NapCat (QQ) ──WS──> worker.py
   by `CURFEW_START_HOUR` and `CURFEW_DURATION_HOURS`. Other commands (clarify, review,
   scoreboard, etc.) are unaffected. Curfew wraps past midnight correctly (e.g. start=22,
   duration=6 → 22:00–04:00).
-- **LLM fallback**: `llm.py` — providers are tried in list order from one of two
-  independent queues in `config.yaml`: `llm.smart_model` for judge/review and
-  `llm.general_model` for clarify/summary/editorial and other tasks. Each
+- **LLM fallback**: `llm.py` — providers are tried in list order from independent
+  queues in `config.yaml`: `llm.smart_model` for judge/review and
+  `llm.general_model` for pure-text clarify/summary/editorial and other tasks.
+  Optional `llm.multimodal_model` handles image-bearing problem summaries and `/clarify`. Each
   provider is retried internally (`llm.max_retries`) before moving to the next.
   All providers use the OpenAI-compatible `/chat/completions` format.
   DashScope/阿里云百炼 providers are called with HTTP+SSE streaming to avoid the
@@ -112,9 +113,10 @@ All providers use the OpenAI-compatible `/chat/completions` endpoint.
 | `llm.review_timeout_sec` | int | 600 | Review LLM timeout |
 | `llm.summary_timeout_sec` | int | 120 | Summary + editorial translation timeout |
 | `llm.smart_model` | list | — | Ordered fallback provider list for `/submit` judge and `/review` (**required, min 1**) |
-| `llm.general_model` | list | — | Ordered fallback provider list for `/clarify`, summaries, editorial translation, sample-note translation, and other LLM tasks (**required, min 1**) |
+| `llm.general_model` | list | — | Ordered fallback provider list for pure-text `/clarify`, summaries, editorial translation, sample-note translation, and other LLM tasks (**required, min 1**) |
+| `llm.multimodal_model` | list | `[]` | Optional ordered fallback provider list for image-bearing problem summaries and `/clarify` |
 
-Each provider in `llm.smart_model` or `llm.general_model`:
+Each provider in `llm.smart_model`, `llm.general_model`, or `llm.multimodal_model`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -133,9 +135,9 @@ Each provider in `llm.smart_model` or `llm.general_model`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `qwen.api_key` | — | Qwen-VL API key |
-| `qwen.base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Qwen-VL base URL |
-| `qwen.model` | — | Qwen-VL model name (**required**) |
+| `qwen.api_key` | — | Legacy Qwen-VL API key |
+| `qwen.base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Legacy Qwen-VL base URL |
+| `qwen.model` | `""` | Legacy Qwen-VL model name; no longer required for runtime statement images |
 
 #### `problem` section
 
@@ -601,8 +603,8 @@ commands are rejected in private with a friendly message.
   review as available. It sends a private problem card, preferring the current group's
   cached forward-card payload when the pid is the current group problem. Generated
   private cards must not expose the original CF id, title, contest id, or rating in the
-  card title. If an explicit pid/link fails because the statement fetcher detects
-  non-formula images (`tex-graphics` diagrams), tell the user the bot has limited
+  card title. If an explicit pid/link fails because the statement contains images
+  and no `llm.multimodal_model` queue is configured, tell the user the bot has limited
   ability on image-dependent statements and suggest choosing another problem.
 - `/problem` in private resends the selected private problem card. `/tag`, `/status`,
   `/clear`, `/submit`, `/clarify`, and `/review` all operate on private state and do

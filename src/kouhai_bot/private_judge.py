@@ -23,9 +23,11 @@ from .handlers.shared import (
     get_today_problem,
     high_difficulty_notice,
     load_scoreboard,
+    multimodal_model_configured,
     save_problem_summary,
     save_problem_card_ref,
     sanitize_cached_problem_card_payload,
+    statement_images,
     summarize_problem,
     translate_sample_notes,
 )
@@ -59,7 +61,7 @@ _CONTEST_PATH_RE = re.compile(
 
 
 class NonFormulaImageProblem(RuntimeError):
-    """Raised when a statement is unavailable because it depends on diagrams/images."""
+    """Raised when a statement is unavailable because image context is unsupported."""
 
 
 def _data_dir() -> Path:
@@ -404,12 +406,12 @@ def _ensure_statement(problem: dict) -> dict:
     stmt = picker.fetch_statement(problem)
     if isinstance(stmt, dict):
         return stmt
-    if _has_non_formula_images(problem):
+    if _has_images(problem) and not multimodal_model_configured():
         raise NonFormulaImageProblem(_problem_id(problem) or "unknown")
     return {}
 
 
-def _has_non_formula_images(problem: dict) -> bool:
+def _has_images(problem: dict) -> bool:
     from .problems import picker
 
     contest_id = problem.get("contestId")
@@ -420,13 +422,13 @@ def _has_non_formula_images(problem: dict) -> bool:
         result = picker.cf_statement.process_problem(contest_id, index, vl_backend="none")
     except Exception as e:
         logger.warning(
-            "failed to inspect non-formula images for %s%s: %s",
+            "failed to inspect statement images for %s%s: %s",
             contest_id,
             index,
             e,
         )
         return False
-    return bool(result.get("has_non_formula_images"))
+    return bool(result.get("formulas_found", 0) or result.get("graphics_found", 0))
 
 
 def resolve_problem_by_pid(pid: str) -> dict:
@@ -535,7 +537,7 @@ async def _build_notes_message(stmt: dict) -> str:
     if not raw_notes:
         return ""
     try:
-        translated, _tag = await translate_sample_notes(raw_notes)
+        translated, _tag = await translate_sample_notes(raw_notes, statement_images(stmt))
     except Exception:
         translated = ""
     text = strip_leaked_thinking(translated or raw_notes)
@@ -550,7 +552,12 @@ async def _problem_summary(group_id: int, pid: str, stmt: dict) -> str:
     input_text = stmt.get("input", "") or ""
     tl = stmt.get("time_limit", "?")
     ml = stmt.get("memory_limit", "?")
-    result, model_tag = await summarize_problem(stmt_text, input_text, f"Time: {tl}, Memory: {ml}")
+    result, model_tag = await summarize_problem(
+        stmt_text,
+        input_text,
+        f"Time: {tl}, Memory: {ml}",
+        statement_images(stmt),
+    )
     summary = (result or "").strip()
     if summary:
         if model_tag:

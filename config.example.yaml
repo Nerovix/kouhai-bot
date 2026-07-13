@@ -82,11 +82,21 @@ llm:
       model: "deepseek-v4-chat"
       model_tag: "『🐳』"
 
-# ── Qwen-VL (formula image recognition) ──
+  # Optional multimodal fallback queue — image-bearing problem summaries and /clarify use this list.
+  multimodal_model:
+    - name: mmx
+      api_key: "..."
+      base_url: "https://zenmux.ai/api/v1"
+      model: "mmx/mmx"
+      model_tag: "『MMx』"
+
+# ── Legacy Qwen-VL (deprecated) ──
+# Runtime statement images now use llm.multimodal_model instead of a separate formula-OCR pass.
+# This section is optional and kept only for compatibility with old local tooling.
 qwen:
   api_key: "..."
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  model: "qwen-vl-max"
+  model: ""
 
 # ── Group ──
 current_group: 0  # your QQ group number

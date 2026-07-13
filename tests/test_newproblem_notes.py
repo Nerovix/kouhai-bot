@@ -18,7 +18,7 @@ def test_build_notes_message_translates_and_formats():
         ) as mocked_translate:
             result = await newproblem._build_notes_message(stmt)
         assert result == "样例解释：\n第一行\n第二行"
-        mocked_translate.assert_awaited_once_with("Line A\nLine B")
+        mocked_translate.assert_awaited_once_with("Line A\nLine B", [])
 
     asyncio.run(_run())
 

@@ -31,6 +31,7 @@ _THINK_BLOCK_RE = re.compile(
     rf"<\s*(?P<tag>{_THINK_TAG_NAMES_RE})\b[^>]*>.*?</\s*(?P=tag)\s*>",
     re.IGNORECASE | re.DOTALL,
 )
+_THINK_OPEN_RE = re.compile(rf"<\s*{_ORPHAN_TAG_NAMES_RE}\b[^>]*>", re.IGNORECASE)
 _THINK_TAG_RE = re.compile(rf"</?\s*{_ORPHAN_TAG_NAMES_RE}\b[^>]*>", re.IGNORECASE)
 
 
@@ -72,6 +73,9 @@ def strip_leaked_thinking(text: str) -> str:
     if not text:
         return ""
     text = _THINK_BLOCK_RE.sub("", text)
+    open_match = _THINK_OPEN_RE.search(text)
+    if open_match:
+        text = text[:open_match.start()]
     text = _THINK_TAG_RE.sub("", text)
     return text.strip()
 
@@ -533,6 +537,8 @@ async def chat_completion(
     task_name = (task or "").strip().lower()
     if task_name in {"judge", "review"}:
         providers = cfg.llm_smart_providers
+    elif task_name in {"multimodal", "multimodal_summary", "multimodal_clarify"}:
+        providers = cfg.llm_multimodal_providers
     else:
         providers = cfg.llm_general_providers
     if provider_name:

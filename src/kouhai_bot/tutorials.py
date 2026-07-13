@@ -140,6 +140,19 @@ def _load_problem_statement_for_editorial(pid: str) -> str:
     return "\n".join(parts)
 
 
+def _load_problem_images_for_editorial(pid: str) -> list[dict]:
+    path = os.path.join(get_config().data_dir, "statements", f"{pid}.json")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            stmt = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    images = stmt.get("images", []) if isinstance(stmt, dict) else []
+    return [item for item in images if isinstance(item, dict) and item.get("src")]
+
+
 def load_tutorial(pid: str) -> dict | None:
     path = os.path.join(get_config().data_dir, "tutorials", f"{pid}.json")
     if not os.path.isfile(path):
@@ -357,10 +370,12 @@ async def get_editorial_zh_for_group(editorial: OfficialEditorial, pid: str) -> 
         return _load_cached_translation(pid), ""
 
     problem_text = _load_problem_statement_for_editorial(pid)
+    problem_images = _load_problem_images_for_editorial(pid)
     translated, model_tag, matched = await translate_editorial_to_zh(
         editorial.text,
         pid=pid,
         problem_text=problem_text,
+        images=problem_images,
     )
     if matched is False:
         mark_no_official_editorial(pid)

@@ -19,6 +19,7 @@ from ..shared import (
     save_problem_card_ref,
     save_problem_summary,
     save_scoreboard,
+    statement_images,
     snake_replace,
     summarize_problem,
     translate_sample_notes,
@@ -302,7 +303,7 @@ async def _build_notes_message(stmt: dict) -> str:
     if not normalized_notes:
         return ""
     try:
-        translated_notes, _model_tag = await translate_sample_notes(normalized_notes)
+        translated_notes, _model_tag = await translate_sample_notes(normalized_notes, statement_images(stmt))
     except Exception as e:
         logger.warning("Notes translation failed, skipping notes node: %s", e)
         return ""
@@ -466,10 +467,11 @@ async def _post_new_problem_locked(
             sample_messages = _build_sample_messages(stmt)
             notes_message = await _build_notes_message(stmt)
 
-        summary, model_tag = await summarize_problem(stmt_text, input_text, limits_text)
+        images = statement_images(stmt)
+        summary, model_tag = await summarize_problem(stmt_text, input_text, limits_text, images)
         if not summary:
             logger.warning(f"[group_{group_id}] Summary 1st attempt failed, retrying...")
-            summary, model_tag = await summarize_problem(stmt_text, input_text, limits_text)
+            summary, model_tag = await summarize_problem(stmt_text, input_text, limits_text, images)
         if summary:
             desc = summary.strip()
             save_problem_summary(group_id, pid, desc)

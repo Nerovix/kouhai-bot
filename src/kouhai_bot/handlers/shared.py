@@ -13,6 +13,7 @@ import os
 import random
 import re
 import time
+import urllib.request
 from pathlib import Path
 
 from ..config import get_config
@@ -240,15 +241,32 @@ async def parse_json_with_llm_repair(
 
 # ── Problem statement loading ───────────────────────────────────────────
 
-def load_problem_statement(pid: str) -> str:
-    """Load full problem statement from cache, formatted for LLM."""
+_MAX_MULTIMODAL_IMAGES = 8
+
+
+def multimodal_model_configured() -> bool:
+    return bool(get_config().llm_multimodal_providers)
+
+
+def load_problem_statement_json(pid: str) -> dict:
+    """Load raw problem statement cache JSON."""
     cfg = get_config()
     stmt_path = os.path.join(cfg.data_dir, "statements", f"{pid}.json")
     if not os.path.exists(stmt_path):
-        return ""
+        return {}
 
-    with open(stmt_path) as f:
-        stmt = json.load(f)
+    try:
+        with open(stmt_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def format_problem_statement_for_llm(stmt: dict) -> str:
+    """Format statement cache JSON as text for LLM context."""
+    if not isinstance(stmt, dict):
+        return ""
 
     parts = []
     if stmt.get("name"):
@@ -280,6 +298,139 @@ def load_problem_statement(pid: str) -> str:
         parts.append(f"\nNote:\n{notes}")
 
     return "\n".join(parts)
+
+
+def load_problem_statement(pid: str) -> str:
+    """Load full problem statement from cache, formatted for LLM."""
+    return format_problem_statement_for_llm(load_problem_statement_json(pid))
+
+
+def statement_images(stmt: dict) -> list[dict]:
+    images = stmt.get("images", []) if isinstance(stmt, dict) else []
+    return [item for item in images if isinstance(item, dict) and item.get("src")]
+
+
+def _download_image_data_url(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = resp.read()
+        content_type = str(resp.headers.get("Content-Type") or "").split(";", 1)[0]
+    mime = content_type if content_type.startswith("image/") else "image/png"
+    import base64
+
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+
+async def _download_image_data_url_async(url: str) -> str:
+    if url.startswith("data:"):
+        return url
+    import aiohttp
+    import base64
+
+    timeout = aiohttp.ClientTimeout(total=15)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            data = await resp.read()
+            content_type = str(resp.headers.get("Content-Type") or "").split(";", 1)[0]
+    mime = content_type if content_type.startswith("image/") else "image/png"
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+
+def _image_marker(image: dict, fallback_idx: int) -> str:
+    return str(image.get("marker", "") or f"IMAGE_{fallback_idx}")
+
+
+def _image_kind(image: dict) -> str:
+    return str(image.get("kind", "") or "image")
+
+
+def _image_placeholder(image: dict, fallback_idx: int) -> str:
+    marker = _image_marker(image, fallback_idx)
+    kind = _image_kind(image)
+    return str(image.get("placeholder", "") or f"[[{marker}: {kind}]]")
+
+
+def _image_has_text_fallback(image: dict) -> bool:
+    return _image_kind(image).lower() == "formula" and bool(str(image.get("alt", "") or "").strip())
+
+
+def _select_images_for_attachment(images: list[dict]) -> tuple[list[dict], list[dict]]:
+    usable = [
+        (idx, image)
+        for idx, image in enumerate(images)
+        if isinstance(image, dict) and str(image.get("src", "") or "").strip()
+    ]
+    if len(usable) <= _MAX_MULTIMODAL_IMAGES:
+        return [image for _, image in usable], []
+
+    ranked = sorted(
+        usable,
+        key=lambda item: (1 if _image_has_text_fallback(item[1]) else 0, item[0]),
+    )
+    selected_indexes = {idx for idx, _ in ranked[:_MAX_MULTIMODAL_IMAGES]}
+    selected = [image for idx, image in usable if idx in selected_indexes]
+    omitted = [image for idx, image in usable if idx not in selected_indexes]
+    return selected, omitted
+
+
+def _omitted_image_note(omitted: list[dict]) -> str:
+    refs = [
+        _image_placeholder(image, idx)[:180]
+        for idx, image in enumerate(omitted, 1)
+    ]
+    shown = "；".join(refs[:12])
+    if len(refs) > 12:
+        shown += f"；另有 {len(refs) - 12} 张"
+    return (
+        "多模态附件上限为 8 张，已优先附加缺少文本替代的示意图或公式图。"
+        f"以下题面图片未随请求发送：{shown}。"
+        "若这些占位符本身包含公式或 alt 文本，请依据题面文字；不要假设未附图中存在额外信息。"
+    )
+
+
+async def _build_image_content_parts(display_idx: int, image: dict) -> list[dict]:
+    src = str(image.get("src", "") or "").strip()
+    kind = _image_kind(image)
+    marker = _image_marker(image, display_idx)
+    placeholder = _image_placeholder(image, display_idx)
+    context = str(image.get("context", "") or "").strip()
+    label = f"题面图片 {marker}（{kind}），对应原文占位符：{placeholder}"
+    if context:
+        label += f"，附近文本：{context[:500]}"
+    try:
+        image_url = await _download_image_data_url_async(src)
+    except Exception as e:
+        logger.warning("failed to download statement image %s: %s", src, e)
+        image_url = src
+    return [
+        {"type": "text", "text": "\n\n" + label},
+        {"type": "image_url", "image_url": {"url": image_url}},
+    ]
+
+
+async def build_multimodal_user_content(text: str, images: list[dict]) -> list[dict]:
+    """Build OpenAI-compatible text+image content parts."""
+    content: list[dict] = [{"type": "text", "text": text}]
+    selected, omitted = _select_images_for_attachment(images)
+    image_parts = await asyncio.gather(*[
+        _build_image_content_parts(idx, image)
+        for idx, image in enumerate(selected, 1)
+    ])
+    for parts in image_parts:
+        content.extend(parts)
+    if omitted:
+        content.append({"type": "text", "text": "\n\n" + _omitted_image_note(omitted)})
+    return content
+
+
+def _usable_statement_images(images: list[dict] | None) -> list[dict]:
+    return [item for item in images or [] if isinstance(item, dict) and item.get("src")]
+
+
+async def _multimodal_content_or_text(text: str, images: list[dict]) -> str | list[dict]:
+    return await build_multimodal_user_content(text, images) if images else text
 
 
 # ── Today's problem ─────────────────────────────────────────────────────
@@ -1217,19 +1368,30 @@ def _build_summary_repair_prompt(
     )
 
 
-async def summarize_problem(stmt_text: str, input_text: str, limits_text: str) -> tuple[str | None, str]:
+async def summarize_problem(
+    stmt_text: str,
+    input_text: str,
+    limits_text: str,
+    images: list[dict] | None = None,
+) -> tuple[str | None, str]:
     """Generate Chinese summary of a problem via the configured chat provider.
 
     Returns (summary_text, model_tag). model_tag is empty if the LLM call failed.
     """
     cfg = get_config()
+    image_items = _usable_statement_images(images)
+    if image_items and not multimodal_model_configured():
+        logger.warning("summary requested for image statement without llm.multimodal_model")
+        return None, ""
+    user_prompt = _build_summary_prompt(stmt_text, input_text, limits_text)
+    user_content = await _multimodal_content_or_text(user_prompt, image_items)
     messages = [
         {"role": "system", "content": _summary_system_prompt()},
-        {"role": "user", "content": _build_summary_prompt(stmt_text, input_text, limits_text)},
+        {"role": "user", "content": user_content},
     ]
     result = await call_chat_completion_result(
         messages,
-        task="summary",
+        task="multimodal_summary" if image_items else "summary",
         temperature=0.4,
         timeout=cfg.summary_timeout_sec,
         response_format={"type": "json_object"},
@@ -1278,12 +1440,19 @@ async def summarize_problem(stmt_text: str, input_text: str, limits_text: str) -
     return repaired, repaired_json_tag or repair_result.model_tag
 
 
-async def translate_sample_notes(notes_text: str) -> tuple[str | None, str]:
+async def translate_sample_notes(
+    notes_text: str,
+    images: list[dict] | None = None,
+) -> tuple[str | None, str]:
     """Translate sample notes/explanations into concise Chinese plain text."""
     content = (notes_text or "").strip()
     if not content:
         return None, ""
     cfg = get_config()
+    image_items = _usable_statement_images(images)
+    if image_items and not multimodal_model_configured():
+        logger.warning("sample notes translation requested with images without llm.multimodal_model")
+        image_items = []
     prompt = (
         "下面是题目中与样例相关的解释（Notes）。\n"
         "请把它忠实翻译为自然、准确的中文；只做翻译，不要总结、点评、补充解释、改写成题解，"
@@ -1312,9 +1481,9 @@ async def translate_sample_notes(notes_text: str) -> tuple[str | None, str]:
                     "你必须输出纯文本；LaTeX 只在不用会失真时保留，普通下标和幂次优先使用 Unicode 角标。"
                 ),
             },
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": await _multimodal_content_or_text(prompt, image_items)},
         ],
-        task="summary",
+        task="multimodal_summary" if image_items else "summary",
         timeout=cfg.summary_timeout_sec,
     )
     return result.text, result.model_tag
@@ -1324,6 +1493,7 @@ async def translate_editorial_to_zh(
     editorial_text: str,
     pid: str = "",
     problem_text: str = "",
+    images: list[dict] | None = None,
 ) -> tuple[str | None, str, bool | None]:
     """Validate and translate a Codeforces editorial to Chinese for group delivery.
 
@@ -1344,6 +1514,11 @@ async def translate_editorial_to_zh(
         "official_editorial": body,
     }
     cfg = get_config()
+    image_items = _usable_statement_images(images)
+    if image_items and not multimodal_model_configured():
+        logger.warning("editorial translation requested with images without llm.multimodal_model")
+        image_items = []
+    user_prompt = json.dumps(prompt_payload, ensure_ascii=False)
     result = await call_chat_completion_result(
         [
             {
@@ -1378,9 +1553,9 @@ async def translate_editorial_to_zh(
                     "只有复杂求和、递推、分式、多重下标、精确定义用中文或 Unicode 会失真时，才保留最少必要 LaTeX。"
                 ),
             },
-            {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)},
+            {"role": "user", "content": await _multimodal_content_or_text(user_prompt, image_items)},
         ],
-        task="summary",
+        task="multimodal_summary" if image_items else "summary",
         timeout=600,
         response_format={"type": "json_object"},
         thinking={"type": "enabled"},

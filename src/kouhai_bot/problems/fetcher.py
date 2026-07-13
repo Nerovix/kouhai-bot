@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cf_statement.py — Fetch CF problem statement, handle formula images via VL.
+cf_statement.py — Fetch CF problem statement and collect image metadata.
 
 Usage:
   python cf_statement.py 542 D                    # contestId + index
@@ -13,17 +13,20 @@ VL backends (set via --vl-backend or CF_VL_BACKEND env):
   - none     Dry-run only
 
 Returns:
-  - has_non_formula_images: True if problem contains tex-graphics diagrams → filter out
+  - images: tex-formula / tex-graphics metadata for multimodal consumers
+  - has_non_formula_images: True if problem contains tex-graphics diagrams
 """
 
 import argparse
 import base64
+import html as html_lib
 import json
 import os
 import re
 import sys
 import urllib.request
 from io import BytesIO
+from urllib.parse import urljoin
 
 import cloudscraper
 from PIL import Image
@@ -107,11 +110,21 @@ def extract_problem_statement(html: str) -> str | None:
 
 # ── Find formula / graphics images ──────────────────────────────────────
 
+def normalize_image_src(src: str) -> str:
+    """Return an absolute Codeforces image URL."""
+    value = (src or "").strip()
+    if not value:
+        return ""
+    if value.startswith("//"):
+        return "https:" + value
+    return urljoin("https://codeforces.com", value)
+
+
 def find_all_tex_images(ps_html: str) -> tuple[list[dict], list[dict]]:
     """Find all tex-formula and tex-graphics images.
     Returns (formulas, graphics) — each a list of {tag, src, class, start, end}.
-    tex-formula = math formula images (should convert to LaTeX)
-    tex-graphics = diagrams/charts/drawings (should filter out the problem)
+    tex-formula = math formula images.
+    tex-graphics = diagrams/charts/drawings.
     """
     formulas = []
     graphics = []
@@ -122,11 +135,13 @@ def find_all_tex_images(ps_html: str) -> tuple[list[dict], list[dict]]:
         tag = m.group(0)
         src_m = re.search(r'src="([^"]+)"', tag)
         cls_m = re.search(r'class="([^"]+)"', tag)
+        alt_m = re.search(r'alt="([^"]*)"', tag)
         cls = cls_m.group(1) if cls_m else ""
         entry = {
             "tag": tag,
-            "src": src_m.group(1) if src_m else "",
+            "src": normalize_image_src(src_m.group(1) if src_m else ""),
             "class": cls,
+            "alt": html_lib.unescape(alt_m.group(1)).strip() if alt_m else "",
             "start": m.start(),
             "end": m.end(),
         }
@@ -334,6 +349,7 @@ def call_vl_with_retry(
 def html_to_text(ps_html: str) -> str:
     """Strip HTML tags, normalize whitespace."""
     text = re.sub(r"<[^>]+>", "", ps_html)
+    text = html_lib.unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"\$\$\$|\$\$|\$", "", text)
     return text
@@ -352,7 +368,7 @@ def process_problem(
       - pid, url, text, text_length
       - formulas_found, formulas_processed
       - formula_details: list of {src, latex}
-      - has_non_formula_images: True if tex-graphics (diagrams) found → filter out
+      - has_non_formula_images: True if tex-graphics (diagrams) found
       - formulas_failed: number of formulas that couldn't be converted after retries
     """
     html, pid = fetch_problem_html(contest_id, index)
@@ -367,7 +383,7 @@ def process_problem(
           file=sys.stderr)
 
     if has_non_formula_images:
-        print(f"  [{pid}] ⚠ contains tex-graphics (diagrams) — will be filtered",
+        print(f"  [{pid}] ⚠ contains tex-graphics (diagrams)",
               file=sys.stderr)
 
     # Process formula images
@@ -418,23 +434,37 @@ def process_problem(
     for gm in graphics:
         formula_results.append({
             "src": gm["src"],
-            "latex": "[DIAGRAM — non-formula image]",
+            "latex": "[DIAGRAM IMAGE]",
         })
 
-    # Replace all image tags with their text representation (reverse order)
+    # Replace image tags with stable inline markers, so multimodal consumers can
+    # align each image with its exact location in the statement text.
     result_html = ps_html
-    all_images = sorted(formulas + graphics, key=lambda x: x["start"], reverse=True)
-    all_results_iter = iter(sorted(
-        formula_results,
-        key=lambda x: _find_match_index(x["src"], formulas + graphics),
-        reverse=True,
-    ))
+    ordered_images = sorted(formulas + graphics, key=lambda x: x["start"])
+    image_entries: list[dict] = []
+    for i, item in enumerate(ordered_images, 1):
+        kind = "formula" if item in formulas else "graphic"
+        marker = f"IMAGE_{i}"
+        alt = str(item.get("alt", "") or "").strip()
+        inline_hint = f": {alt}" if kind == "formula" and 0 < len(alt) <= 500 else ""
+        image_entries.append({
+            "src": item["src"],
+            "kind": kind,
+            "class": item.get("class", ""),
+            "alt": alt,
+            "context": extract_context(ps_html, item["start"], item["end"]),
+            "marker": marker,
+            "placeholder": f"[[{marker}: {kind}{inline_hint}]]",
+            "start": item["start"],
+            "end": item["end"],
+        })
 
-    for img_entry in all_images:
-        # Find matching result by src URL
-        matching = [r for r in formula_results if r["src"] == img_entry["src"]]
-        latex = matching[0]["latex"] if matching else "[IMAGE]"
-        replacement = f'<span class="tex-formula-text">({latex})</span>'
+    for img_entry in sorted(image_entries, key=lambda x: x["start"], reverse=True):
+        replacement = (
+            '<span class="tex-formula-text">'
+            f'{html_lib.escape(img_entry["placeholder"])}'
+            '</span>'
+        )
         result_html = (
             result_html[:img_entry["start"]] + replacement + result_html[img_entry["end"]:]
         )
@@ -450,17 +480,13 @@ def process_problem(
         "formulas_processed": len(formulas) - formulas_failed,
         "formulas_failed": formulas_failed,
         "formula_details": formula_results,
+        "images": [
+            {k: v for k, v in item.items() if k not in {"start", "end"}}
+            for item in image_entries
+        ],
         "text": plain_text,
         "text_length": len(plain_text),
     }
-
-
-def _find_match_index(src: str, items: list[dict]) -> int:
-    """Find index of item with matching src, or -1."""
-    for i, item in enumerate(items):
-        if item["src"] == src:
-            return i
-    return -1
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────
@@ -520,7 +546,7 @@ def main():
         print(f"URL: {result['url']}")
         print(f"Formulas: {result['formulas_found']} found, {result['formulas_processed']} processed")
         if result["has_non_formula_images"]:
-            print("⚠ Contains non-formula images (diagrams) — recommend filtering")
+            print("⚠ Contains statement images (diagrams) — requires multimodal model")
         if result["formulas_failed"]:
             print(f"⚠ {result['formulas_failed']} formula(s) failed")
         for fr in result.get("formula_details", []):

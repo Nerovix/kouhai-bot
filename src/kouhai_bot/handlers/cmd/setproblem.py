@@ -121,12 +121,12 @@ async def handle(group_id: int, user_id: int, sender: dict,
         except NonFormulaImageProblem:
             if from_quoted_card:
                 await send_private_msg(user_id, build_plain_message(
-                    "这道题的题面里包含非公式图片，我现在对这类题目的处理能力有限，"
+                    "这道题的题面里包含图片，但当前没有配置多模态模型，"
                     "可能看不完整题意。建议先换一道题～"
                 ))
             else:
                 await send_private_msg(user_id, build_plain_message(
-                    f"CF{pid} 的题面里包含非公式图片，我现在对这类题目的处理能力有限，"
+                    f"CF{pid} 的题面里包含图片，但当前没有配置多模态模型，"
                     "可能看不完整题意。建议先换一道题～"
                 ))
             return

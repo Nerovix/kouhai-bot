@@ -15,8 +15,23 @@ from .config import get_config
 
 logger = logging.getLogger("kouhai-bot.llm")
 
-_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
-_THINK_TAG_RE = re.compile(r"</?think\b[^>]*>", re.IGNORECASE)
+# Known thinking-tag names that may leak from LLM providers.
+# _THINK_BLOCK_RE strips matched <tag>...</tag> pairs for ALL names.
+# _THINK_TAG_RE strips unmatched orphan tags only for the most common
+# leak variants (think/thinking) to avoid false positives on words
+# like "analysis" or "reasoning" that appear in normal text.
+_THINK_TAG_NAMES = (
+    "think", "thinking", "thought", "thoughts",
+    "reasoning", "analysis", "cot", "chain-of-thought", "chain_of_thought",
+)
+_THINK_TAG_NAMES_RE = "|".join(_THINK_TAG_NAMES)
+_ORPHAN_TAG_NAMES_RE = "think(?:ing)?"
+
+_THINK_BLOCK_RE = re.compile(
+    rf"<\s*(?P<tag>{_THINK_TAG_NAMES_RE})\b[^>]*>.*?</\s*(?P=tag)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_THINK_TAG_RE = re.compile(rf"</?\s*{_ORPHAN_TAG_NAMES_RE}\b[^>]*>", re.IGNORECASE)
 
 
 @dataclass(frozen=True)

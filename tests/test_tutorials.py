@@ -213,6 +213,38 @@ def test_get_editorial_zh_for_group_revalidates_unverified_cache(tmp_path, monke
     assert (cache_dir / "317C.verified").is_file()
 
 
+def test_get_editorial_zh_for_group_strips_verified_cache_thinking_tags(tmp_path, monkeypatch):
+    from kouhai_bot.config import BotConfig
+
+    cfg = BotConfig(data_dir=str(tmp_path))
+    monkeypatch.setattr("kouhai_bot.tutorials.get_config", lambda: cfg)
+    cache_dir = tmp_path / "tutorial_translations"
+    cache_dir.mkdir()
+    (cache_dir / "542D.txt").write_text(
+        ("<thinking>hidden cached editorial</thinking>中文题解。" * 20),
+        encoding="utf-8",
+    )
+    (cache_dir / "542D.verified").write_text("", encoding="utf-8")
+    editorial = OfficialEditorial(
+        text=_long_text("english-"),
+        tutorial_url="https://example.com/e",
+        tutorial_title="T",
+    )
+    translate = AsyncMock(return_value=("不应重新翻译。" * 20, "", True))
+
+    async def _run():
+        with patch("kouhai_bot.tutorials.translate_editorial_to_zh", translate):
+            return await get_editorial_zh_for_group(editorial, "542D")
+
+    zh, tag = asyncio.run(_run())
+    assert zh is not None
+    assert "中文题解" in zh
+    assert "hidden cached editorial" not in zh
+    assert "thinking" not in zh
+    assert tag == ""
+    translate.assert_not_awaited()
+
+
 def test_prefetch_editorial_zh_recovers_after_rescrape(tmp_path, monkeypatch):
     import json
     from kouhai_bot.config import BotConfig

@@ -10,6 +10,7 @@ from ..shared import (
     high_difficulty_notice,
     is_already_solved,
     load_scoreboard,
+    sanitize_cached_problem_card_payload,
 )
 from ...napcat.client import (
     build_plain_message,
@@ -107,6 +108,7 @@ async def handle_problem(group_id: int, user_id: int, sender: dict,
             pid = str(daily_msg.get("pid", "") or "")
             if pid != current_pid:
                 raise ValueError(f"stale daily_msg pid={pid}, current={current_pid}")
+            daily_msg = sanitize_cached_problem_card_payload(daily_msg)[0]
             msg_id = daily_msg.get("msg_id")
             if msg_id:
                 fwd_nodes = [{"type": "node", "data": {"id": str(msg_id)}}]
@@ -145,7 +147,7 @@ async def handle_problem(group_id: int, user_id: int, sender: dict,
                         save_problem_card_ref(group_id, fwd_resp, pid, "problem_resend")
                     daily_msg.update(node_payload)
                     daily_msg["fwd_message_id"] = fwd_resp
-                    with open(daily_msg_path, "w") as f:
+                    with open(daily_msg_path, "w", encoding="utf-8") as f:
                         json.dump(daily_msg, f, ensure_ascii=False, indent=2)
                     await _send_high_difficulty_notice_group(group_id, current_problem)
                     await _send_solved_problem_hint(group_id, nickname)

@@ -2179,6 +2179,44 @@ def test_problem_rebuilds_forward_card_when_node_ids_are_stale():
     print("✅ problem: rebuilds stale forward card")
 
 
+def test_problem_rebuilds_forward_card_when_cached_text_has_thinking_tags():
+    _reset_state()
+    _setup_problem()
+    _write_group_file(GID, "daily_msg.json", {
+        "msg_id": 1111,
+        "note_msg_id": 1112,
+        "pid": PID,
+        "post_msg": "题目正文\n<thinking>internal summary</thinking>可见摘要",
+        "sample_messages": ["样例 1\nInput:\n1\n\nOutput:\n2"],
+        "notes_message": "样例解释：\n<analysis>hidden note</analysis>可见解释",
+        "snake_enabled": True,
+    })
+
+    with _all_patches(), patch("kouhai_bot.handlers.cmd.newproblem.asyncio.sleep", AsyncMock()):
+        from kouhai_bot.handlers.cmd.stubs import handle_problem
+        asyncio.run(handle_problem(**_kwargs(_make_event("/problem"))))
+
+    assert _forwarded, f"Expected rebuilt forward card, got {_forwarded}"
+    forwarded_ids = [
+        node.get("data", {}).get("id")
+        for node in _forwarded[0]["messages"]
+        if isinstance(node, dict)
+    ]
+    assert "1111" not in forwarded_ids and "1112" not in forwarded_ids, _forwarded
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "internal summary" not in private_text
+    assert "hidden note" not in private_text
+    assert "可见摘要" in private_text
+    assert "可见解释" in private_text
+    with open(os.path.join(_data_dir(), "groups", str(GID), "daily_msg.json"), encoding="utf-8") as f:
+        saved = json.load(f)
+    assert "thinking" not in saved["post_msg"]
+    assert "analysis" not in saved["notes_message"]
+    assert saved["msg_id"] != 1111
+    _cleanup()
+    print("✅ problem: sanitizes cached thinking tags before resend")
+
+
 def test_problem_ignores_stale_daily_msg_pid():
     _reset_state()
     _setup_problem_for(GID, PID)
@@ -4205,6 +4243,41 @@ def test_private_problem_card_hides_original_problem_identity():
     assert "2600" not in post_msg and "rating" not in post_msg, post_msg
     _cleanup()
     print("✅ private problem card: hides original identity")
+
+
+def test_private_problem_card_strips_cached_problem_summary_thinking_tags():
+    _reset_state()
+    _write_statement(PID, {
+        "name": "D. Superhero's Job",
+        "time_limit": "2s",
+        "memory_limit": "256MB",
+        "description": "Statement text",
+        "input": "n",
+        "output": "answer",
+        "samples": [],
+    })
+    _write_group_file(GID, "problem_summaries.json", {
+        PID: {"summary_zh": "<reasoning>hidden cached summary</reasoning>SUMMARY_ONLY"},
+    })
+
+    with _all_patches():
+        from kouhai_bot.private_judge import build_problem_card_payload
+
+        payload = asyncio.run(build_problem_card_payload(GID, {
+            "today": PID,
+            "contestId": 542,
+            "index": "D",
+            "name": "Superhero's Job",
+            "rating": 2600,
+            "tags": [],
+        }))
+
+    post_msg = payload["post_msg"]
+    assert "SUMMARY_ONLY" in post_msg, post_msg
+    assert "hidden cached summary" not in post_msg, post_msg
+    assert "reasoning" not in post_msg, post_msg
+    _cleanup()
+    print("✅ private problem card: strips cached summary thinking tags")
 
 
 def test_private_problem_card_high_difficulty_warns_after_card():

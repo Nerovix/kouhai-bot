@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from ..config import get_config
-from ..llm import ChatCompletionResult, chat_completion
+from ..llm import ChatCompletionResult, chat_completion, strip_leaked_thinking
 
 logger = logging.getLogger("kouhai-bot.shared")
 
@@ -102,6 +102,7 @@ def robust_json_parse(text: str) -> dict:
     """Parse JSON, handling markdown fences, trailing commas, and more."""
     if not text:
         return {}
+    text = strip_leaked_thinking(text)
     # Strip markdown fences
     text = re.sub(r'^```(?:json)?\s*\n?', '', text.strip())
     text = re.sub(r'\n?```\s*$', '', text.strip())
@@ -142,6 +143,16 @@ _JSON_REPAIR_MAX_ATTEMPTS = 3
 _JSON_REPAIR_MAX_CHARS = 12000
 
 
+def _strip_leaked_thinking_from_json(value):
+    if isinstance(value, str):
+        return strip_leaked_thinking(value)
+    if isinstance(value, dict):
+        return {k: _strip_leaked_thinking_from_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_leaked_thinking_from_json(v) for v in value]
+    return value
+
+
 def _json_repair_prompt(text: str, expected_schema: str, parse_note: str) -> str:
     payload = {
         "expected_schema": expected_schema or "JSON object",
@@ -171,10 +182,10 @@ async def parse_json_with_llm_repair(
     Returns (parsed_object, repair_model_tag). repair_model_tag is non-empty only
     when a repair model response was used.
     """
-    current = (text or "").strip()
+    current = strip_leaked_thinking(text or "")
     parsed = robust_json_parse(current)
     if parsed:
-        return parsed, ""
+        return _strip_leaked_thinking_from_json(parsed), ""
     if not current:
         return {}, ""
 
@@ -212,10 +223,10 @@ async def parse_json_with_llm_repair(
         if not result.text:
             parse_note = f"repair model returned no text ({result.failure_kind or 'unknown failure'})"
             continue
-        current = result.text.strip()
+        current = strip_leaked_thinking(result.text)
         parsed = robust_json_parse(current)
         if parsed:
-            return parsed, last_tag
+            return _strip_leaked_thinking_from_json(parsed), last_tag
         parse_note = "repair output was still not valid JSON"
 
     logger.warning(
@@ -373,14 +384,17 @@ def get_problem_summary(group_id: int, pid: str) -> str:
     data = load_problem_summaries(group_id)
     item = data.get(pid)
     if isinstance(item, dict):
-        return item.get("summary_zh", "") or ""
+        return strip_leaked_thinking(item.get("summary_zh", "") or "")
     if isinstance(item, str):
-        return item
+        return strip_leaked_thinking(item)
     return ""
 
 
 def save_problem_summary(group_id: int, pid: str, summary_zh: str) -> None:
     if not pid or not summary_zh:
+        return
+    summary_zh = strip_leaked_thinking(summary_zh)
+    if not summary_zh:
         return
     data = load_problem_summaries(group_id)
     data[pid] = {
@@ -388,6 +402,30 @@ def save_problem_summary(group_id: int, pid: str, summary_zh: str) -> None:
     }
     with open(_problem_summary_file(group_id), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def sanitize_cached_problem_card_payload(data: dict) -> tuple[dict, bool]:
+    """Scrub cached LLM text before rebuilding user-visible problem cards.
+
+    If any cached text changes, stale message-node ids must not be reused because
+    forwarding them would resend the original unsanitized message body.
+    """
+    if not isinstance(data, dict):
+        return {}, False
+    cleaned = dict(data)
+    changed = False
+    for key in ("post_msg", "notes_message"):
+        value = cleaned.get(key)
+        if not isinstance(value, str):
+            continue
+        stripped = strip_leaked_thinking(value)
+        if stripped != value:
+            cleaned[key] = stripped
+            changed = True
+    if changed:
+        for key in ("msg_id", "sample_msg_ids", "note_msg_id", "snake_msg_id", "fwd_message_id"):
+            cleaned.pop(key, None)
+    return cleaned, changed
 
 
 def load_problem_card_refs(group_id: int) -> dict[str, dict]:

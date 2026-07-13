@@ -16,6 +16,7 @@ from typing import Any
 
 from .config import get_config
 from .handlers.shared import translate_editorial_to_zh
+from .llm import strip_leaked_thinking
 
 MIN_EDITORIAL_LEN = 80
 _REVIEW_EDITORIAL_MAX_LEN = 12000
@@ -273,12 +274,13 @@ def _load_cached_translation(pid: str) -> str:
         return ""
     try:
         with open(path, encoding="utf-8") as f:
-            return f.read().strip()
+            return strip_leaked_thinking(f.read().strip())
     except OSError:
         return ""
 
 
 def _save_cached_translation(pid: str, text: str) -> None:
+    text = strip_leaked_thinking(text)
     path = _translation_cache_path(pid)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)

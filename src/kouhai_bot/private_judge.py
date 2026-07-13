@@ -25,6 +25,7 @@ from .handlers.shared import (
     load_scoreboard,
     save_problem_summary,
     save_problem_card_ref,
+    sanitize_cached_problem_card_payload,
     summarize_problem,
     translate_sample_notes,
 )
@@ -589,7 +590,7 @@ def load_current_group_card_payload(group_id: int, pid: str) -> dict | None:
         return None
     if not isinstance(data, dict) or str(data.get("pid", "") or "") != str(pid or ""):
         return None
-    return data
+    return sanitize_cached_problem_card_payload(data)[0]
 
 
 async def _send_forward_nodes_private(user_id: int, node_ids: list[str]) -> int | None:

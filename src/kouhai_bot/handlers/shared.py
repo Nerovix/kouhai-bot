@@ -384,14 +384,17 @@ def get_problem_summary(group_id: int, pid: str) -> str:
     data = load_problem_summaries(group_id)
     item = data.get(pid)
     if isinstance(item, dict):
-        return item.get("summary_zh", "") or ""
+        return strip_leaked_thinking(item.get("summary_zh", "") or "")
     if isinstance(item, str):
-        return item
+        return strip_leaked_thinking(item)
     return ""
 
 
 def save_problem_summary(group_id: int, pid: str, summary_zh: str) -> None:
     if not pid or not summary_zh:
+        return
+    summary_zh = strip_leaked_thinking(summary_zh)
+    if not summary_zh:
         return
     data = load_problem_summaries(group_id)
     data[pid] = {
@@ -399,6 +402,30 @@ def save_problem_summary(group_id: int, pid: str, summary_zh: str) -> None:
     }
     with open(_problem_summary_file(group_id), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def sanitize_cached_problem_card_payload(data: dict) -> tuple[dict, bool]:
+    """Scrub cached LLM text before rebuilding user-visible problem cards.
+
+    If any cached text changes, stale message-node ids must not be reused because
+    forwarding them would resend the original unsanitized message body.
+    """
+    if not isinstance(data, dict):
+        return {}, False
+    cleaned = dict(data)
+    changed = False
+    for key in ("post_msg", "notes_message"):
+        value = cleaned.get(key)
+        if not isinstance(value, str):
+            continue
+        stripped = strip_leaked_thinking(value)
+        if stripped != value:
+            cleaned[key] = stripped
+            changed = True
+    if changed:
+        for key in ("msg_id", "sample_msg_ids", "note_msg_id", "snake_msg_id", "fwd_message_id"):
+            cleaned.pop(key, None)
+    return cleaned, changed
 
 
 def load_problem_card_refs(group_id: int) -> dict[str, dict]:

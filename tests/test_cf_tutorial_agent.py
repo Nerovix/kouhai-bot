@@ -211,6 +211,61 @@ def test_agent_includes_dynamic_fragment_in_blog_body(tmp_path):
     assert "Dynamic official explanation" in result.bundle["sections"][0]["solution"]
 
 
+def test_agent_keeps_dynamic_fragment_when_blog_body_is_long(tmp_path):
+    _write_statement(tmp_path, pid="2039F1")
+    dynamic_text = (
+        "Exact dynamic tutorial for the target easy version with enough details. " * 3
+    ) + "This is the unique final long-body dynamic marker."
+    long_blog_body = "<p>" + ("Long unrelated editorial body. " * 2000) + "</p>"
+    pages = {
+        "https://codeforces.com/problemset/problem/2039/F1": """
+        <html><body>
+          <div class="title">F1. Shohag Loves Counting (Easy Version)</div>
+          <a href="/blog/entry/136523">Tutorial</a>
+        </body></html>
+        """,
+        "https://codeforces.com/blog/entry/136523": _blog_page(long_blog_body),
+    }
+
+    def fake_fetch(url, **_kwargs):
+        return pages[url]
+
+    async def fake_chat_completion(messages, **kwargs):
+        payload = json.loads(messages[1]["content"])
+        body = payload["blog"]["body"]
+        assert "Codeforces dynamic tutorial fragment for 2039F1" in body
+        assert dynamic_text in body
+        return ChatCompletionResult(
+            text=json.dumps(
+                {
+                    "match": True,
+                    "section_title": "Shohag Loves Counting (Easy Version)",
+                    "start_text": "Exact dynamic tutorial for the target easy version",
+                    "end_text": "unique final long-body dynamic marker.",
+                    "confidence": 0.94,
+                    "reason": "exact Codeforces dynamic fragment is in prompt",
+                }
+            )
+        )
+
+    with patch("cf_tutorial_agent.fetch_html", side_effect=fake_fetch), \
+            patch("cf_tutorial_agent.fetch_dynamic_editorial", return_value=("Shohag Loves Counting (Easy Version)", dynamic_text)), \
+            patch("cf_tutorial_agent.chat_completion", side_effect=fake_chat_completion):
+        result = asyncio.run(
+            agent.run_agent_for_pid(
+                pid="2039F1",
+                statements_dir=tmp_path,
+                fetcher="http",
+                blog_limit=1,
+                deadline_sec=10,
+                selector_timeout_sec=5,
+            )
+        )
+
+    assert result.bundle["tutorial_url"] == "https://codeforces.com/blog/entry/136523"
+    assert "Exact dynamic tutorial" in result.bundle["sections"][0]["solution"]
+
+
 def test_agent_rejects_low_confidence_extraction(tmp_path):
     _write_statement(tmp_path)
     uncertain_text = ("Detailed but uncertain explanation with enough copied source text. " * 3) + "This is the unique final uncertain marker."

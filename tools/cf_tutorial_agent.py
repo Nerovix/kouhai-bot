@@ -211,9 +211,10 @@ def collect_blog_documents(
             if dynamic_text.strip():
                 title = dynamic_title or problem_title or pid
                 body = (
-                    f"{body.strip()}\n\n"
                     f"[Codeforces dynamic tutorial fragment for {pid} - {title}]\n"
-                    f"{dynamic_text.strip()}"
+                    f"{dynamic_text.strip()}\n\n"
+                    f"[Codeforces blog body]\n"
+                    f"{body.strip()}"
                 ).strip()
         except ScrapeError:
             continue

@@ -24,7 +24,12 @@ from kouhai_bot.handlers.shared import (
     translate_editorial_to_zh,
     translate_sample_notes,
 )
-from kouhai_bot.llm import ChatCompletionResult, _ChatCompletionAttempt, _post_chat_completion_once
+from kouhai_bot.llm import (
+    ChatCompletionResult,
+    _ChatCompletionAttempt,
+    _post_chat_completion_once,
+    strip_leaked_thinking,
+)
 
 
 def test_judge_prompt_rejects_repaired_greedy_and_unbatched_simulation():
@@ -526,6 +531,27 @@ def test_parse_json_with_llm_repair_retries_until_valid_json():
     assert outputs == []
 
 
+def test_parse_json_with_llm_repair_strips_leaked_thinking_inside_valid_json():
+    raw = json.dumps({
+        "reply": "<thinking>hidden chain of thought</thinking>可以回答这个边界。",
+        "reaction": "",
+        "nested": ["<reasoning>internal</reasoning>visible"],
+    }, ensure_ascii=False)
+
+    parsed, tag = asyncio.run(parse_json_with_llm_repair(
+        raw,
+        expected_schema='{ "reply": string, "reaction": string }',
+        max_attempts=0,
+    ))
+
+    assert parsed == {
+        "reply": "可以回答这个边界。",
+        "reaction": "",
+        "nested": ["visible"],
+    }
+    assert tag == ""
+
+
 def test_judge_submission_repairs_malformed_json_response():
     async def fake_judge_result(*args, **kwargs):
         return ChatCompletionResult(text='正确，应判 true', model_tag="『J』")
@@ -1023,6 +1049,37 @@ def test_non_streaming_chat_completion_strips_leaked_thinking():
     assert result.retryable is False
 
 
+def test_strip_leaked_thinking_strips_common_thinking_tag_variants():
+    assert strip_leaked_thinking("<thinking>hidden reasoning</thinking>Visible answer") == "Visible answer"
+    assert strip_leaked_thinking("<analysis>hidden</analysis>Visible") == "Visible"
+    assert strip_leaked_thinking("<chain-of-thought>hidden</chain-of-thought>Visible") == "Visible"
+
+
+def test_non_streaming_chat_completion_strips_leaked_thinking_tag():
+    response = _DummyResponse(json_data={
+        "choices": [
+            {
+                "message": {
+                    "content": "<thinking>hidden reasoning</thinking>Visible answer"
+                }
+            }
+        ]
+    })
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="claude_gateway",
+        base_url="https://api.example.com/v1",
+        headers={},
+        payload={},
+        timeout=120,
+    ))
+
+    assert result.text == "Visible answer"
+    assert result.retryable is False
+
+
 def test_non_streaming_chat_completion_retries_when_only_leaked_thinking(caplog):
     caplog.set_level("WARNING", logger="kouhai-bot.llm")
     response = _DummyResponse(json_data={
@@ -1081,11 +1138,37 @@ def test_streaming_chat_completion_reads_sse_delta_chunks(caplog):
     assert "reasoning_content chars=8" in caplog.text
 
 
-def test_streaming_chat_completion_strips_leaked_thinking_blocks():
+def test_streaming_chat_completion_strips_leaked_thinking_tag_blocks():
     response = _DummyResponse(lines=[
         'data: {"choices":[{"delta":{"content":"<think>hidden"}}]}\n',
         '\n',
         'data: {"choices":[{"delta":{"content":" reasoning</think>Visible"}}]}\n',
+        '\n',
+        'data: {"choices":[{"delta":{"content":" answer"}}]}\n',
+        '\n',
+        'data: [DONE]\n',
+        '\n',
+    ])
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="qwen",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        headers={},
+        payload={"stream": True},
+        timeout=120,
+    ))
+
+    assert result.text == "Visible answer"
+    assert result.retryable is False
+
+
+def test_streaming_chat_completion_strips_leaked_thinking_blocks():
+    response = _DummyResponse(lines=[
+        'data: {"choices":[{"delta":{"content":"<thinking>hidden"}}]}\n',
+        '\n',
+        'data: {"choices":[{"delta":{"content":" reasoning</thinking>Visible"}}]}\n',
         '\n',
         'data: {"choices":[{"delta":{"content":" answer"}}]}\n',
         '\n',

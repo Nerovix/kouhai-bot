@@ -67,43 +67,48 @@ async def _send_high_difficulty_notice_group(group_id: int, problem: dict | None
         logger.warning("[group_%s] Failed to send high-difficulty notice: %s", group_id, e)
 
 
-async def enqueue_force_new_problem(
+async def enqueue_new_problem(
     group_id: int,
     user_id: int,
-    sender: dict,
+    sender: dict | None,
     message_id: str,
     *,
     command: str,
     force: bool = True,
-) -> None:
-    """Pick and post a new problem (shared by /newproblem and /newproblem --force)."""
+    quiet: bool = False,
+    prefix: str = "刷新了一道新题🌟",
+) -> bool:
+    """Admit, pick, and post a new problem for commands or quiet triggers."""
     cfg = get_config()
-    nickname = _nickname(sender)
+    nickname = _nickname(sender or {})
     lock = _newproblem_lock(group_id)
     if lock.locked():
-        await send_group_msg(group_id, build_plain_message(
-            f"@{nickname} 新的题目正在准备中，别急～"
-        ))
-        return
+        if not quiet:
+            await send_group_msg(group_id, build_plain_message(
+                f"@{nickname} 新的题目正在准备中，别急～"
+            ))
+        return False
 
     await lock.acquire()
     try:
         now = time.monotonic()
         last = _cooldowns.get(group_id, 0)
         if now - last < cfg.newproblem_cooldown:
-            remaining = int(cfg.newproblem_cooldown - (now - last))
-            await send_group_msg(group_id, build_plain_message(
-                f"@{nickname} 刷新太频繁啦，等 {remaining} 秒再试哦～"
-            ))
-            return
+            if not quiet:
+                remaining = int(cfg.newproblem_cooldown - (now - last))
+                await send_group_msg(group_id, build_plain_message(
+                    f"@{nickname} 刷新太频繁啦，等 {remaining} 秒再试哦～"
+                ))
+            return False
 
         if not force and _has_unsolved_problem(group_id):
-            await send_group_msg(group_id, build_plain_message(
-                f"@{nickname} 当前题目还没有人解出来呢～不能直接刷题哦。\n"
-                f"可使用 /problem 查看当前题目。\n"
-                f"如果确定要换题，请发 /newproblem --force"
-            ))
-            return
+            if not quiet:
+                await send_group_msg(group_id, build_plain_message(
+                    f"@{nickname} 当前题目还没有人解出来呢～不能直接刷题哦。\n"
+                    f"可使用 /problem 查看当前题目。\n"
+                    f"如果确定要换题，请发 /newproblem --force"
+                ))
+            return False
 
         logger.info(f"[group_{group_id}] {command} triggered")
 
@@ -117,13 +122,17 @@ async def enqueue_force_new_problem(
         try:
             posted = await _post_new_problem_locked(
                 group_id,
-                prefix="刷新了一道新题🌟",
+                prefix=prefix,
                 notify_group=True,
             )
+        except Exception:
+            logger.exception("[group_%s] %s post failed", group_id, command)
+            posted = False
         finally:
             _newproblem_active.pop(group_id, None)
         if posted:
             _cooldowns[group_id] = time.monotonic()
+        return posted
     finally:
         lock.release()
 
@@ -563,13 +572,13 @@ async def handle(group_id: int, user_id: int, sender: dict,
 
     text = raw_text.lstrip()
     if text == _CMD_NEWPROBLEM_FORCE:
-        await enqueue_force_new_problem(
+        await enqueue_new_problem(
             group_id, user_id, sender, message_id, command="newproblem --force",
         )
         return
 
     if text == _CMD_NEWPROBLEM:
-        await enqueue_force_new_problem(
+        await enqueue_new_problem(
             group_id, user_id, sender, message_id, command="newproblem", force=False,
         )
         return

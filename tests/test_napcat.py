@@ -9,6 +9,7 @@ from kouhai_bot.napcat.client import (
     build_text,
     get_doubt_friends_add_requests,
     parse_event,
+    send_group_poke,
     set_doubt_friends_add_request,
 )
 
@@ -31,6 +32,21 @@ def test_parse_meta_event():
     event = parse_event(raw)
     assert event is not None
     assert event["type"] == "meta"
+
+
+def test_parse_poke_notice_preserves_routing_fields():
+    raw = (
+        '{"post_type":"notice","notice_type":"notify","sub_type":"poke",'
+        '"group_id":123,"user_id":456,"target_id":789}'
+    )
+    event = parse_event(raw)
+    assert event is not None
+    assert event["type"] == "notice"
+    assert event["notice_type"] == "notify"
+    assert event["sub_type"] == "poke"
+    assert event["group_id"] == 123
+    assert event["user_id"] == 456
+    assert event["target_id"] == 789
 
 
 def test_build_plain_message():
@@ -106,3 +122,18 @@ def test_set_doubt_friends_add_request(monkeypatch):
 
     assert asyncio.run(set_doubt_friends_add_request("uid-flag", approve=True)) is True
     assert calls == [("set_doubt_friends_add_request", {"flag": "uid-flag", "approve": True})]
+
+
+def test_send_group_poke(monkeypatch):
+    calls = []
+
+    async def fake_http_post(action, data):
+        calls.append((action, data))
+        return {"status": "ok", "data": None}
+
+    monkeypatch.setattr("kouhai_bot.napcat.client._http_post", fake_http_post)
+
+    import asyncio
+
+    assert asyncio.run(send_group_poke(123, 456)) is True
+    assert calls == [("group_poke", {"group_id": 123, "user_id": 456})]

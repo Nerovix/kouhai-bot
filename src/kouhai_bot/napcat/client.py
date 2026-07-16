@@ -86,6 +86,22 @@ async def send_private_msg(user_id: int, message: list[dict]) -> int | None:
         return None
 
 
+async def send_group_poke(group_id: int, user_id: int) -> bool:
+    """Poke a user in a group via NapCat's group_poke action."""
+    try:
+        result = await _http_post("group_poke", {
+            "group_id": int(group_id),
+            "user_id": int(user_id),
+        })
+        if isinstance(result, dict) and str(result.get("status", "") or "").lower() in {"", "ok"}:
+            return True
+        logger.warning("group_poke returned unexpected payload: %s", result)
+        return False
+    except Exception as e:
+        logger.error("group_poke failed: %s", e, exc_info=True)
+        return False
+
+
 async def send_private_forward_msg(user_id: int, messages: list[dict]) -> int | None:
     """Forward messages as a merged card to a private chat."""
     try:
@@ -274,6 +290,10 @@ def _parse_notice(event: dict) -> dict:
     return {
         "type": "notice",
         "notice_type": event.get("notice_type", ""),
+        "sub_type": event.get("sub_type", ""),
+        "group_id": event.get("group_id", 0),
+        "user_id": event.get("user_id", 0),
+        "target_id": event.get("target_id", 0),
         "raw": event,
     }
 

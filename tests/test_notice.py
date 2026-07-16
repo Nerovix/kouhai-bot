@@ -74,8 +74,87 @@ def test_bot_poke_is_returned_and_posts_when_eligible(monkeypatch):
     asyncio.run(process_event(_poke_event(), spawn_handlers=False))
 
     assert pokes == [(GROUP_ID, USER_ID)]
-    assert posts == [(GROUP_ID, "戳一戳刷新🌟", True)]
+    assert posts == [(GROUP_ID, "戳一戳刷新🌟", False)]
     assert GROUP_ID in newproblem._cooldowns
+
+
+def test_quiet_poke_picker_failure_sends_no_group_message(monkeypatch, tmp_path):
+    newproblem = _reset_newproblem_runtime()
+    group_messages = []
+    pick_attempts = 0
+
+    cfg = SimpleNamespace(
+        bot_qq=BOT_QQ,
+        current_group=GROUP_ID,
+        newproblem_cooldown=300,
+        data_dir=str(tmp_path),
+        min_rating=2000,
+        max_rating=3000,
+    )
+
+    class FakeProcess:
+        def __init__(self, returncode, stdout=b"", stderr=b""):
+            self.returncode = returncode
+            self._result = (stdout, stderr)
+
+        async def communicate(self):
+            return self._result
+
+    async def fake_poke(_group_id, _user_id):
+        return True
+
+    async def fake_send_group_msg(group_id, message):
+        group_messages.append((group_id, message))
+        return True
+
+    async def fake_subprocess(*args, **_kwargs):
+        nonlocal pick_attempts
+        if "reveal" in args:
+            return FakeProcess(0)
+        if "pick-json" in args:
+            pick_attempts += 1
+            return FakeProcess(1, stderr=b"SSL EOF")
+        raise AssertionError(f"unexpected subprocess: {args}")
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr("kouhai_bot.handlers.notice.get_config", lambda: cfg)
+    monkeypatch.setattr(newproblem, "get_config", lambda: cfg)
+    monkeypatch.setattr("kouhai_bot.handlers.notice.send_group_poke", fake_poke)
+    monkeypatch.setattr(newproblem, "_has_unsolved_problem", lambda _gid: False)
+    monkeypatch.setattr(newproblem, "send_group_msg", fake_send_group_msg)
+    monkeypatch.setattr(newproblem.asyncio, "create_subprocess_exec", fake_subprocess)
+    monkeypatch.setattr(newproblem.asyncio, "sleep", no_sleep)
+
+    asyncio.run(process_event(_poke_event(), spawn_handlers=False))
+
+    assert pick_attempts == 3
+    assert group_messages == []
+    assert GROUP_ID not in newproblem._cooldowns
+
+
+def test_command_post_exception_is_not_swallowed(monkeypatch):
+    newproblem = _reset_newproblem_runtime()
+
+    async def failing_post(*_args, **_kwargs):
+        raise RuntimeError("posting failed")
+
+    monkeypatch.setattr(newproblem, "_has_unsolved_problem", lambda _gid: False)
+    monkeypatch.setattr(newproblem, "_post_new_problem_locked", failing_post)
+
+    with pytest.raises(RuntimeError, match="posting failed"):
+        asyncio.run(newproblem.enqueue_new_problem(
+            GROUP_ID,
+            USER_ID,
+            {"nickname": "tester"},
+            "message-id",
+            command="newproblem --force",
+        ))
+
+    assert GROUP_ID not in newproblem._newproblem_active
+    assert not newproblem._newproblem_lock(GROUP_ID).locked()
+    assert GROUP_ID not in newproblem._cooldowns
 
 
 def test_bot_poke_only_pokes_back_when_problem_is_unsolved(monkeypatch):

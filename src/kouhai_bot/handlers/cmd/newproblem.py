@@ -123,9 +123,11 @@ async def enqueue_new_problem(
             posted = await _post_new_problem_locked(
                 group_id,
                 prefix=prefix,
-                notify_group=True,
+                notify_group=not quiet,
             )
         except Exception:
+            if not quiet:
+                raise
             logger.exception("[group_%s] %s post failed", group_id, command)
             posted = False
         finally:

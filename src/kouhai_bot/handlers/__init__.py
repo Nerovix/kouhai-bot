@@ -12,6 +12,7 @@ from .registry import CommandDef
 from ..config import get_config
 from .. import echo
 from ..friend_requests import handle_friend_request_event, is_service_group_member
+from .notice import handle_notice_event
 from ..napcat.client import (
     build_plain_message,
     build_reply,
@@ -111,6 +112,17 @@ async def process_event(
                 name=f"request_{event.get('request_type', 'unknown')}_{event.get('user_id', 0)}",
             )
         await handle_friend_request_event(event)
+        return None
+
+    if event["type"] == "notice":
+        if event.get("notice_type") != "notify" or event.get("sub_type") != "poke":
+            return None
+        if spawn_handlers:
+            return asyncio.create_task(
+                handle_notice_event(event),
+                name=f"notice_poke_{event.get('group_id', 0)}_{event.get('user_id', 0)}",
+            )
+        await handle_notice_event(event)
         return None
 
     if event["type"] != "message":

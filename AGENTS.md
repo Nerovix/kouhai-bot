@@ -67,6 +67,16 @@ NapCat (QQ) ──WS──> worker.py
   `reasoning_effort`, `thinking`, temperature override, and provider-specific
   extra body fields are controlled per provider; unsupported fields may be ignored
   or rejected by upstream APIs.
+- **Summary semantic double-check**: every generated problem summary is audited against
+  the original statement/input/limits by a second structured request through
+  `llm.general_model`. The checker treats symbol scope, index arithmetic, object counts,
+  loop endpoints, operations, and constraints as semantic facts. Before that request, a
+  deterministic source-aware gate also rejects unambiguous outside-addition → nested-index
+  transcription errors such as `p_i+1` → `pᵢ₊₁`, and preserves explicit source conventions
+  whose omission would make a definition ambiguous (for example, an isolated vertex also
+  counting as having only incoming edges). A failed gate or audit triggers one targeted
+  repair followed by another audit; indeterminate or repeatedly failing audits reject the
+  summary so the caller can retry instead of posting it.
 - **Official CF tutorials**: Scraped editorials live under `{data_dir}/tutorials/{pid}.json`
   (see `tools/cf_tutorial_agent.py`; low-level CF HTML helpers live in `tools/scrape_cf_tutorial.py`). Runtime extraction is in `tutorials.py`. On the
   On **new problem** (`/newproblem`), `schedule_prefetch_editorial(pid)`
@@ -654,7 +664,9 @@ newer AC can silently retarget an older review request.
 2. Pick a candidate problem via `picker.py pick-json --with-statement`; this marks used
    problems and caches statements but does **not** write `state.json`
 3. Generate Chinese summary via `summarize_problem()` → `llm.general_model` queue,
-   timeout from `llm.summary_timeout_sec`
+   timeout from `llm.summary_timeout_sec`; after the local format/limit/symbol-scope gate,
+   run the general-model semantic double-check. A mismatch is repaired from structured
+   issues and checked again before the summary can be posted.
 4. Self-send summary text; self-send each sample as an independent node; if statement has
    `notes`, translate it to Chinese and append a dedicated `样例解释` node (with LaTeX/Markdown
    artifacts normalized to readable symbols such as `→`, `≤`, `<`, `>`); then append snake
@@ -1010,6 +1022,16 @@ command testing. The suite covers submit, clarify, review, problem, tag, scorebo
 newproblem, annotation export, napcat parsing, registry discovery, and
 `tutorials.py` extraction/translation (`tests/test_tutorials.py`; submit/review
 editorial paths in `tests/test_commands.py`).
+
+To audit the current group's saved summary against its cached statement with the
+configured `llm.general_model` queue (read-only; no group message or runtime-data write):
+
+```bash
+KOUHAI_CONFIG=/path/to/config.yaml uv run python tools/summary_doublecheck.py
+```
+
+Use `--expect inaccurate` for a regression fixture that is supposed to be rejected,
+or `--pid <pid> --summary-file <path>` to check another candidate.
 
 ## GitHub CI
 

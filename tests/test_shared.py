@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -35,6 +36,7 @@ from kouhai_bot.llm import (
     _post_chat_completion_once,
     strip_leaked_thinking,
 )
+from tools import summary_doublecheck as summary_doublecheck_tool
 
 
 def test_judge_prompt_rejects_repaired_greedy_and_unbatched_simulation():
@@ -826,6 +828,18 @@ def test_summary_symbol_scope_gate_avoids_ambiguous_source_with_both_forms():
     assert _summary_symbol_scope_issues(source, "比较 pᵢ₊₁") == []
 
 
+def test_summary_symbol_scope_gate_handles_braced_source_and_latex_candidate():
+    source = "Use a_{p_{i} + 1} and the vertex p_{i} + 2."
+
+    nested_array_issues = _summary_symbol_scope_issues(source, "使用 aₚᵢ₊₁")
+    latex_issues = _summary_symbol_scope_issues(source, "使用顶点 $p_{i+2}$")
+
+    assert len(nested_array_issues) == 1
+    assert "p_i+1" in nested_array_issues[0]
+    assert len(latex_issues) == 1
+    assert "p_i+2" in latex_issues[0]
+
+
 def test_summary_required_convention_gate_preserves_isolated_vertex_rule():
     source = (
         "Note that a vertex that has no edges is considered to have only incoming edges."
@@ -839,6 +853,16 @@ def test_summary_required_convention_gate_preserves_isolated_vertex_rule():
         source,
         "每个分量有唯一只有入边的点（孤立点也算）",
     ) == []
+
+
+def test_summary_required_convention_gate_handles_wording_and_whitespace_variants():
+    source = (
+        "A vertex\nwith no edges is also considered to have only incoming edges."
+    )
+
+    issues = _summary_required_convention_issues(source, "每个分量有唯一只有入边的点")
+
+    assert len(issues) == 1
 
 
 def test_summarize_problem_uses_configured_timeout():
@@ -1028,6 +1052,115 @@ def test_doublecheck_problem_summary_uses_general_model_and_checks_symbol_scope(
     assert "p_i+1" in checker_prompt
     assert "p_{i+1}" in checker_prompt
     assert "candidate_summary" in checker_prompt
+
+
+def test_doublecheck_problem_summary_rejects_inconsistent_or_malformed_payloads():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+    payloads = [
+        {
+            "accurate": True,
+            "issues": [{
+                "severity": "major",
+                "summary_claim": "候选说法",
+                "source_fact": "题面事实",
+                "explanation": "两者不一致",
+            }],
+        },
+        {
+            "accurate": False,
+            "issues": [{
+                "severity": "major",
+                "summary_claim": "候选说法",
+                "source_fact": {"unexpected": "object"},
+                "explanation": "两者不一致",
+            }],
+        },
+    ]
+
+    for payload in payloads:
+        with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+                patch(
+                    "kouhai_bot.handlers.shared.call_chat_completion_result",
+                    AsyncMock(return_value=ChatCompletionResult(text=json.dumps(payload))),
+                ):
+            result = asyncio.run(doublecheck_problem_summary(
+                "statement",
+                "input",
+                "limits",
+                "candidate",
+            ))
+
+        assert result.accurate is None
+        assert result.failure_kind == "invalid_response"
+
+
+def test_doublecheck_problem_summary_accepts_actionable_omission_issue():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+    payload = {
+        "accurate": False,
+        "issues": [{
+            "severity": "major",
+            "summary_claim": "",
+            "source_fact": "题面明确规定孤立点也算只有入边的点",
+            "explanation": "候选简述遗漏了这项约定",
+        }],
+    }
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch(
+                "kouhai_bot.handlers.shared.call_chat_completion_result",
+                AsyncMock(return_value=ChatCompletionResult(text=json.dumps(payload))),
+            ):
+        result = asyncio.run(doublecheck_problem_summary(
+            "statement",
+            "input",
+            "limits",
+            "candidate",
+        ))
+
+    assert result.accurate is False
+    assert result.issues[0]["summary_claim"] == ""
+
+
+def test_summary_doublecheck_tool_explicit_inputs_ignore_state_and_strip_thinking(tmp_path):
+    cfg = _openai_cfg(data_dir=str(tmp_path), current_group=123)
+    summary_file = tmp_path / "candidate.txt"
+    summary_file.write_text("<think>hidden</think>\n候选简述", encoding="utf-8")
+    checker = AsyncMock(return_value=SummaryDoublecheckResult(accurate=True))
+    args = SimpleNamespace(
+        group=None,
+        pid="CF1900a",
+        summary_file=summary_file,
+        expect=None,
+    )
+
+    with patch.object(summary_doublecheck_tool, "get_config", return_value=cfg), \
+            patch.object(
+                summary_doublecheck_tool,
+                "_load_json",
+                side_effect=AssertionError("explicit inputs must not read group state"),
+            ), \
+            patch.object(
+                summary_doublecheck_tool,
+                "load_problem_statement_json",
+                return_value={
+                    "description": "statement",
+                    "input": "input",
+                    "time_limit": "2s",
+                    "memory_limit": "256MB",
+                },
+            ) as statement_loader, \
+            patch.object(summary_doublecheck_tool, "doublecheck_problem_summary", checker):
+        exit_code = asyncio.run(summary_doublecheck_tool._run(args))
+
+    assert exit_code == 0
+    statement_loader.assert_called_once_with("1900A")
+    checker.assert_awaited_once_with(
+        "statement",
+        "input",
+        "Time: 2s, Memory: 256MB",
+        "候选简述",
+    )
 
 
 def test_summarize_problem_repairs_symbol_scope_before_model_doublecheck():

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -20,11 +21,18 @@ from kouhai_bot.handlers.shared import (
 from kouhai_bot.llm import strip_leaked_thinking
 
 
+_PID_RE = re.compile(r"^(?:CF)?(?P<contest>\d+)(?P<index>[A-Z][A-Z0-9]*)$", re.I)
+
+
 def _load_json(path: Path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid JSON in {path}: {exc.msg}") from exc
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError(f"could not read {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise RuntimeError(f"expected a JSON object in {path}")
     return data
@@ -41,14 +49,26 @@ def _statement_inputs(statement: dict) -> tuple[str, str, str]:
     )
 
 
+def _normalize_pid(value: object) -> str:
+    raw = str(value or "").strip()
+    match = _PID_RE.fullmatch(raw)
+    if not match:
+        raise RuntimeError(f"invalid problem id {raw!r}; expected a value such as 1900A")
+    return f"{match.group('contest')}{match.group('index').upper()}"
+
+
 async def _run(args: argparse.Namespace) -> int:
     cfg = get_config()
     group_id = args.group if args.group is not None else cfg.current_group
     group_dir = Path(cfg.data_dir) / "groups" / str(group_id)
-    state = _load_json(group_dir / "state.json")
-    pid = str(args.pid or state.get("today", "") or "").strip().upper()
-    if not pid:
+    if args.pid:
+        raw_pid = args.pid
+    else:
+        state = _load_json(group_dir / "state.json")
+        raw_pid = state.get("today", "")
+    if not str(raw_pid or "").strip():
         raise RuntimeError(f"group {group_id} has no current problem; pass --pid")
+    pid = _normalize_pid(raw_pid)
 
     statement = load_problem_statement_json(pid)
     if not statement:
@@ -62,7 +82,7 @@ async def _run(args: argparse.Namespace) -> int:
             summary = str(saved.get("summary_zh", "") or "").strip()
         else:
             summary = str(saved or "").strip()
-        summary = strip_leaked_thinking(summary)
+    summary = strip_leaked_thinking(summary)
     if not summary:
         raise RuntimeError(
             f"saved summary not found for group {group_id}, problem {pid}; "

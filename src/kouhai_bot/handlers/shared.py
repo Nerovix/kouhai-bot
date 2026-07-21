@@ -1353,7 +1353,9 @@ _SUMMARY_SUBSCRIPT_CHARS = {
 }
 _SUMMARY_SUBSCRIPT_DIGITS = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 _SOURCE_INDEXED_VALUE_PLUS_RE = re.compile(
-    r"(?<![\w{])(?P<name>[A-Za-z])_(?P<index>[A-Za-z])\s*\+\s*(?P<amount>\d+)"
+    r"(?<!\w)(?P<name>[A-Za-z])_"
+    r"(?:\{\s*(?P<braced_index>[A-Za-z])\s*\}|(?P<plain_index>[A-Za-z]))"
+    r"\s*\+\s*(?P<amount>\d+)"
 )
 
 
@@ -1365,7 +1367,7 @@ def _summary_symbol_scope_issues(source_text: str, summary: str) -> list[str]:
     seen: set[tuple[str, str, str]] = set()
     for match in _SOURCE_INDEXED_VALUE_PLUS_RE.finditer(source):
         name = match.group("name")
-        index = match.group("index")
+        index = match.group("braced_index") or match.group("plain_index")
         amount = match.group("amount")
         key = (name, index, amount)
         if key in seen:
@@ -1381,8 +1383,22 @@ def _summary_symbol_scope_issues(source_text: str, summary: str) -> list[str]:
         if nested_source_re.search(source):
             # The source contains both forms, so the Unicode occurrence is ambiguous.
             continue
-        wrong = f"{name}{index_char}₊{amount.translate(_SUMMARY_SUBSCRIPT_DIGITS)}"
-        if wrong not in candidate:
+        subscript_amount = amount.translate(_SUMMARY_SUBSCRIPT_DIGITS)
+        wrong_unicode_forms = [f"{name}{index_char}₊{subscript_amount}"]
+        subscript_name = _SUMMARY_SUBSCRIPT_CHARS.get(name.lower())
+        if subscript_name:
+            # Also catch the same scope loss inside a flattened multilevel
+            # subscript, e.g. a_{p_i+1} -> aₚᵢ₊₁.
+            wrong_unicode_forms.append(f"{subscript_name}{index_char}₊{subscript_amount}")
+        wrong_latex_re = re.compile(
+            rf"{re.escape(name)}_\{{\s*{re.escape(index)}\s*\+\s*"
+            rf"{re.escape(amount)}\s*\}}"
+        )
+        wrong = next((form for form in wrong_unicode_forms if form in candidate), "")
+        if not wrong:
+            wrong_latex = wrong_latex_re.search(candidate)
+            wrong = wrong_latex.group(0) if wrong_latex else ""
+        if not wrong:
             continue
         correct = f"{name}{index_char}+{amount}"
         issues.append(
@@ -1395,11 +1411,13 @@ def _summary_symbol_scope_issues(source_text: str, summary: str) -> list[str]:
 
 def _summary_required_convention_issues(source_text: str, summary: str) -> list[str]:
     """Catch explicit conventions whose omission makes a definition ambiguous."""
-    source = (source_text or "").lower()
+    source = " ".join((source_text or "").lower().split())
     candidate = summary or ""
-    no_edge_is_incoming_only = (
-        "vertex that has no edges is considered to have only incoming edges" in source
-        or "vertex with no edges is considered to have only incoming edges" in source
+    no_edge_is_incoming_only = re.search(
+        r"\b(?:(?:a|the)\s+)?vert(?:ex|ices)\s+"
+        r"(?:(?:that|which)\s+ha(?:s|ve)|with)\s+no\s+edges?\s+"
+        r"(?:is|are)\s+(?:also\s+)?considered\s+to\s+have\s+only\s+incoming\s+edges\b",
+        source,
     )
     if not no_edge_is_incoming_only:
         return []
@@ -1518,17 +1536,23 @@ def _normalize_summary_doublecheck_issues(value: object) -> tuple[dict[str, str]
     for item in value:
         if not isinstance(item, dict):
             return None
-        severity = str(item.get("severity", "major") or "major").strip().lower()
+        raw_severity = item.get("severity", "major")
+        if not isinstance(raw_severity, str):
+            return None
+        severity = raw_severity.strip().lower() or "major"
         if severity not in {"critical", "major", "minor"}:
             severity = "major"
-        issue = {
-            "severity": severity,
-            "summary_claim": str(item.get("summary_claim", "") or "").strip(),
-            "source_fact": str(item.get("source_fact", "") or "").strip(),
-            "explanation": str(item.get("explanation", "") or "").strip(),
-        }
-        if not any(issue[key] for key in ("summary_claim", "source_fact", "explanation")):
+        details: dict[str, str] = {}
+        for key in ("summary_claim", "source_fact", "explanation"):
+            raw = item.get(key, "")
+            if not isinstance(raw, str):
+                return None
+            details[key] = raw.strip()
+        if not details["explanation"] or not (
+            details["summary_claim"] or details["source_fact"]
+        ):
             return None
+        issue = {"severity": severity, **details}
         normalized.append(issue)
     return tuple(normalized)
 
@@ -1568,7 +1592,7 @@ async def doublecheck_problem_summary(
             model=result.model,
         )
 
-    parsed, repair_tag = await parse_json_with_llm_repair(
+    parsed, _repair_tag = await parse_json_with_llm_repair(
         result.text,
         expected_schema=(
             '{"accurate": boolean, "issues": [{"severity": string, '
@@ -1581,21 +1605,24 @@ async def doublecheck_problem_summary(
     issues = _normalize_summary_doublecheck_issues(
         parsed.get("issues") if isinstance(parsed, dict) else None
     )
-    if not isinstance(accurate, bool) or issues is None or (not accurate and not issues):
+    if (
+        not isinstance(accurate, bool)
+        or issues is None
+        or (accurate and issues)
+        or (not accurate and not issues)
+    ):
         logger.warning("summary double-check returned an invalid result: %s", parsed)
         return SummaryDoublecheckResult(
             accurate=None,
             failure_kind="invalid_response",
-            model_tag=repair_tag or result.model_tag,
+            model_tag=result.model_tag,
             provider_name=result.provider_name,
             model=result.model,
         )
-    if accurate and issues:
-        accurate = False
     return SummaryDoublecheckResult(
         accurate=accurate,
         issues=issues,
-        model_tag=repair_tag or result.model_tag,
+        model_tag=result.model_tag,
         provider_name=result.provider_name,
         model=result.model,
     )
@@ -1629,6 +1656,14 @@ async def _repair_summary_candidate(
         timeout=timeout,
         response_format={"type": "json_object"},
     )
+    if not repair_result.text:
+        logger.warning(
+            "summary repair request failed: failure=%s provider=%s model=%s",
+            repair_result.failure_kind or "empty_response",
+            repair_result.provider_name,
+            repair_result.model,
+        )
+        return None, ""
     repaired, repaired_json_tag = await _parse_summary_json(
         repair_result.text,
         timeout=timeout,

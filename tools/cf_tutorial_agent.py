@@ -21,6 +21,7 @@ from urllib.parse import urldefrag, urljoin
 
 from kouhai_bot.handlers.shared import parse_json_with_llm_repair
 from kouhai_bot.llm import chat_completion
+from kouhai_bot.problems.cf_fetcher import content_valid
 from kouhai_bot.tutorials import MIN_EDITORIAL_LEN, extract_editorial
 
 from scrape_cf_tutorial import ScrapeError
@@ -200,6 +201,8 @@ def collect_blog_documents(
     for idx, blog_url in enumerate(blog_urls, start=1):
         try:
             tutorial_html = fetch_html(blog_url, fetcher=fetcher, pw_wait_ms=pw_wait_ms)
+            if not content_valid(tutorial_html):
+                continue
             tutorial_title = extract_page_title(tutorial_html)
             body_html = extract_blog_body_html(tutorial_html)
             body = html_to_markdownish(body_html)

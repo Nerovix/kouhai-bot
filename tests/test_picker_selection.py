@@ -94,13 +94,22 @@ def test_fetch_statement_skips_image_statement_without_multimodal_model(monkeypa
     _configure_picker_tmp(tmp_path)
 
     monkeypatch.setattr(picker, "_multimodal_model_configured", lambda: False)
-    monkeypatch.setattr(picker.cf_statement, "process_problem", lambda contest_id, index, vl_backend="none": {
-        "pid": f"{contest_id}{index}",
-        "text": "Statement [DIAGRAM]",
-        "formulas_found": 0,
-        "graphics_found": 1,
-        "images": [{"src": "https://codeforces.com/image.png", "kind": "graphic"}],
-    })
+    monkeypatch.setattr(
+        picker.cf_fetcher,
+        "fetch_html",
+        lambda url: "<div class='problem-statement'>statement</div><script>",
+    )
+    monkeypatch.setattr(
+        picker.cf_statement,
+        "process_problem",
+        lambda contest_id, index, vl_backend="none", **kwargs: {
+            "pid": f"{contest_id}{index}",
+            "text": "Statement [DIAGRAM]",
+            "formulas_found": 0,
+            "graphics_found": 1,
+            "images": [{"src": "https://codeforces.com/image.png", "kind": "graphic"}],
+        },
+    )
 
     assert picker.fetch_statement(_problem(1, "A")) is None
 
@@ -109,36 +118,39 @@ def test_fetch_statement_caches_image_metadata_with_multimodal_model(monkeypatch
     _configure_picker_tmp(tmp_path)
 
     monkeypatch.setattr(picker, "_multimodal_model_configured", lambda: True)
-    monkeypatch.setattr(picker.cf_statement, "process_problem", lambda contest_id, index, vl_backend="none": {
-        "pid": f"{contest_id}{index}",
-        "text": "Statement [DIAGRAM]",
-        "formulas_found": 0,
-        "graphics_found": 1,
-        "images": [{"src": "https://codeforces.com/image.png", "kind": "graphic"}],
-    })
+    raw_html = (
+        '<div class="problem-statement">'
+        '<div class="title">A. Image</div>'
+        '<div class="time-limit">1 second</div>'
+        '<div class="memory-limit">256 megabytes</div>'
+        '<div class="section-title">Input</div>n'
+        '<pre>1</pre><pre>1</pre>'
+        "</div><script"
+    )
+    fetch_calls = []
+    process_calls = []
 
-    class _Resp:
-        text = (
-            '<div class="problem-statement">'
-            '<div class="title">A. Image</div>'
-            '<div class="time-limit">1 second</div>'
-            '<div class="memory-limit">256 megabytes</div>'
-            '<div class="section-title">Input</div>n'
-            '<pre>1</pre><pre>1</pre>'
-            "</div><script"
-        )
+    def fake_fetch(url):
+        fetch_calls.append(url)
+        return raw_html
 
-        def raise_for_status(self):
-            return None
+    def fake_process(contest_id, index, vl_backend="none", *, html=None):
+        process_calls.append((contest_id, index, vl_backend, html))
+        return {
+            "pid": f"{contest_id}{index}",
+            "text": "Statement [DIAGRAM]",
+            "formulas_found": 0,
+            "graphics_found": 1,
+            "images": [{"src": "https://codeforces.com/image.png", "kind": "graphic"}],
+        }
 
-    class _Scraper:
-        def get(self, url, timeout=30):
-            return _Resp()
-
-    monkeypatch.setattr(picker, "_get_scraper", lambda: _Scraper())
+    monkeypatch.setattr(picker.cf_fetcher, "fetch_html", fake_fetch)
+    monkeypatch.setattr(picker.cf_statement, "process_problem", fake_process)
 
     stmt = picker.fetch_statement(_problem(1, "A"))
 
+    assert fetch_calls == ["https://codeforces.com/problemset/problem/1/A"]
+    assert process_calls == [(1, "A", "none", raw_html)]
     assert stmt["images"] == [{"src": "https://codeforces.com/image.png", "kind": "graphic"}]
     assert stmt["has_images"] is True
     assert stmt["_images_collected"] is True

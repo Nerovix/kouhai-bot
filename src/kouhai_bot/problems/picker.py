@@ -13,12 +13,15 @@ import os
 import random
 import re
 import sys
-
-# Import cf_statement for Codeforces statement/image extraction
-sys.path.insert(0, os.path.dirname(__file__))
-import fetcher as cf_statement
 import time
 from datetime import datetime, timezone, timedelta
+
+try:
+    from . import cf_fetcher, fetcher as cf_statement
+except ImportError:  # Support direct execution of this file.
+    sys.path.insert(0, os.path.dirname(__file__))
+    import cf_fetcher
+    import fetcher as cf_statement
 
 import cloudscraper
 
@@ -309,8 +312,22 @@ def fetch_statement(problem: dict) -> object:
                 return None
             return cached
 
+    # Fetch once, then share the same rendered document between statement/image
+    # extraction and title/limits/sample parsing.
+    url = f"https://codeforces.com/problemset/problem/{contest_id}/{index}"
+    try:
+        raw_html = cf_fetcher.fetch_html(url)
+    except Exception as e:
+        print(f"Warning: failed to fetch {url}: {e}", file=sys.stderr)
+        return None
+
     # Step 1: Process problem text and collect image metadata.
-    cf_result = cf_statement.process_problem(contest_id, index, vl_backend="none")
+    cf_result = cf_statement.process_problem(
+        contest_id,
+        index,
+        vl_backend="none",
+        html=raw_html,
+    )
 
     if "error" in cf_result:
         print(f"Warning: {pid} cf_statement error: {cf_result['error']}", file=sys.stderr)
@@ -324,16 +341,8 @@ def fetch_statement(problem: dict) -> object:
         )
         return None
 
-    # Step 2: Fetch raw HTML for metadata (title, limits, samples)
-    scraper = _get_scraper()
-    url = f"https://codeforces.com/problemset/problem/{contest_id}/{index}"
-    try:
-        resp = scraper.get(url, timeout=30)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"Warning: failed to fetch {url}: {e}", file=sys.stderr)
-        return None
-    html = resp.text
+    # Step 2: Parse metadata from that same HTML document.
+    html = raw_html
 
     result = {}
 

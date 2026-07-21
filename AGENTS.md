@@ -38,6 +38,13 @@ NapCat (QQ) ──WS──> worker.py
   only as fallback.
 - **Scheduler current-group config**: `~/.kouhai-bot/scheduler_config.json` stores job list + time overrides for `CURRENT_GROUP`. Jobs are defined in `scheduler/jobs.py`.
 - **Multimodal statements**: `problems/fetcher.py` collects CF `tex-formula` and `tex-graphics` image metadata with statement text. Formula images and diagrams are passed to `llm.multimodal_model` for new-problem summaries and `/clarify`; without that queue, picker logs and skips image-bearing problems.
+- **Unified CF HTML transport**: `problems/cf_fetcher.py` is the single transport for
+  Codeforces problem statement and blog HTML. It tries `cloudscraper` first and falls
+  back to headless Playwright Chromium after HTTP 403, timeout/connection failure,
+  Cloudflare challenge HTML, or a lazy `Tutorial is loading...` response. Its
+  `content_valid()` helper is the shared usability gate. `picker.fetch_statement()`
+  fetches each uncached statement once and passes that HTML into
+  `fetcher.process_problem()` for image/text extraction as well as metadata parsing.
 - **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before image metadata via `_images_collected`. Stale caches with images are re-fetched so image metadata is available for multimodal tasks.
 - **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
 - **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection, dispatches commands, and owns the scheduler in one process. There is no SQLite event queue, ingress supervisor, worker hot-swap, or auto-update loop.
@@ -85,7 +92,9 @@ NapCat (QQ) ──WS──> worker.py
   `schedule_post_solve_editorial_followup()` only **delivers** (awaits in-flight prefetch if
   needed). Neither path uses the state scheduler. Tutorial scraping depends on Playwright
   with Chromium installed for browser fallback when HTTP fetches hit Codeforces blocking.
-  `/review` uses English editorial in LLM context only.
+  `/review` uses English editorial in LLM context only. Tutorial-specific parsing and
+  dynamic-fragment handling remain in `tools/scrape_cf_tutorial.py`; its page-fetching
+  entry points delegate to `problems/cf_fetcher.py`.
 
 ## Configuration
 
@@ -1021,7 +1030,9 @@ Tests mock `data_dir`, group state files, and LLM responses for end-to-end
 command testing. The suite covers submit, clarify, review, problem, tag, scoreboard,
 newproblem, annotation export, napcat parsing, registry discovery, and
 `tutorials.py` extraction/translation (`tests/test_tutorials.py`; submit/review
-editorial paths in `tests/test_commands.py`).
+editorial paths in `tests/test_commands.py`). Shared Codeforces transport fallback
+coverage lives in `tests/test_cf_fetcher.py`; tutorial wrapper delegation is covered by
+`tests/test_scrape_cf_tutorial.py`.
 
 To audit the current group's saved summary against its cached statement with the
 configured `llm.general_model` queue (read-only; no group message or runtime-data write):

@@ -52,3 +52,26 @@ def test_process_problem_marks_inline_image_position(monkeypatch):
             "placeholder": "[[IMAGE_1: formula: a_i < b_i]]",
         }
     ]
+
+
+def test_fetch_problem_html_uses_shared_fetcher(monkeypatch):
+    calls = []
+
+    def fake_fetch(url, *, fetcher, pw_wait_ms):
+        calls.append((url, fetcher, pw_wait_ms))
+        return "<html>statement</html>"
+
+    monkeypatch.setattr(fetcher.cf_fetcher, "fetch_html", fake_fetch)
+
+    html, pid = fetcher.fetch_problem_html(
+        1534,
+        "F2",
+        fetcher="playwright",
+        pw_wait_ms=321,
+    )
+
+    assert html == "<html>statement</html>"
+    assert pid == "1534F2"
+    assert calls == [
+        ("https://codeforces.com/problemset/problem/1534/F2", "playwright", 321)
+    ]

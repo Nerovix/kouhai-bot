@@ -94,6 +94,8 @@ def _write_statement(pid: str, data: dict):
     os.makedirs(d, exist_ok=True)
     payload = dict(data)
     payload.setdefault("_vl_processed", True)
+    payload.setdefault("_images_collected", True)
+    payload.setdefault("images", [])
     with open(os.path.join(d, f"{pid}.json"), "w") as f:
         json.dump(payload, f)
 

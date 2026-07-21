@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -164,9 +166,8 @@ def test_agent_tries_next_blog_when_extractor_rejects_first(tmp_path):
     assert "prefix sums" in result.bundle["sections"][0]["solution"]
 
 
-def test_agent_includes_dynamic_fragment_in_blog_body(tmp_path):
+def test_agent_rejects_placeholder_before_dynamic_fetch_or_llm(tmp_path):
     _write_statement(tmp_path)
-    dynamic_text = ("Dynamic official explanation with enough details about target DP. " * 3) + "This is the unique final dynamic marker."
     pages = {
         "https://codeforces.com/problemset/problem/1000/B": _problem_page(),
         "https://codeforces.com/blog/entry/2": _blog_page("<p>Tutorial is loading...</p>"),
@@ -175,40 +176,75 @@ def test_agent_includes_dynamic_fragment_in_blog_body(tmp_path):
     def fake_fetch(url, **_kwargs):
         return pages[url]
 
-    async def fake_chat_completion(messages, **kwargs):
+    with patch("cf_tutorial_agent.fetch_html", side_effect=fake_fetch), \
+            patch("cf_tutorial_agent.fetch_dynamic_editorial") as dynamic_fetch, \
+            patch("cf_tutorial_agent.chat_completion") as llm_call:
+        with pytest.raises(agent.AgentNoMatch, match="no_readable_blog_bodies"):
+            asyncio.run(
+                agent.run_agent_for_pid(
+                    pid="1000B",
+                    statements_dir=tmp_path,
+                    fetcher="http",
+                    blog_limit=1,
+                    deadline_sec=10,
+                    selector_timeout_sec=5,
+                )
+            )
+
+    dynamic_fetch.assert_not_called()
+    llm_call.assert_not_called()
+
+
+def test_agent_skips_placeholder_and_sends_only_valid_blog_to_llm(tmp_path):
+    _write_statement(tmp_path)
+    target_text = (
+        "Use prefix sums and dynamic programming to evaluate every transition. " * 3
+    ) + "This is the unique final mixed marker."
+    pages = {
+        "https://codeforces.com/problemset/problem/1000/B": _problem_page(),
+        "https://codeforces.com/blog/entry/2": _blog_page(
+            "<p>Tutorial is loading...</p>"
+        ),
+        "https://codeforces.com/blog/entry/1": _blog_page(f"<p>{target_text}</p>"),
+    }
+    llm_urls = []
+
+    def fake_fetch(url, **_kwargs):
+        return pages[url]
+
+    async def fake_chat_completion(messages, **_kwargs):
         payload = json.loads(messages[1]["content"])
-        assert "Tutorial is loading" in payload["blog"]["body"]
-        assert "Codeforces dynamic tutorial fragment" in payload["blog"]["body"]
-        assert dynamic_text.strip() in payload["blog"]["body"]
+        llm_urls.append(payload["blog"]["url"])
+        assert "Tutorial is loading" not in payload["blog"]["body"]
         return ChatCompletionResult(
             text=json.dumps(
                 {
                     "match": True,
                     "section_title": "Target Problem",
-                    "start_text": "Dynamic official explanation",
-                    "end_text": "unique final dynamic marker.",
-                    "confidence": 0.93,
-                    "reason": "dynamic fragment contains the target tutorial",
+                    "start_text": "Use prefix sums and dynamic programming",
+                    "end_text": "unique final mixed marker.",
+                    "confidence": 0.94,
+                    "reason": "valid blog contains the target tutorial",
                 }
             )
         )
 
     with patch("cf_tutorial_agent.fetch_html", side_effect=fake_fetch), \
-            patch("cf_tutorial_agent.fetch_dynamic_editorial", return_value=("Target Problem", dynamic_text)), \
+            patch("cf_tutorial_agent.fetch_dynamic_editorial", return_value=("", "")), \
             patch("cf_tutorial_agent.chat_completion", side_effect=fake_chat_completion):
         result = asyncio.run(
             agent.run_agent_for_pid(
                 pid="1000B",
                 statements_dir=tmp_path,
                 fetcher="http",
-                blog_limit=1,
+                blog_limit=2,
                 deadline_sec=10,
                 selector_timeout_sec=5,
             )
         )
 
-    assert result.bundle["agent_meta"]["source_kind"] == "llm_blog_extract"
-    assert "Dynamic official explanation" in result.bundle["sections"][0]["solution"]
+    assert llm_urls == ["https://codeforces.com/blog/entry/1"]
+    assert result.bundle["tutorial_url"] == "https://codeforces.com/blog/entry/1"
 
 
 def test_agent_rejects_low_confidence_extraction(tmp_path):

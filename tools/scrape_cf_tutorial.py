@@ -30,26 +30,9 @@ try:
     from curl_cffi import requests as curl_requests
 except ImportError:
     curl_requests = None
-try:
-    from playwright.sync_api import Error as PlaywrightError
-    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-    from playwright.sync_api import sync_playwright
-except ImportError:
-    sync_playwright = None
-    PlaywrightError = Exception
-    PlaywrightTimeoutError = TimeoutError
+from kouhai_bot.problems import cf_fetcher
 
 CF_ROOT = "https://codeforces.com"
-CF_PLAYWRIGHT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
-CF_PLAYWRIGHT_VIEWPORT = {"width": 1365, "height": 768}
-CF_CONTENT_SELECTOR = ".problem-statement, .ttypography"
-CF_CONTENT_WAIT_MS = 45000
-
-
 class ScrapeError(RuntimeError):
     """Expected scrape/parsing error with a stable exit code."""
 
@@ -101,98 +84,80 @@ def get_curl_session():
     return _CURL_SESSION
 
 
-def _is_cf_challenge_page(text: str) -> bool:
-    return bool(
-        re.search(r"browser is being checked|Please wait\.|Just a moment", text, re.I)
-    )
-
-
-def _is_cf_challenge_title(title: str) -> bool:
-    return title.strip().lower().startswith("just a moment")
-
-
-def fetch_html_http(url: str) -> str:
+def _fetch_with_shared_transport(
+    url: str,
+    *,
+    fetcher: str,
+    pw_wait_ms: int = 7000,
+) -> str:
     try:
-        scraper = get_scraper()
-        if scraper is not None:
-            resp = scraper.get(url, timeout=30)
-            resp.raise_for_status()
-            body = resp.text
-            if _is_cf_challenge_page(body):
-                raise ScrapeError(f"被 Codeforces 反爬挑战拦截: {url}", 9)
-            return body
+        return cf_fetcher.fetch_html(
+            url,
+            fetcher=fetcher,
+            pw_wait_ms=pw_wait_ms,
+        )
+    except cf_fetcher.CFFetchError as exc:
+        code = 10 if exc.kind == "dependency" else 9 if exc.kind == "content" else 2
+        raise ScrapeError(f"抓取失败: {url} ({exc})", code) from exc
 
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urlopen(req, timeout=30) as resp:
-            body = resp.read()
-            text = body.decode("utf-8", errors="replace")
-            if _is_cf_challenge_page(text):
-                raise ScrapeError(f"被 Codeforces 反爬挑战拦截: {url}", 9)
-            return text
-    except Exception as exc:
+
+def fetch_html_http(url: str, *, pw_wait_ms: int = 7000) -> str:
+    """Use shared HTTP transport, with the legacy CF mirror on a primary 403."""
+    try:
+        return _fetch_with_shared_transport(
+            url,
+            fetcher="http",
+            pw_wait_ms=pw_wait_ms,
+        )
+    except ScrapeError as exc:
+        cause = exc.__cause__
         parsed = urlparse(url)
         if (
-            "403" in str(exc)
+            isinstance(cause, cf_fetcher.CFFetchError)
+            and cause.kind == "forbidden"
             and parsed.netloc == "codeforces.com"
             and parsed.path
         ):
-            mirror_url = f"https://m1.codeforces.com{parsed.path}"
-            if parsed.query:
-                mirror_url = f"{mirror_url}?{parsed.query}"
+            mirror_url = parsed._replace(netloc="m1.codeforces.com").geturl()
             try:
-                req = Request(mirror_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urlopen(req, timeout=30) as resp:
-                    body = resp.read()
-                    text = body.decode("utf-8", errors="replace")
-                    if _is_cf_challenge_page(text):
-                        raise ScrapeError(f"被 Codeforces 反爬挑战拦截: {mirror_url}", 9)
-                    return text
-            except Exception:
+                return _fetch_with_shared_transport(
+                    mirror_url,
+                    fetcher="http",
+                    pw_wait_ms=pw_wait_ms,
+                )
+            except ScrapeError:
                 pass
-        raise ScrapeError(f"抓取失败: {url} ({exc})", 2) from exc
+        raise
 
 
 def fetch_html_playwright(url: str, wait_ms: int = 7000) -> str:
-    if sync_playwright is None:
-        raise ScrapeError(
-            "未安装 playwright。请先运行: python -m pip install playwright && python -m playwright install chromium",
-            10,
-        )
+    """Compatibility wrapper around the shared Chromium transport."""
+    return _fetch_with_shared_transport(
+        url,
+        fetcher="playwright",
+        pw_wait_ms=wait_ms,
+    )
+
+
+def fetch_html_auto(url: str, *, pw_wait_ms: int = 7000) -> str:
+    """Try primary/mirror HTTP transport before falling back to Chromium."""
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            try:
-                context = browser.new_context(
-                    user_agent=CF_PLAYWRIGHT_USER_AGENT,
-                    viewport=CF_PLAYWRIGHT_VIEWPORT,
-                )
-                page = context.new_page()
-                page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                if wait_ms > 0:
-                    page.wait_for_timeout(wait_ms)
-                try:
-                    page.wait_for_selector(
-                        CF_CONTENT_SELECTOR,
-                        timeout=CF_CONTENT_WAIT_MS,
-                    )
-                except PlaywrightTimeoutError:
-                    if _is_cf_challenge_title(page.title()):
-                        raise ScrapeError(
-                            f"Playwright 抓取后仍命中反爬挑战页: {url}",
-                            9,
-                        )
-                text = page.content()
-            finally:
-                browser.close()
-        if _is_cf_challenge_page(text):
-            raise ScrapeError(f"Playwright 抓取后仍命中反爬挑战页: {url}", 9)
-        return text
-    except ScrapeError:
-        raise
-    except PlaywrightTimeoutError as exc:
-        raise ScrapeError(f"Playwright 超时: {url} ({exc})", 2) from exc
-    except PlaywrightError as exc:
-        raise ScrapeError(f"Playwright 抓取失败: {url} ({exc})", 2) from exc
+        return fetch_html_http(url, pw_wait_ms=pw_wait_ms)
+    except ScrapeError as exc:
+        cause = exc.__cause__
+        if not (
+            isinstance(cause, cf_fetcher.CFFetchError)
+            and cause.kind
+            in {
+                "forbidden",
+                "transient_http",
+                "timeout",
+                "connection",
+                "content",
+            }
+        ):
+            raise
+        return fetch_html_playwright(url, wait_ms=pw_wait_ms)
 
 
 def fetch_html(url: str, fetcher: str = "auto", pw_wait_ms: int = 7000) -> str:
@@ -210,15 +175,10 @@ def fetch_html(url: str, fetcher: str = "auto", pw_wait_ms: int = 7000) -> str:
         _LAST_FETCH_AT = time.time()
 
     if fetcher == "http":
-        return fetch_html_http(url)
-    if fetcher == "playwright":
-        return fetch_html_playwright(url, wait_ms=pw_wait_ms)
-
-    # auto: HTTP first, then let a real browser try any failure path.
-    try:
-        return fetch_html_http(url)
-    except Exception:
-        return fetch_html_playwright(url, wait_ms=pw_wait_ms)
+        return fetch_html_http(url, pw_wait_ms=pw_wait_ms)
+    if fetcher == "auto":
+        return fetch_html_auto(url, pw_wait_ms=pw_wait_ms)
+    return _fetch_with_shared_transport(url, fetcher=fetcher, pw_wait_ms=pw_wait_ms)
 
 
 def _extract_csrf_token(page_html: str) -> str:

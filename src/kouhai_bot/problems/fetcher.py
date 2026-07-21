@@ -28,8 +28,12 @@ import urllib.request
 from io import BytesIO
 from urllib.parse import urljoin
 
-import cloudscraper
 from PIL import Image
+
+try:
+    from . import cf_fetcher
+except ImportError:  # Support direct execution of this file.
+    import cf_fetcher
 
 # ── Config ──────────────────────────────────────────────────────────────
 
@@ -42,8 +46,6 @@ QWEN_MODEL = os.environ.get("QWEN_MODEL", "").strip()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
-
-_scraper = None
 
 # Hallucination patterns — if VL output matches these, it's likely garbage
 _HALLUCINATION_PATTERNS = [
@@ -79,22 +81,19 @@ def _qwen_config() -> tuple[str, str, str]:
     return api_key.strip(), base_url.rstrip("/"), model.strip()
 
 
-def get_scraper():
-    global _scraper
-    if _scraper is None:
-        _scraper = cloudscraper.create_scraper()
-    return _scraper
-
-
 # ── Fetch problem page ──────────────────────────────────────────────────
 
-def fetch_problem_html(contest_id: int, index: str) -> tuple[str, str]:
+def fetch_problem_html(
+    contest_id: int,
+    index: str,
+    *,
+    fetcher: str = "auto",
+    pw_wait_ms: int = 7000,
+) -> tuple[str, str]:
     """Fetch CF problem page, return (html, pid)."""
     url = f"https://codeforces.com/problemset/problem/{contest_id}/{index}"
-    scraper = get_scraper()
-    resp = scraper.get(url, timeout=30)
-    resp.raise_for_status()
-    return resp.text, f"{contest_id}{index}"
+    body = cf_fetcher.fetch_html(url, fetcher=fetcher, pw_wait_ms=pw_wait_ms)
+    return body, f"{contest_id}{index}"
 
 
 # ── Extract problem statement block ─────────────────────────────────────
@@ -361,8 +360,10 @@ def process_problem(
     contest_id: int,
     index: str,
     vl_backend: str = "none",
+    *,
+    html: str | None = None,
 ) -> dict:
-    """Full pipeline: fetch → extract → handle formulas → return text + metadata.
+    """Fetch or reuse HTML, extract the statement, and return text + metadata.
 
     Returns dict with keys:
       - pid, url, text, text_length
@@ -371,7 +372,11 @@ def process_problem(
       - has_non_formula_images: True if tex-graphics (diagrams) found
       - formulas_failed: number of formulas that couldn't be converted after retries
     """
-    html, pid = fetch_problem_html(contest_id, index)
+    pid = f"{contest_id}{index}"
+    if html is None:
+        html, pid = fetch_problem_html(contest_id, index)
+    elif not cf_fetcher.content_valid(html):
+        return {"error": "Unusable Codeforces HTML", "pid": pid}
     ps_html = extract_problem_statement(html)
     if not ps_html:
         return {"error": "Could not find problem-statement div", "pid": pid}

@@ -142,6 +142,10 @@ def _http_error(status: int) -> requests_exceptions.HTTPError:
     "http_result",
     [
         _FakeResponse("", _http_error(403)),
+        _FakeResponse("", _http_error(429)),
+        _FakeResponse("", _http_error(502)),
+        _FakeResponse("", _http_error(503)),
+        _FakeResponse("", _http_error(504)),
         requests_exceptions.Timeout("slow"),
         requests_exceptions.ConnectionError("offline"),
         cloudscraper_exceptions.CloudflareChallengeError("unsolved challenge"),
@@ -150,6 +154,10 @@ def _http_error(status: int) -> requests_exceptions.HTTPError:
     ],
     ids=[
         "403",
+        "429",
+        "502",
+        "503",
+        "504",
         "timeout",
         "connection",
         "cloudscraper-challenge",

@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 import scrape_cf_tutorial
 
 
-@pytest.mark.parametrize("fetcher", ["auto", "http", "playwright"])
+@pytest.mark.parametrize("fetcher", ["http", "playwright"])
 def test_fetch_html_delegates_transport_to_shared_fetcher(monkeypatch, fetcher):
     calls = []
 
@@ -104,4 +104,31 @@ def test_http_mode_falls_back_to_m1_mirror_after_primary_403(monkeypatch):
     assert calls == [
         ("https://codeforces.com/blog/entry/123?locale=en", "http", 7000),
         ("https://m1.codeforces.com/blog/entry/123?locale=en", "http", 7000),
+    ]
+
+
+def test_auto_mode_uses_m1_mirror_before_playwright_after_primary_403(monkeypatch):
+    calls = []
+
+    def fake_fetch(url, *, fetcher, pw_wait_ms):
+        calls.append((url, fetcher, pw_wait_ms))
+        if fetcher == "http":
+            raise scrape_cf_tutorial.cf_fetcher.CFFetchError(
+                "403 response",
+                kind="forbidden",
+            )
+        return "<html><div class='ttypography'>browser editorial</div></html>"
+
+    monkeypatch.setattr(scrape_cf_tutorial.cf_fetcher, "fetch_html", fake_fetch)
+
+    result = scrape_cf_tutorial.fetch_html(
+        "https://codeforces.com/blog/entry/123?locale=en",
+        fetcher="auto",
+    )
+
+    assert result == "<html><div class='ttypography'>browser editorial</div></html>"
+    assert calls == [
+        ("https://codeforces.com/blog/entry/123?locale=en", "http", 7000),
+        ("https://m1.codeforces.com/blog/entry/123?locale=en", "http", 7000),
+        ("https://codeforces.com/blog/entry/123?locale=en", "playwright", 7000),
     ]

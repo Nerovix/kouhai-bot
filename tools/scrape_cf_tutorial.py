@@ -139,6 +139,27 @@ def fetch_html_playwright(url: str, wait_ms: int = 7000) -> str:
     )
 
 
+def fetch_html_auto(url: str, *, pw_wait_ms: int = 7000) -> str:
+    """Try primary/mirror HTTP transport before falling back to Chromium."""
+    try:
+        return fetch_html_http(url, pw_wait_ms=pw_wait_ms)
+    except ScrapeError as exc:
+        cause = exc.__cause__
+        if not (
+            isinstance(cause, cf_fetcher.CFFetchError)
+            and cause.kind
+            in {
+                "forbidden",
+                "transient_http",
+                "timeout",
+                "connection",
+                "content",
+            }
+        ):
+            raise
+        return fetch_html_playwright(url, wait_ms=pw_wait_ms)
+
+
 def fetch_html(url: str, fetcher: str = "auto", pw_wait_ms: int = 7000) -> str:
     global _LAST_FETCH_AT
     wait_s = 0.0
@@ -155,6 +176,8 @@ def fetch_html(url: str, fetcher: str = "auto", pw_wait_ms: int = 7000) -> str:
 
     if fetcher == "http":
         return fetch_html_http(url, pw_wait_ms=pw_wait_ms)
+    if fetcher == "auto":
+        return fetch_html_auto(url, pw_wait_ms=pw_wait_ms)
     return _fetch_with_shared_transport(url, fetcher=fetcher, pw_wait_ms=pw_wait_ms)
 
 

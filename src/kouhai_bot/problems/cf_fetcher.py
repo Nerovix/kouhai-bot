@@ -41,6 +41,7 @@ _CHALLENGE_RE = re.compile(
     re.I,
 )
 _TUTORIAL_LOADING_RE = re.compile(r"tutorial\s+is\s+loading(?:\.\.\.)?", re.I)
+_TRANSIENT_HTTP_STATUSES = {429, 502, 503, 504}
 
 
 class CFFetchError(RuntimeError):
@@ -81,7 +82,12 @@ def fetch_html_http(url: str, *, timeout: float = 30) -> str:
         response.raise_for_status()
     except requests_exceptions.HTTPError as exc:
         status = getattr(getattr(exc, "response", None), "status_code", None)
-        kind = "forbidden" if status == 403 else "http"
+        if status == 403:
+            kind = "forbidden"
+        elif status in _TRANSIENT_HTTP_STATUSES:
+            kind = "transient_http"
+        else:
+            kind = "http"
         raise CFFetchError(
             f"Codeforces HTTP fetch failed for {url}: {exc}",
             kind=kind,
@@ -206,7 +212,13 @@ def fetch_html(
             )
         return body
     except CFFetchError as exc:
-        if exc.kind not in {"forbidden", "timeout", "connection", "content"}:
+        if exc.kind not in {
+            "forbidden",
+            "transient_http",
+            "timeout",
+            "connection",
+            "content",
+        }:
             raise
         logger.info(
             "CF HTTP fetch failed (%s); falling back to Playwright for %s",

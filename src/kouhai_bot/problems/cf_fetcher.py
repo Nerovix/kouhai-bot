@@ -12,6 +12,7 @@ import re
 from typing import Literal
 
 import cloudscraper
+from cloudscraper import exceptions as cloudscraper_exceptions
 from requests import exceptions as requests_exceptions
 
 try:
@@ -33,13 +34,13 @@ CF_PLAYWRIGHT_USER_AGENT = (
 CF_PLAYWRIGHT_VIEWPORT = {"width": 1365, "height": 768}
 CF_CONTENT_SELECTOR = ".problem-statement, .ttypography"
 CF_CONTENT_WAIT_MS = 45_000
+CF_TUTORIAL_LOADING_WAIT_MS = 5_000
 
 _CHALLENGE_RE = re.compile(
-    r"browser is being checked|please wait\.|just a moment|cf-mitigated",
+    r"_cf_chl_opt|challenge-platform|cf-browser-verify",
     re.I,
 )
 _TUTORIAL_LOADING_RE = re.compile(r"tutorial\s+is\s+loading(?:\.\.\.)?", re.I)
-_SCRAPER = None
 
 
 class CFFetchError(RuntimeError):
@@ -51,11 +52,8 @@ class CFFetchError(RuntimeError):
 
 
 def get_scraper():
-    """Return the process-wide cloudscraper session."""
-    global _SCRAPER
-    if _SCRAPER is None:
-        _SCRAPER = cloudscraper.create_scraper()
-    return _SCRAPER
+    """Create an isolated cloudscraper session for one HTTP fetch."""
+    return cloudscraper.create_scraper()
 
 
 def content_valid(body: str) -> bool:
@@ -76,8 +74,10 @@ def content_valid(body: str) -> bool:
 
 def fetch_html_http(url: str, *, timeout: float = 30) -> str:
     """Fetch a Codeforces HTML page with cloudscraper only."""
+    scraper = None
     try:
-        response = get_scraper().get(url, timeout=timeout)
+        scraper = get_scraper()
+        response = scraper.get(url, timeout=timeout)
         response.raise_for_status()
     except requests_exceptions.HTTPError as exc:
         status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -96,6 +96,24 @@ def fetch_html_http(url: str, *, timeout: float = 30) -> str:
             f"Codeforces HTTP connection failed for {url}: {exc}",
             kind="connection",
         ) from exc
+    except requests_exceptions.RequestException as exc:
+        raise CFFetchError(
+            f"Codeforces HTTP request failed for {url}: {exc}",
+            kind="connection",
+        ) from exc
+    except (
+        cloudscraper_exceptions.CloudflareException,
+        cloudscraper_exceptions.CaptchaException,
+    ) as exc:
+        raise CFFetchError(
+            f"Codeforces challenge handling failed for {url}: {exc}",
+            kind="content",
+        ) from exc
+    finally:
+        if scraper is not None:
+            close = getattr(scraper, "close", None)
+            if close is not None:
+                close()
 
     body = response.text
     if not content_valid(body):
@@ -130,6 +148,19 @@ def fetch_html_playwright(url: str, *, wait_ms: int = 7000) -> str:
                     # The final content check below still rejects challenge pages.
                     pass
                 body = page.content()
+                if _TUTORIAL_LOADING_RE.search(body):
+                    try:
+                        page.wait_for_function(
+                            """() => !/tutorial\\s+is\\s+loading(?:\\.\\.\\.)?/i.test(
+                                document.body?.innerText || ''
+                            )""",
+                            timeout=CF_TUTORIAL_LOADING_WAIT_MS,
+                        )
+                    except PlaywrightTimeoutError:
+                        # The final content check produces a stable content error if
+                        # the lazy tutorial fragment never becomes available.
+                        pass
+                    body = page.content()
             finally:
                 browser.close()
     except PlaywrightTimeoutError as exc:

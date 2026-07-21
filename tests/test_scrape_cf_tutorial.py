@@ -79,3 +79,29 @@ def test_fetch_html_preserves_scrape_error_contract(monkeypatch):
         scrape_cf_tutorial.fetch_html("https://codeforces.com/blog/entry/3")
 
     assert exc_info.value.code == 9
+
+
+def test_http_mode_falls_back_to_m1_mirror_after_primary_403(monkeypatch):
+    calls = []
+
+    def fake_fetch(url, *, fetcher, pw_wait_ms):
+        calls.append((url, fetcher, pw_wait_ms))
+        if url.startswith("https://codeforces.com/"):
+            raise scrape_cf_tutorial.cf_fetcher.CFFetchError(
+                "403 response",
+                kind="forbidden",
+            )
+        return "<html><div class='ttypography'>mirror editorial</div></html>"
+
+    monkeypatch.setattr(scrape_cf_tutorial.cf_fetcher, "fetch_html", fake_fetch)
+
+    result = scrape_cf_tutorial.fetch_html(
+        "https://codeforces.com/blog/entry/123?locale=en",
+        fetcher="http",
+    )
+
+    assert result == "<html><div class='ttypography'>mirror editorial</div></html>"
+    assert calls == [
+        ("https://codeforces.com/blog/entry/123?locale=en", "http", 7000),
+        ("https://m1.codeforces.com/blog/entry/123?locale=en", "http", 7000),
+    ]

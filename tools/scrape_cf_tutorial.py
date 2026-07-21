@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -101,9 +101,33 @@ def _fetch_with_shared_transport(
         raise ScrapeError(f"抓取失败: {url} ({exc})", code) from exc
 
 
-def fetch_html_http(url: str) -> str:
-    """Compatibility wrapper around the shared HTTP-only transport."""
-    return _fetch_with_shared_transport(url, fetcher="http")
+def fetch_html_http(url: str, *, pw_wait_ms: int = 7000) -> str:
+    """Use shared HTTP transport, with the legacy CF mirror on a primary 403."""
+    try:
+        return _fetch_with_shared_transport(
+            url,
+            fetcher="http",
+            pw_wait_ms=pw_wait_ms,
+        )
+    except ScrapeError as exc:
+        cause = exc.__cause__
+        parsed = urlparse(url)
+        if (
+            isinstance(cause, cf_fetcher.CFFetchError)
+            and cause.kind == "forbidden"
+            and parsed.netloc == "codeforces.com"
+            and parsed.path
+        ):
+            mirror_url = parsed._replace(netloc="m1.codeforces.com").geturl()
+            try:
+                return _fetch_with_shared_transport(
+                    mirror_url,
+                    fetcher="http",
+                    pw_wait_ms=pw_wait_ms,
+                )
+            except ScrapeError:
+                pass
+        raise
 
 
 def fetch_html_playwright(url: str, wait_ms: int = 7000) -> str:
@@ -129,11 +153,9 @@ def fetch_html(url: str, fetcher: str = "auto", pw_wait_ms: int = 7000) -> str:
             time.sleep(wait_s - elapsed)
         _LAST_FETCH_AT = time.time()
 
-    return _fetch_with_shared_transport(
-        url,
-        fetcher=fetcher,
-        pw_wait_ms=pw_wait_ms,
-    )
+    if fetcher == "http":
+        return fetch_html_http(url, pw_wait_ms=pw_wait_ms)
+    return _fetch_with_shared_transport(url, fetcher=fetcher, pw_wait_ms=pw_wait_ms)
 
 
 def _extract_csrf_token(page_html: str) -> str:

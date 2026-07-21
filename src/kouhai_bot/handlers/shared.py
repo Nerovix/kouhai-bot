@@ -14,6 +14,7 @@ import random
 import re
 import time
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import get_config
@@ -1256,8 +1257,11 @@ def _build_summary_prompt(stmt_text: str, input_text: str, limits_text: str) -> 
         "4. 所有数据范围必须完整出现；可合并压缩但不能丢。题面给了上下界时尽量写完整区间，如 1≤n≤2×10⁵、0≤aᵢ≤10⁹、1≤t≤10⁴、多测且所有 n 之和≤2×10⁵；范围里也使用角标，不要写 a_i。\n"
         "5. 时限和内存必须写在末尾，例如“时限2s，内存256MB”。\n"
         "6. 背景故事、角色名、修辞、样例细节能删就删；定义、边界、判定规则、输出目标、数据范围、时空限制不能删。不要改变规则适用对象：若原文说每次操作/每个玩家/任意元素满足某条件，不能误写成只对先手、只对某一次或只对某一类对象成立。\n"
+        "题面为定义补充的特殊约定也必须保留；例如原文明确说无边顶点也算 only incoming edges，summary 必须写清“孤立点也算”。\n"
         "7. LaTeX 是最后手段：普通数组下标和幂次优先用 Unicode 角标，如 aᵢ、a₁、a₂、aₙ、10¹⁸、10⁹+7；也可写“第 i 个/每个位置的 a”。"
         f"{_SUMMARY_UNICODE_NOTATION_GUIDE}"
+        "必须保留加法与下标的作用域：p_i+1 表示 p_i 的值加 1，必须写成 pᵢ+1 或“标号为 pᵢ+1 的顶点”；"
+        "只有原文 p_{i+1} 才能写成 pᵢ₊₁，绝不能把 p_i+1 改成 pᵢ₊₁。"
         "严格递增序列写 a₁<a₂<…<aₙ 或“严格递增坐标”。不要猜测列表端点或把原文没有的下标终点写进 summary；端点不适合用 Unicode 角标时改用自然语言。"
         "简单关系用 ≤、≥、×、mod。只有复杂求和、递推、分式、多重下标、精确定义用中文会失真时，才保留最少必要 LaTeX。\n"
         f"8. 目标长度不超过 {_SUMMARY_TARGET_CHARS} 个中文字符；复杂题可略长，但完整限制优先于短。\n"
@@ -1342,12 +1346,108 @@ def _summary_quality_issues(summary: str, limits_text: str = "") -> list[str]:
     return issues
 
 
+_SUMMARY_SUBSCRIPT_CHARS = {
+    "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ",
+    "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ",
+    "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ",
+}
+_SUMMARY_SUBSCRIPT_DIGITS = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+_SOURCE_INDEXED_VALUE_PLUS_RE = re.compile(
+    r"(?<!\w)(?P<name>[A-Za-z])_"
+    r"(?:\{\s*(?P<braced_index>[A-Za-z])\s*\}|(?P<plain_index>[A-Za-z]))"
+    r"\s*\+\s*(?P<amount>\d+)"
+)
+
+
+def _summary_symbol_scope_issues(source_text: str, summary: str) -> list[str]:
+    """Catch unambiguous outside-addition → nested-subscript transcription errors."""
+    issues: list[str] = []
+    source = source_text or ""
+    candidate = summary or ""
+    seen: set[tuple[str, str, str]] = set()
+    for match in _SOURCE_INDEXED_VALUE_PLUS_RE.finditer(source):
+        name = match.group("name")
+        index = match.group("braced_index") or match.group("plain_index")
+        amount = match.group("amount")
+        key = (name, index, amount)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        index_char = _SUMMARY_SUBSCRIPT_CHARS.get(index.lower())
+        if not index_char:
+            continue
+        nested_source_re = re.compile(
+            rf"{re.escape(name)}_\{{\s*{re.escape(index)}\s*\+\s*{re.escape(amount)}\s*\}}"
+        )
+        if nested_source_re.search(source):
+            # The source contains both forms, so the Unicode occurrence is ambiguous.
+            continue
+        subscript_amount = amount.translate(_SUMMARY_SUBSCRIPT_DIGITS)
+        wrong_unicode_forms = [f"{name}{index_char}₊{subscript_amount}"]
+        subscript_name = _SUMMARY_SUBSCRIPT_CHARS.get(name.lower())
+        if subscript_name:
+            # Also catch the same scope loss inside a flattened multilevel
+            # subscript, e.g. a_{p_i+1} -> aₚᵢ₊₁.
+            wrong_unicode_forms.append(f"{subscript_name}{index_char}₊{subscript_amount}")
+        wrong_latex_re = re.compile(
+            rf"{re.escape(name)}_\{{\s*{re.escape(index)}\s*\+\s*"
+            rf"{re.escape(amount)}\s*\}}"
+        )
+        wrong = next((form for form in wrong_unicode_forms if form in candidate), "")
+        if not wrong:
+            wrong_latex = wrong_latex_re.search(candidate)
+            wrong = wrong_latex.group(0) if wrong_latex else ""
+        if not wrong:
+            continue
+        correct = f"{name}{index_char}+{amount}"
+        issues.append(
+            f"summary changes source expression {name}_{index}+{amount} "
+            f"(indexed value plus {amount}) into {wrong} (next subscript); "
+            f"write {correct} or an equivalent natural-language expression"
+        )
+    return issues
+
+
+def _summary_required_convention_issues(source_text: str, summary: str) -> list[str]:
+    """Catch explicit conventions whose omission makes a definition ambiguous."""
+    source = " ".join((source_text or "").lower().split())
+    candidate = summary or ""
+    no_edge_is_incoming_only = re.search(
+        r"\b(?:(?:a|the)\s+)?vert(?:ex|ices)\s+"
+        r"(?:(?:that|which)\s+ha(?:s|ve)|with)\s+no\s+edges?\s+"
+        r"(?:is|are)\s+(?:also\s+)?considered\s+to\s+have\s+only\s+incoming\s+edges\b",
+        source,
+    )
+    if not no_edge_is_incoming_only:
+        return []
+    if re.search(r"孤立点|(?:没有|无)边的?顶点", candidate):
+        return []
+    return [
+        "summary omits the explicit convention that a vertex with no edges is "
+        "considered to have only incoming edges; state that isolated vertices also count"
+    ]
+
+
+def _summary_candidate_issues(
+    stmt_text: str,
+    input_text: str,
+    limits_text: str,
+    summary: str,
+) -> list[str]:
+    return [
+        *_summary_quality_issues(summary, limits_text),
+        *_summary_symbol_scope_issues(f"{stmt_text}\n{input_text}", summary),
+        *_summary_required_convention_issues(f"{stmt_text}\n{input_text}", summary),
+    ]
+
+
 def _build_summary_repair_prompt(
     stmt_text: str,
     input_text: str,
     limits_text: str,
     summary: str,
-    issues: list[str],
+    issues: list[str | dict[str, str]],
 ) -> str:
     payload = {
         "source": _summary_source_payload(stmt_text, input_text, limits_text),
@@ -1359,13 +1459,228 @@ def _build_summary_repair_prompt(
         "修正规则：只压缩、改写、删除违规内容；不要加入 source 中没有的新事实。\n"
         "必须保留题目目标、关键定义、输出含义、全部数据范围（上下界都保留）、时限和内存；删除题解/思路/复杂度/样例推导；"
         "修正任何把“每次/任意/双方/所有对象”的规则误写成只对先手、只对一次或只对部分对象成立的表述；"
+        "保留 source 对定义的特殊约定；若 source 说无边顶点也算 only incoming edges，必须明确写“孤立点也算”；"
         "不要单列输入输出；普通输入格式删掉，只保留答案含义、多测和总和限制；正文和数据范围里的普通 a_i、a_{i+1}、a_1<...<a_n 都改成 aᵢ、aᵢ₊₁、a₁<…<aₙ、相邻位置等角标或自然写法；"
         f"{_SUMMARY_UNICODE_NOTATION_GUIDE}"
+        "严格区分 p_i+1 与 p_{i+1}：前者必须写 pᵢ+1 或自然语言中的“pᵢ 的值加 1”，"
+        "后者才写 pᵢ₊₁；不要把下标外的加法移进下标。"
         "把端点无法从 source 直接确认的角标范围改成自然语言，除非 source 明确给出该终点；"
         "把 10^18、1e18、10^9+7、1e9+7 等普通幂次改成 10¹⁸、10⁹+7；"
         "LaTeX 只在复杂公式不可自然中文化时保留。\n\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
     )
+
+
+@dataclass(frozen=True)
+class SummaryDoublecheckResult:
+    """Structured semantic audit result for a generated problem summary."""
+
+    accurate: bool | None
+    issues: tuple[dict[str, str], ...] = ()
+    failure_kind: str = ""
+    model_tag: str = ""
+    provider_name: str = ""
+    model: str = ""
+
+
+def _summary_doublecheck_system_prompt() -> str:
+    return (
+        "你是算法竞赛题意的独立语义审校员。你只核对候选中文简述是否忠实于英文题面素材，"
+        "不解题、不评价文风、不补题解。source 是唯一事实依据，candidate_summary 可能包含致命转写错误。"
+        "必须只输出 JSON 对象。"
+    )
+
+
+def _build_summary_doublecheck_prompt(
+    stmt_text: str,
+    input_text: str,
+    limits_text: str,
+    summary: str,
+) -> str:
+    payload = {
+        "source": _summary_source_payload(stmt_text, input_text, limits_text),
+        "candidate_summary": summary,
+    }
+    return (
+        "逐条 double-check candidate_summary 与 source 的题意语义是否一致。\n"
+        "重点检查：\n"
+        "1. 数学符号和角标的作用域必须逐字符一致。尤其 p_i+1 表示数值 p_i 再加 1，"
+        "而 p_{i+1} 表示排列的下一个元素，二者绝不能互换；同理检查 a_{p_i}、括号、上下标和运算符。\n"
+        "2. 检查对象数量、编号范围、循环端点和相邻变量之间的换元关系。"
+        "若原题用长度 m-1 的排列配 m 个顶点，而简述改用长度 k 的排列，就必须同步核对顶点数与循环范围，不能机械照抄 m。\n"
+        "3. 检查操作方向、条件分支、唯一性/存在性、图或数组定义、答案统计对象、模数、"
+        "多测总和限制、时限和内存，以及题面明确补充的特殊定义约定（例如孤立点是否也计入某类顶点）。"
+        "主动尝试用最小合法规模验证简述是否仍可执行。\n"
+        "4. 只报告会改变题意、让过程无法执行或可能导致错误答案的实质问题。"
+        "允许忠实压缩和自然中文改写；不要因为省略背景、普通输入格式、脚注例子或样例推导而判错。\n"
+        "5. source 中的 [[IMAGE_x: ...]] 是题面图片占位符。general model 看不到图片时，"
+        "不要仅因简述包含可能来自图片的细节就判错；这些细节属于本次审校范围外，但仍要检查它们是否与可见文字冲突。\n"
+        "6. 不要在 issue 中给算法、复杂度或解题提示，只说明简述与原题的最小差异。\n\n"
+        "输出格式：\n"
+        '{"accurate":true,"issues":[]}\n'
+        "或\n"
+        '{"accurate":false,"issues":[{'
+        '"severity":"critical|major|minor",'
+        '"summary_claim":"简述中的原文片段或精确转述",'
+        '"source_fact":"题面中的对应事实",'
+        '"explanation":"两者为什么不同"}]}\n'
+        "accurate=true 时 issues 必须为空；只要有一个实质问题就必须 accurate=false。\n\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _normalize_summary_doublecheck_issues(value: object) -> tuple[dict[str, str], ...] | None:
+    if not isinstance(value, list):
+        return None
+    normalized: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+        raw_severity = item.get("severity", "major")
+        if not isinstance(raw_severity, str):
+            return None
+        severity = raw_severity.strip().lower() or "major"
+        if severity not in {"critical", "major", "minor"}:
+            severity = "major"
+        details: dict[str, str] = {}
+        for key in ("summary_claim", "source_fact", "explanation"):
+            raw = item.get(key, "")
+            if not isinstance(raw, str):
+                return None
+            details[key] = raw.strip()
+        if not details["explanation"] or not (
+            details["summary_claim"] or details["source_fact"]
+        ):
+            return None
+        issue = {"severity": severity, **details}
+        normalized.append(issue)
+    return tuple(normalized)
+
+
+async def doublecheck_problem_summary(
+    stmt_text: str,
+    input_text: str,
+    limits_text: str,
+    summary: str,
+) -> SummaryDoublecheckResult:
+    """Use the general-model queue to compare a summary against its source."""
+    cfg = get_config()
+    result = await call_chat_completion_result(
+        [
+            {"role": "system", "content": _summary_doublecheck_system_prompt()},
+            {
+                "role": "user",
+                "content": _build_summary_doublecheck_prompt(
+                    stmt_text,
+                    input_text,
+                    limits_text,
+                    summary,
+                ),
+            },
+        ],
+        task="summary",
+        temperature=0.0,
+        timeout=cfg.summary_timeout_sec,
+        response_format={"type": "json_object"},
+    )
+    if not result.text:
+        return SummaryDoublecheckResult(
+            accurate=None,
+            failure_kind=result.failure_kind or "empty_response",
+            model_tag=result.model_tag,
+            provider_name=result.provider_name,
+            model=result.model,
+        )
+
+    parsed, _repair_tag = await parse_json_with_llm_repair(
+        result.text,
+        expected_schema=(
+            '{"accurate": boolean, "issues": [{"severity": string, '
+            '"summary_claim": string, "source_fact": string, "explanation": string}]}'
+        ),
+        task="summary",
+        timeout=cfg.summary_timeout_sec,
+    )
+    accurate = parsed.get("accurate") if isinstance(parsed, dict) else None
+    issues = _normalize_summary_doublecheck_issues(
+        parsed.get("issues") if isinstance(parsed, dict) else None
+    )
+    if (
+        not isinstance(accurate, bool)
+        or issues is None
+        or (accurate and issues)
+        or (not accurate and not issues)
+    ):
+        logger.warning("summary double-check returned an invalid result: %s", parsed)
+        return SummaryDoublecheckResult(
+            accurate=None,
+            failure_kind="invalid_response",
+            model_tag=result.model_tag,
+            provider_name=result.provider_name,
+            model=result.model,
+        )
+    return SummaryDoublecheckResult(
+        accurate=accurate,
+        issues=issues,
+        model_tag=result.model_tag,
+        provider_name=result.provider_name,
+        model=result.model,
+    )
+
+
+async def _repair_summary_candidate(
+    stmt_text: str,
+    input_text: str,
+    limits_text: str,
+    summary: str,
+    issues: list[str | dict[str, str]],
+    *,
+    timeout: int,
+) -> tuple[str | None, str]:
+    repair_result = await call_chat_completion_result(
+        [
+            {"role": "system", "content": _summary_system_prompt()},
+            {
+                "role": "user",
+                "content": _build_summary_repair_prompt(
+                    stmt_text,
+                    input_text,
+                    limits_text,
+                    summary,
+                    issues,
+                ),
+            },
+        ],
+        task="summary",
+        temperature=0.2,
+        timeout=timeout,
+        response_format={"type": "json_object"},
+    )
+    if not repair_result.text:
+        logger.warning(
+            "summary repair request failed: failure=%s provider=%s model=%s",
+            repair_result.failure_kind or "empty_response",
+            repair_result.provider_name,
+            repair_result.model,
+        )
+        return None, ""
+    repaired, repaired_json_tag = await _parse_summary_json(
+        repair_result.text,
+        timeout=timeout,
+    )
+    if not repaired:
+        logger.warning("summary repair returned invalid JSON/object")
+        return None, ""
+    repair_issues = _summary_candidate_issues(
+        stmt_text,
+        input_text,
+        limits_text,
+        repaired,
+    )
+    if repair_issues:
+        logger.warning("summary repair still failed quality gate: %s", "; ".join(repair_issues))
+        return None, ""
+    return repaired, repaired_json_tag or repair_result.model_tag
 
 
 async def summarize_problem(
@@ -1402,42 +1717,63 @@ async def summarize_problem(
         logger.warning("summary generation returned invalid JSON/object")
         return None, ""
 
-    issues = _summary_quality_issues(summary, limits_text)
-    if not issues:
+    issues = _summary_candidate_issues(
+        stmt_text,
+        input_text,
+        limits_text,
+        summary,
+    )
+    if issues:
+        logger.info("summary quality repair requested: %s", "; ".join(issues))
+        summary, tag = await _repair_summary_candidate(
+            stmt_text,
+            input_text,
+            limits_text,
+            summary,
+            list(issues),
+            timeout=cfg.summary_timeout_sec,
+        )
+        if not summary:
+            return None, ""
+
+    check = await doublecheck_problem_summary(
+        stmt_text,
+        input_text,
+        limits_text,
+        summary,
+    )
+    if check.accurate is None:
+        logger.warning("summary double-check failed: %s", check.failure_kind)
+        return None, ""
+    if check.accurate:
         return summary, tag
 
-    logger.info("summary quality repair requested: %s", "; ".join(issues))
-    repair_result = await call_chat_completion_result(
-        [
-            {"role": "system", "content": _summary_system_prompt()},
-            {
-                "role": "user",
-                "content": _build_summary_repair_prompt(
-                    stmt_text,
-                    input_text,
-                    limits_text,
-                    summary,
-                    issues,
-                ),
-            },
-        ],
-        task="summary",
-        temperature=0.2,
-        timeout=cfg.summary_timeout_sec,
-        response_format={"type": "json_object"},
-    )
-    repaired, repaired_json_tag = await _parse_summary_json(
-        repair_result.text,
+    logger.info("summary semantic repair requested: %s", check.issues)
+    repaired, repaired_tag = await _repair_summary_candidate(
+        stmt_text,
+        input_text,
+        limits_text,
+        summary,
+        [dict(issue) for issue in check.issues],
         timeout=cfg.summary_timeout_sec,
     )
     if not repaired:
-        logger.warning("summary repair returned invalid JSON/object")
         return None, ""
-    repair_issues = _summary_quality_issues(repaired, limits_text)
-    if repair_issues:
-        logger.warning("summary repair still failed quality gate: %s", "; ".join(repair_issues))
+
+    repaired_check = await doublecheck_problem_summary(
+        stmt_text,
+        input_text,
+        limits_text,
+        repaired,
+    )
+    if repaired_check.accurate is not True:
+        logger.warning(
+            "repaired summary still failed semantic double-check: failure=%s issues=%s",
+            repaired_check.failure_kind,
+            repaired_check.issues,
+        )
         return None, ""
-    return repaired, repaired_json_tag or repair_result.model_tag
+    return repaired, repaired_tag
 
 
 async def translate_sample_notes(

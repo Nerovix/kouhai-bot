@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -9,14 +10,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from kouhai_bot.config import BotConfig
 from kouhai_bot.llm_config import LlmProviderConfig
 from kouhai_bot.handlers.shared import (
+    SummaryDoublecheckResult,
     build_judge_messages,
     build_multimodal_user_content,
     build_second_judge_messages,
     _build_summary_prompt,
     _build_summary_repair_prompt,
+    _summary_required_convention_issues,
+    _summary_symbol_scope_issues,
     call_chat_completion,
     get_judge_prompt,
     call_chat_completion_result,
+    doublecheck_problem_summary,
     judge_submission,
     judge_submission_result,
     parse_json_with_llm_repair,
@@ -31,6 +36,7 @@ from kouhai_bot.llm import (
     _post_chat_completion_once,
     strip_leaked_thinking,
 )
+from tools import summary_doublecheck as summary_doublecheck_tool
 
 
 def test_judge_prompt_rejects_repaired_greedy_and_unbatched_simulation():
@@ -329,6 +335,11 @@ def test_summarize_problem_with_images_uses_multimodal_task():
 
     async def fake_call(messages, **kwargs):
         calls.append({"messages": messages, **kwargs})
+        if kwargs["task"] == "summary":
+            return ChatCompletionResult(
+                text=json.dumps({"accurate": True, "issues": []}),
+                model_tag="『T』",
+            )
         return ChatCompletionResult(
             text=json.dumps({"summary": "带图题意"}),
             model_tag="『MMx』",
@@ -347,6 +358,7 @@ def test_summarize_problem_with_images_uses_multimodal_task():
     assert summary == "带图题意"
     assert tag == "『MMx』"
     assert calls[0]["task"] == "multimodal_summary"
+    assert calls[1]["task"] == "summary"
     content = calls[0]["messages"][1]["content"]
     assert isinstance(content, list)
     assert content[0]["type"] == "text"
@@ -511,6 +523,8 @@ def test_task_entrypoints_are_blackbox_except_model_class_and_tag():
             system_content = payload["messages"][0]["content"]
             if "official_editorial" in user_content:
                 text = json.dumps({"matched": "yes", "result": "中文题解"})
+            elif "独立语义审校员" in system_content:
+                text = json.dumps({"accurate": True, "issues": []})
             elif "summary" in system_content:
                 text = json.dumps({"summary": "OK"})
             else:
@@ -553,6 +567,7 @@ def test_task_entrypoints_are_blackbox_except_model_class_and_tag():
     assert [call["model"] for call in calls] == [
         "deepseek-v4-pro",
         "deepseek-v4-pro",
+        "deepseek-v4-flash",
         "deepseek-v4-flash",
         "deepseek-v4-flash",
         "deepseek-v4-flash",
@@ -789,6 +804,65 @@ def test_summary_prompt_lists_unicode_notation_inventory():
         assert "10⁹+7" in text
         assert "不要自己创造看起来像角标的字母" in text
         assert "字符白名单不够用时，优先改成自然语言" in text
+        assert "p_i+1" in text
+        assert "pᵢ+1" in text
+        assert "p_{i+1}" in text
+        assert "pᵢ₊₁" in text
+        assert "孤立点也算" in text
+
+
+def test_summary_symbol_scope_gate_distinguishes_addition_from_next_index():
+    source = "Use components containing vertices p_i and p_i+1 respectively."
+
+    assert _summary_symbol_scope_issues(source, "分别取 pᵢ 和 pᵢ+1 所在分量") == []
+    issues = _summary_symbol_scope_issues(source, "分别取 pᵢ 和 pᵢ₊₁ 所在分量")
+
+    assert len(issues) == 1
+    assert "p_i+1" in issues[0]
+    assert "pᵢ₊₁" in issues[0]
+
+
+def test_summary_symbol_scope_gate_avoids_ambiguous_source_with_both_forms():
+    source = "Compare p_i+1 with p_{i+1}."
+
+    assert _summary_symbol_scope_issues(source, "比较 pᵢ₊₁") == []
+
+
+def test_summary_symbol_scope_gate_handles_braced_source_and_latex_candidate():
+    source = "Use a_{p_{i} + 1} and the vertex p_{i} + 2."
+
+    nested_array_issues = _summary_symbol_scope_issues(source, "使用 aₚᵢ₊₁")
+    latex_issues = _summary_symbol_scope_issues(source, "使用顶点 $p_{i+2}$")
+
+    assert len(nested_array_issues) == 1
+    assert "p_i+1" in nested_array_issues[0]
+    assert len(latex_issues) == 1
+    assert "p_i+2" in latex_issues[0]
+
+
+def test_summary_required_convention_gate_preserves_isolated_vertex_rule():
+    source = (
+        "Note that a vertex that has no edges is considered to have only incoming edges."
+    )
+
+    issues = _summary_required_convention_issues(source, "每个分量有唯一只有入边的点")
+
+    assert len(issues) == 1
+    assert "isolated vertices also count" in issues[0]
+    assert _summary_required_convention_issues(
+        source,
+        "每个分量有唯一只有入边的点（孤立点也算）",
+    ) == []
+
+
+def test_summary_required_convention_gate_handles_wording_and_whitespace_variants():
+    source = (
+        "A vertex\nwith no edges is also considered to have only incoming edges."
+    )
+
+    issues = _summary_required_convention_issues(source, "每个分量有唯一只有入边的点")
+
+    assert len(issues) == 1
 
 
 def test_summarize_problem_uses_configured_timeout():
@@ -805,7 +879,11 @@ def test_summarize_problem_uses_configured_timeout():
         return ChatCompletionResult(text=json.dumps({"summary": "summary ok"}), model_tag="🐳")
 
     with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
-            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat), \
+            patch(
+                "kouhai_bot.handlers.shared.doublecheck_problem_summary",
+                AsyncMock(return_value=SummaryDoublecheckResult(accurate=True)),
+            ):
         summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
         assert summary == "summary ok"
         assert tag == "🐳"
@@ -827,7 +905,11 @@ def test_summarize_problem_repairs_solution_leak_and_format_sections():
         return ChatCompletionResult(text=json.dumps({"summary": text}), model_tag=tag)
 
     with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
-            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat), \
+            patch(
+                "kouhai_bot.handlers.shared.doublecheck_problem_summary",
+                AsyncMock(return_value=SummaryDoublecheckResult(accurate=True)),
+            ):
         summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
 
     assert summary == fixed
@@ -845,7 +927,35 @@ def test_summarize_problem_invalid_json_returns_none():
         return ChatCompletionResult(text="plain text summary", model_tag="🐳")
 
     with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
-            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat), \
+            patch(
+                "kouhai_bot.handlers.shared.doublecheck_problem_summary",
+                AsyncMock(return_value=SummaryDoublecheckResult(accurate=True)),
+            ):
+        summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
+
+    assert summary is None
+    assert tag == ""
+
+
+def test_summarize_problem_rejects_indeterminate_semantic_check():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+
+    async def fake_call_chat(messages, **kwargs):
+        return ChatCompletionResult(
+            text=json.dumps({"summary": "给定 n，输出答案。"}),
+            model_tag="🐳",
+        )
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat), \
+            patch(
+                "kouhai_bot.handlers.shared.doublecheck_problem_summary",
+                AsyncMock(return_value=SummaryDoublecheckResult(
+                    accurate=None,
+                    failure_kind="service_unavailable",
+                )),
+            ):
         summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
 
     assert summary is None
@@ -864,7 +974,11 @@ def test_summarize_problem_repairs_missing_time_and_memory_limits():
         return ChatCompletionResult(text=json.dumps({"summary": text}), model_tag="🐳")
 
     with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
-            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat), \
+            patch(
+                "kouhai_bot.handlers.shared.doublecheck_problem_summary",
+                AsyncMock(return_value=SummaryDoublecheckResult(accurate=True)),
+            ):
         summary, tag = asyncio.run(summarize_problem(
             "stmt",
             "input",
@@ -886,11 +1000,242 @@ def test_summarize_problem_does_not_rewrite_formula_notation_with_regex():
         return ChatCompletionResult(text=json.dumps({"summary": summary_text}), model_tag="🐳")
 
     with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
-            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat), \
+            patch(
+                "kouhai_bot.handlers.shared.doublecheck_problem_summary",
+                AsyncMock(return_value=SummaryDoublecheckResult(accurate=True)),
+            ):
         summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
 
     assert summary == summary_text
     assert tag == "🐳"
+
+
+def test_doublecheck_problem_summary_uses_general_model_and_checks_symbol_scope():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+    calls = []
+
+    async def fake_call_chat(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        return ChatCompletionResult(
+            text=json.dumps({
+                "accurate": False,
+                "issues": [{
+                    "severity": "critical",
+                    "summary_claim": "含 pᵢ₊₁ 的弱连通分量",
+                    "source_fact": "containing vertices p_i and p_i+1 respectively",
+                    "explanation": "p_{i+1} 是下一个排列元素，p_i+1 是顶点编号加一。",
+                }],
+            }),
+            model_tag="🐳",
+            provider_name="general",
+            model="general-model",
+        )
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
+        result = asyncio.run(doublecheck_problem_summary(
+            "components containing vertices p_i and p_i+1 respectively",
+            "",
+            "Time: 2s, Memory: 1024MB",
+            "分别取含 pᵢ 和 pᵢ₊₁ 的弱连通分量",
+        ))
+
+    assert result.accurate is False
+    assert result.issues[0]["severity"] == "critical"
+    assert "p_i+1" in result.issues[0]["source_fact"]
+    assert calls[0]["task"] == "summary"
+    assert calls[0]["temperature"] == 0.0
+    assert calls[0]["timeout"] == 321
+    assert calls[0]["response_format"] == {"type": "json_object"}
+    checker_prompt = calls[0]["messages"][-1]["content"]
+    assert "p_i+1" in checker_prompt
+    assert "p_{i+1}" in checker_prompt
+    assert "candidate_summary" in checker_prompt
+
+
+def test_doublecheck_problem_summary_rejects_inconsistent_or_malformed_payloads():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+    payloads = [
+        {
+            "accurate": True,
+            "issues": [{
+                "severity": "major",
+                "summary_claim": "候选说法",
+                "source_fact": "题面事实",
+                "explanation": "两者不一致",
+            }],
+        },
+        {
+            "accurate": False,
+            "issues": [{
+                "severity": "major",
+                "summary_claim": "候选说法",
+                "source_fact": {"unexpected": "object"},
+                "explanation": "两者不一致",
+            }],
+        },
+    ]
+
+    for payload in payloads:
+        with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+                patch(
+                    "kouhai_bot.handlers.shared.call_chat_completion_result",
+                    AsyncMock(return_value=ChatCompletionResult(text=json.dumps(payload))),
+                ):
+            result = asyncio.run(doublecheck_problem_summary(
+                "statement",
+                "input",
+                "limits",
+                "candidate",
+            ))
+
+        assert result.accurate is None
+        assert result.failure_kind == "invalid_response"
+
+
+def test_doublecheck_problem_summary_accepts_actionable_omission_issue():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+    payload = {
+        "accurate": False,
+        "issues": [{
+            "severity": "major",
+            "summary_claim": "",
+            "source_fact": "题面明确规定孤立点也算只有入边的点",
+            "explanation": "候选简述遗漏了这项约定",
+        }],
+    }
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch(
+                "kouhai_bot.handlers.shared.call_chat_completion_result",
+                AsyncMock(return_value=ChatCompletionResult(text=json.dumps(payload))),
+            ):
+        result = asyncio.run(doublecheck_problem_summary(
+            "statement",
+            "input",
+            "limits",
+            "candidate",
+        ))
+
+    assert result.accurate is False
+    assert result.issues[0]["summary_claim"] == ""
+
+
+def test_summary_doublecheck_tool_explicit_inputs_ignore_state_and_strip_thinking(tmp_path):
+    cfg = _openai_cfg(data_dir=str(tmp_path), current_group=123)
+    summary_file = tmp_path / "candidate.txt"
+    summary_file.write_text("<think>hidden</think>\n候选简述", encoding="utf-8")
+    checker = AsyncMock(return_value=SummaryDoublecheckResult(accurate=True))
+    args = SimpleNamespace(
+        group=None,
+        pid="CF1900a",
+        summary_file=summary_file,
+        expect=None,
+    )
+
+    with patch.object(summary_doublecheck_tool, "get_config", return_value=cfg), \
+            patch.object(
+                summary_doublecheck_tool,
+                "_load_json",
+                side_effect=AssertionError("explicit inputs must not read group state"),
+            ), \
+            patch.object(
+                summary_doublecheck_tool,
+                "load_problem_statement_json",
+                return_value={
+                    "description": "statement",
+                    "input": "input",
+                    "time_limit": "2s",
+                    "memory_limit": "256MB",
+                },
+            ) as statement_loader, \
+            patch.object(summary_doublecheck_tool, "doublecheck_problem_summary", checker):
+        exit_code = asyncio.run(summary_doublecheck_tool._run(args))
+
+    assert exit_code == 0
+    statement_loader.assert_called_once_with("1900A")
+    checker.assert_awaited_once_with(
+        "statement",
+        "input",
+        "Time: 2s, Memory: 256MB",
+        "候选简述",
+    )
+
+
+def test_summarize_problem_repairs_symbol_scope_before_model_doublecheck():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+    bad = "对 i=1..k-1，分别取 pᵢ 和 pᵢ₊₁ 所在分量的汇点并连边。"
+    fixed = "对 i=1..k，分别取 pᵢ 和编号为 pᵢ+1 的顶点所在分量的汇点并连边。"
+    responses = [
+        ChatCompletionResult(text=json.dumps({"summary": bad}), model_tag="first"),
+        ChatCompletionResult(text=json.dumps({"summary": fixed}), model_tag="fixed"),
+        ChatCompletionResult(
+            text=json.dumps({"accurate": True, "issues": []}),
+            model_tag="checker",
+        ),
+    ]
+    calls = []
+
+    async def fake_call_chat(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        return responses[len(calls) - 1]
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
+        summary, tag = asyncio.run(summarize_problem(
+            "For i from 1 to m-1, use components containing p_i and p_i+1.",
+            "",
+            "",
+        ))
+
+    assert summary == fixed
+    assert tag == "fixed"
+    assert [call["temperature"] for call in calls] == [0.4, 0.2, 0.0]
+    repair_payload = calls[1]["messages"][-1]["content"]
+    assert "p_i+1" in repair_payload
+    assert "pᵢ₊₁" in repair_payload
+
+
+def test_summarize_problem_repairs_semantic_mismatch_and_doublechecks_again():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+    bad = "若 aₚᵢ=0 则加边 u→v，否则加边 v→u。"
+    fixed = "若 aₚᵢ=0 则加边 v→u，否则加边 u→v。"
+    responses = [
+        ChatCompletionResult(text=json.dumps({"summary": bad}), model_tag="first"),
+        ChatCompletionResult(text=json.dumps({
+            "accurate": False,
+            "issues": [{
+                "severity": "critical",
+                "summary_claim": "aₚᵢ=0 时加边 u→v",
+                "source_fact": "a_{p_i}=0 时加边 v→u",
+                "explanation": "两个分支的边方向写反了。",
+            }],
+        }), model_tag="checker"),
+        ChatCompletionResult(text=json.dumps({"summary": fixed}), model_tag="fixed"),
+        ChatCompletionResult(
+            text=json.dumps({"accurate": True, "issues": []}),
+            model_tag="checker",
+        ),
+    ]
+    calls = []
+
+    async def fake_call_chat(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        return responses[len(calls) - 1]
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat):
+        summary, tag = asyncio.run(summarize_problem(
+            "If a_{p_i}=0, add v to u; otherwise add u to v.",
+            "",
+            "",
+        ))
+
+    assert summary == fixed
+    assert tag == "fixed"
+    assert [call["temperature"] for call in calls] == [0.4, 0.0, 0.2, 0.0]
+    assert "边方向写反" in calls[2]["messages"][-1]["content"]
 
 
 def test_dashscope_provider_payload_enables_stream():

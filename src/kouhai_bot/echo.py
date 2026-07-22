@@ -58,7 +58,7 @@ class GroupEcho:
         *,
         max_entries: int = 50,
         trigger_count: int = 2,
-        echo_probability: float = 0.5,
+        echo_probability: float = 0.25,
         rng: Callable[[], float] = random.random,
     ) -> None:
         self.max_entries = max_entries

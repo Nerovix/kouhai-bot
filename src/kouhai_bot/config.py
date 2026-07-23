@@ -114,6 +114,7 @@ class BotConfig:
     llm_retry_base_delay_sec: float = 1.0
     llm_retry_max_delay_sec: float = 8.0
     llm_stream_idle_timeout_sec: int = 120
+    llm_proxy: str = ""
     judge_timeout_sec: int = 1200
     clarify_timeout_sec: int = 600
     review_timeout_sec: int = 600
@@ -188,6 +189,8 @@ class BotConfig:
         c.llm_stream_idle_timeout_sec = int(
             llm.get("stream_idle_timeout_sec", c.llm_stream_idle_timeout_sec)
         )
+        proxy = llm.get("proxy", c.llm_proxy)
+        c.llm_proxy = "" if proxy is None else str(proxy).strip()
         c.judge_timeout_sec = int(llm.get("judge_timeout_sec", c.judge_timeout_sec))
         c.clarify_timeout_sec = int(
             llm.get("clarify_timeout_sec", c.clarify_timeout_sec)

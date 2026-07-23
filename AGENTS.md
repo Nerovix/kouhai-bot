@@ -132,6 +132,7 @@ All providers use the OpenAI-compatible `/chat/completions` endpoint.
 | `llm.max_retries` | int | 2 | Max retries **per provider** before moving to next |
 | `llm.retry_base_delay_sec` | float | 1.0 | Exponential backoff base |
 | `llm.retry_max_delay_sec` | float | 8.0 | Max backoff cap |
+| `llm.proxy` | str | `""` | HTTP proxy URL for all LLM API calls; use an `http://` URL for a mixed HTTP/SOCKS proxy port |
 | `llm.judge_timeout_sec` | int | 1200 | Judge LLM timeout |
 | `llm.clarify_timeout_sec` | int | 600 | Clarify LLM timeout |
 | `llm.review_timeout_sec` | int | 600 | Review LLM timeout |

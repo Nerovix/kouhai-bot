@@ -63,6 +63,8 @@ cp config.example.yaml config.yaml
 
 ZenMux 上的体验模型也可以作为 OpenAI-compatible provider 配置。示例见 `config.example.yaml`；例如 Grok 4.5 Free 可使用 `model: "x-ai/grok-4.5-free"`、`reasoning_effort: "xhigh"`、`model_tag: "『∅』"`。如果某个网关需要特殊 payload，可在 provider 上配置 `temperature`、`send_thinking` 或 `extra_body`，避免为每个模型在代码里新增分支。
 
+如果服务器需要通过本地代理访问 LLM API，可设置 `llm.proxy`，例如 `proxy: "http://127.0.0.1:7897"`。mihomo 等 mixed HTTP/SOCKS 端口应使用 `http://` URL。
+
 #### 多模态题面
 
 ```

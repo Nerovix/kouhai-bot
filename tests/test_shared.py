@@ -287,6 +287,61 @@ def test_general_model_tasks_preserve_provider_model_tag():
     assert calls[0]["model"] == "general"
 
 
+def test_call_chat_completion_configures_session_and_request_proxy():
+    cfg = _openai_cfg(llm_proxy="http://127.0.0.1:7897")
+    session_calls = []
+    request_calls = []
+
+    class ProxySession(_DummySession):
+        def __init__(self, *, proxy=None, trust_env=False):
+            session_calls.append({"proxy": proxy, "trust_env": trust_env})
+
+    async def fake_once(session, **kwargs):
+        request_calls.append(kwargs)
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", ProxySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion(
+            [{"role": "user", "content": "Reply with exactly OK."}],
+            task="judge",
+        ))
+
+    assert result == "OK"
+    assert session_calls == [{
+        "proxy": "http://127.0.0.1:7897",
+        "trust_env": True,
+    }]
+    assert request_calls[0]["proxy"] == "http://127.0.0.1:7897"
+
+
+def test_call_chat_completion_uses_request_proxy_for_older_aiohttp():
+    cfg = _openai_cfg(llm_proxy="http://127.0.0.1:7897")
+    session_calls = []
+    request_calls = []
+
+    class OldAiohttpSession(_DummySession):
+        def __init__(self, *, trust_env=False):
+            session_calls.append({"trust_env": trust_env})
+
+    async def fake_once(session, **kwargs):
+        request_calls.append(kwargs)
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", OldAiohttpSession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion(
+            [{"role": "user", "content": "Reply with exactly OK."}],
+            task="judge",
+        ))
+
+    assert result == "OK"
+    assert session_calls == [{"trust_env": True}]
+    assert request_calls[0]["proxy"] == "http://127.0.0.1:7897"
+
+
 def test_multimodal_task_uses_multimodal_provider_and_preserves_image_content():
     provider = LlmProviderConfig(
         name="mmx",
@@ -1528,6 +1583,26 @@ def test_non_streaming_chat_completion_does_not_use_sock_read_idle_timeout():
     assert result.text == "OK"
     assert timeout.total == 7200
     assert timeout.sock_read is None
+
+
+def test_post_chat_completion_passes_configured_proxy_to_request():
+    response = _DummyResponse(json_data={
+        "choices": [{"message": {"content": "OK"}}],
+    })
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="openai",
+        base_url="https://zenmux.ai/api/v1",
+        headers={},
+        payload={},
+        timeout=120,
+        proxy="http://127.0.0.1:7897",
+    ))
+
+    assert result.text == "OK"
+    assert session.calls[0][1]["proxy"] == "http://127.0.0.1:7897"
 
 
 def test_dashscope_stream_payload_requests_usage_without_token_caps():

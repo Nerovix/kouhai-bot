@@ -158,6 +158,21 @@ def test_llm_stream_idle_timeout_defaults_to_120(monkeypatch, tmp_path):
     assert cfg.llm_stream_idle_timeout_sec == 120
 
 
+def test_llm_proxy_loads_from_yaml(monkeypatch, tmp_path):
+    data = yaml.safe_load(_make_yaml())
+    data["llm"]["proxy"] = "http://127.0.0.1:7897"
+
+    cfg = _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+
+    assert cfg.llm_proxy == "http://127.0.0.1:7897"
+
+
+def test_llm_proxy_defaults_to_empty_string(monkeypatch, tmp_path):
+    cfg = _from_yaml(_make_yaml(), monkeypatch, tmp_path)
+
+    assert cfg.llm_proxy == ""
+
+
 def test_provider_stream_loads_from_yaml(monkeypatch, tmp_path):
     data = yaml.safe_load(_make_yaml())
     data["llm"]["smart_model"][0]["stream"] = True

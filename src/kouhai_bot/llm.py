@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -66,6 +67,24 @@ def _chat_completions_url(base_url: str) -> str:
     if base.endswith("/chat/completions"):
         return base
     return f"{base}/chat/completions"
+
+
+def _client_session_kwargs(proxy: str) -> dict[str, object]:
+    """Build proxy options supported by the installed aiohttp version."""
+    proxy = (proxy or "").strip()
+    if not proxy:
+        return {}
+
+    kwargs: dict[str, object] = {"trust_env": True}
+    try:
+        supports_session_proxy = (
+            "proxy" in inspect.signature(aiohttp.ClientSession).parameters
+        )
+    except (TypeError, ValueError):
+        supports_session_proxy = False
+    if supports_session_proxy:
+        kwargs["proxy"] = proxy
+    return kwargs
 
 
 def strip_leaked_thinking(text: str) -> str:
@@ -431,17 +450,23 @@ async def _post_chat_completion_once(
     payload: dict,
     timeout: int,
     stream_idle_timeout_sec: int | float | None = None,
+    proxy: str = "",
 ) -> _ChatCompletionAttempt:
     try:
-        async with session.post(
-            _chat_completions_url(base_url),
-            json=payload,
-            headers=headers,
-            timeout=_chat_completion_timeout(
+        request_kwargs: dict[str, object] = {
+            "json": payload,
+            "headers": headers,
+            "timeout": _chat_completion_timeout(
                 payload=payload,
                 total_timeout_sec=timeout,
                 stream_idle_timeout_sec=stream_idle_timeout_sec,
             ),
+        }
+        if proxy:
+            request_kwargs["proxy"] = proxy
+        async with session.post(
+            _chat_completions_url(base_url),
+            **request_kwargs,
         ) as resp:
             if resp.status != 200:
                 text = await resp.text()
@@ -557,11 +582,12 @@ async def chat_completion(
     stream_idle_timeout_sec = int(
         getattr(cfg, "llm_stream_idle_timeout_sec", 120) or 0
     )
+    proxy = str(getattr(cfg, "llm_proxy", "") or "").strip()
 
     last_failure_kind: str | None = None
     last_failed_provider: str | None = None
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(**_client_session_kwargs(proxy)) as session:
         for provider in providers:
             model_name = provider.model_for(explicit_model=model)
             headers = {
@@ -608,6 +634,7 @@ async def chat_completion(
                     payload=payload,
                     timeout=timeout,
                     stream_idle_timeout_sec=stream_idle_timeout_sec,
+                    proxy=proxy,
                 )
                 if result.text is not None:
                     if last_failed_provider:

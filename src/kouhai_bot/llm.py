@@ -561,7 +561,7 @@ async def chat_completion(
     last_failure_kind: str | None = None
     last_failed_provider: str | None = None
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(trust_env=True) as session:
         for provider in providers:
             model_name = provider.model_for(explicit_model=model)
             headers = {

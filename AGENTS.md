@@ -65,9 +65,13 @@ NapCat (QQ) ──WS──> worker.py
   the same single-flight task. A claim prevents refill until publication finishes, then
   release wakes the worker loop. READY-slot validation covers rating-range changes,
   current/solved problems, statement presence, and multimodal availability. Background
-  preparation is not reported by `/status`; only an admitted post is. `/setproblem`
-  and `/setproblem random` intentionally keep their live-fetch behavior and never use
-  this slot.
+  preparation is not reported by `/status`; only an admitted post is. While a slot is
+  READY, the worker also idempotently maintains its full official-editorial prefetch:
+  persisted slots resume crawler + translation work after restart, in-flight work is
+  deduplicated by pid, and completed/no-editorial terminal states stop retries. This
+  editorial maintenance never blocks a `/newproblem` claim. `/setproblem` and
+  `/setproblem random` intentionally keep their live-fetch behavior and never use this
+  slot.
 - **Friend request auto-approval**: Normal OneBot `post_type="request"` / `request_type="friend"` events are parsed by `napcat/client.py`, routed by `handlers.process_event()`, and approved via `set_friend_add_request`. QQ/NapCat "doubtful" friend requests are not reliably pushed as request events, so `worker.py` also runs `friend_requests.doubt_friend_request_loop()`, which polls `get_doubt_friends_add_request` every 60 seconds and approves with `set_doubt_friends_add_request`. Both paths approve only after the requester is confirmed to be a member of `CURRENT_GROUP`; lookup failure, malformed events, non-friend requests, and non-members are ignored without approving. Requests that were already consumed by another QQ client may not appear in the doubtful-request poll.
 - **User groups**: `user_groups.py` — all users default to `default`; `USER_GROUPS` configures
   non-default groups such as `starred`/`打星`, their members, submit delay, and rejection

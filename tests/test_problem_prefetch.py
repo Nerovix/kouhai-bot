@@ -66,7 +66,7 @@ def _configure(tmp_path, monkeypatch, rating=(2000, 3000)):
     )
     monkeypatch.setattr(
         problem_prefetch,
-        "schedule_prefetch_editorial",
+        "ensure_editorial_prefetch",
         lambda *_args, **_kwargs: None,
     )
     return cfg
@@ -128,16 +128,16 @@ def test_ready_slot_survives_coordinator_recreation(tmp_path, monkeypatch):
     assert prepare.await_count == 1
 
 
-def test_rehydrated_slot_only_resumes_cached_editorial_work(tmp_path, monkeypatch):
+def test_rehydrated_slot_restarts_full_editorial_prefetch(tmp_path, monkeypatch):
     _configure(tmp_path, monkeypatch)
-    scheduled: list[tuple[str, bool]] = []
+    scheduled: list[str] = []
     resumed = asyncio.Event()
 
-    def schedule(pid, *, run_agent=True):
-        scheduled.append((pid, run_agent))
+    def ensure(pid):
+        scheduled.append(pid)
         resumed.set()
 
-    monkeypatch.setattr(problem_prefetch, "schedule_prefetch_editorial", schedule)
+    monkeypatch.setattr(problem_prefetch, "ensure_editorial_prefetch", ensure)
 
     async def run():
         first = NextProblemPrefetcher(
@@ -157,7 +157,41 @@ def test_rehydrated_slot_only_resumes_cached_editorial_work(tmp_path, monkeypatc
         await runner
 
     asyncio.run(run())
-    assert scheduled == [("542D", False)]
+    assert scheduled == ["542D"]
+
+
+def test_ready_slot_retries_unsettled_editorial_maintenance(tmp_path, monkeypatch):
+    _configure(tmp_path, monkeypatch)
+    calls: list[str] = []
+    retried = asyncio.Event()
+
+    def ensure(pid):
+        calls.append(pid)
+        if len(calls) >= 2:
+            retried.set()
+
+    monkeypatch.setattr(problem_prefetch, "ensure_editorial_prefetch", ensure)
+
+    async def run():
+        first = NextProblemPrefetcher(
+            GROUP_ID,
+            prepare=AsyncMock(return_value=_prepared()),
+        )
+        assert await first._ensure_ready() is not None
+
+        restored = NextProblemPrefetcher(
+            GROUP_ID,
+            prepare=AsyncMock(side_effect=AssertionError("must reuse disk slot")),
+            retry_interval_sec=0.01,
+        )
+        stop = asyncio.Event()
+        runner = asyncio.create_task(restored.run(stop_event=stop))
+        await asyncio.wait_for(retried.wait(), timeout=1)
+        stop.set()
+        await runner
+
+    asyncio.run(run())
+    assert calls[:2] == ["542D", "542D"]
 
 
 def test_claim_blocks_refill_until_release(tmp_path, monkeypatch):

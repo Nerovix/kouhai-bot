@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from .config import get_config
-from .editorial_followup import schedule_prefetch_editorial
+from .editorial_followup import ensure_editorial_prefetch
 from .handlers.shared import get_today_problem, load_scoreboard, statement_images
 from .problem_preparation import (
     PreparedProblem,
@@ -79,7 +79,6 @@ class NextProblemPrefetcher:
         self._build_task: asyncio.Task[PrefetchedProblem] | None = None
         self._ready_slot: PrefetchedProblem | None = None
         self._claimed_slot_id: str | None = None
-        self._resumed_slot_ids: set[str] = set()
 
     @property
     def slot_path(self) -> Path:
@@ -302,13 +301,12 @@ class NextProblemPrefetcher:
             # group state or rating overrides may have changed during a slow build.
             await asyncio.shield(task)
 
-    def _resume_cached_editorial_once(self, slot: PrefetchedProblem) -> None:
-        if slot.slot_id in self._resumed_slot_ids:
-            return
-        self._resumed_slot_ids.add(slot.slot_id)
-        # Never restart the crawler for a persisted READY slot.  This only
-        # finishes translation when tutorial JSON already reached disk.
-        schedule_prefetch_editorial(slot.problem.pid, run_agent=False)
+    def _maintain_editorial_prefetch(self, slot: PrefetchedProblem) -> None:
+        # This is deliberately fire-and-forget: editorial readiness must not
+        # become part of the /newproblem claim latency.  Repeated calls are
+        # idempotent and let a rehydrated READY slot restart work interrupted
+        # by a process exit.
+        ensure_editorial_prefetch(slot.problem.pid)
 
     async def _wait_for_wake_or_stop(self, stop_event: asyncio.Event) -> None:
         wake_task = asyncio.create_task(self._wake.wait())
@@ -337,7 +335,7 @@ class NextProblemPrefetcher:
                 try:
                     slot = await self._ensure_ready()
                     if slot is not None:
-                        self._resume_cached_editorial_once(slot)
+                        self._maintain_editorial_prefetch(slot)
                 except asyncio.CancelledError:
                     if stop_event.is_set():
                         break

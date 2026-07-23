@@ -411,6 +411,44 @@ def test_prefetch_editorial_zh_caches_translation(tmp_path, monkeypatch):
     assert cached.startswith("预取译文")
 
 
+def test_ensure_editorial_prefetch_runs_full_pipeline_and_respects_terminal_state(
+    monkeypatch,
+):
+    from kouhai_bot import editorial_followup
+
+    cached = False
+    no_editorial = False
+    scheduled: list[tuple[str, bool]] = []
+
+    monkeypatch.setattr(
+        editorial_followup,
+        "has_cached_editorial_zh",
+        lambda _pid: cached,
+    )
+    monkeypatch.setattr(
+        editorial_followup,
+        "is_no_official_editorial",
+        lambda _pid: no_editorial,
+    )
+    monkeypatch.setattr(
+        editorial_followup,
+        "schedule_prefetch_editorial",
+        lambda pid, *, run_agent=True: scheduled.append((pid, run_agent)),
+    )
+
+    editorial_followup.ensure_editorial_prefetch("542D")
+    assert scheduled == [("542D", True)]
+
+    cached = True
+    editorial_followup.ensure_editorial_prefetch("542D")
+    assert scheduled == [("542D", True)]
+
+    cached = False
+    no_editorial = True
+    editorial_followup.ensure_editorial_prefetch("542D")
+    assert scheduled == [("542D", True)]
+
+
 def test_deliver_uses_prefetch_cache_without_translate(tmp_path, monkeypatch):
     from kouhai_bot.config import BotConfig
     from kouhai_bot.editorial_followup import deliver_official_tutorial_forward

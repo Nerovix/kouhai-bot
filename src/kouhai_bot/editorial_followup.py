@@ -84,6 +84,25 @@ def schedule_prefetch_editorial(pid: str, *, run_agent: bool = True) -> None:
     task.add_done_callback(_drop)
 
 
+def ensure_editorial_prefetch(pid: str) -> None:
+    """Keep full editorial prefetch active for an unpublished READY problem.
+
+    This entry point is safe to call from a maintenance loop: an in-flight task
+    is deduplicated by ``schedule_prefetch_editorial``, while a verified cache
+    or a confirmed no-editorial marker is treated as terminal.  If a task dies
+    before reaching either terminal state, the next maintenance pass retries
+    the complete crawler + translation pipeline.
+    """
+    pid = (pid or "").strip()
+    if (
+        not pid
+        or has_cached_editorial_zh(pid)
+        or is_no_official_editorial(pid)
+    ):
+        return
+    schedule_prefetch_editorial(pid, run_agent=True)
+
+
 def schedule_prefetch_for_group_today(group_id: int) -> None:
     """Prefetch editorial for the group's current problem (e.g. on bot startup)."""
     state_path = os.path.join(get_config().data_dir, "groups", str(group_id), "state.json")

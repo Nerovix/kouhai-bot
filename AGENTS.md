@@ -42,7 +42,12 @@ NapCat (QQ) ──WS──> worker.py
   Codeforces problem statement and blog HTML. It tries `cloudscraper` first and falls
   back to headless Playwright Chromium after HTTP 403, timeout/connection failure,
   Cloudflare challenge HTML, or a lazy `Tutorial is loading...` response. Its
-  `content_valid()` helper is the shared usability gate. `picker.fetch_statement()`
+  `content_valid()` helper is the shared usability gate. Normal Codeforces pages may
+  contain an injected `challenge-platform` asset, so that marker is only treated as a
+  challenge when no problem/blog content container is present; strong challenge-page
+  markers remain invalid. The Playwright path uses the async API, derives its user agent
+  from the bundled Chromium major version, and keeps synchronous compatibility callers
+  safe when an asyncio loop is already running. `picker.fetch_statement()`
   fetches each uncached statement once and passes that HTML into
   `fetcher.process_problem()` for image/text extraction as well as metadata parsing.
 - **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before image metadata via `_images_collected`. Stale caches with images are re-fetched so image metadata is available for multimodal tasks.

@@ -1,7 +1,8 @@
 """Regression tests for the shared Codeforces HTML fetcher."""
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, Lock
+from threading import Barrier, Lock, get_ident
 from types import SimpleNamespace
 
 import pytest
@@ -39,10 +40,10 @@ class _FakePlaywrightManager:
     def __init__(self, playwright):
         self.playwright = playwright
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self.playwright
 
-    def __exit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type, exc, tb):
         return False
 
 
@@ -51,25 +52,26 @@ class _FakeChromium:
         self.browser = browser
         self.launch_kwargs = None
 
-    def launch(self, **kwargs):
+    async def launch(self, **kwargs):
         self.launch_kwargs = kwargs
         return self.browser
 
 
 class _FakeBrowser:
-    def __init__(self, page):
+    def __init__(self, page, *, version="149.0.7827.55"):
         self.page = page
+        self.version = version
         self.context_kwargs = None
         self.closed = False
 
-    def new_context(self, **kwargs):
+    async def new_context(self, **kwargs):
         self.context_kwargs = kwargs
         return self
 
-    def new_page(self):
+    async def new_page(self):
         return self.page
 
-    def close(self):
+    async def close(self):
         self.closed = True
 
 
@@ -81,23 +83,23 @@ class _FakePage:
         self.function_exc = function_exc
         self.calls = []
 
-    def goto(self, url, **kwargs):
+    async def goto(self, url, **kwargs):
         self.calls.append(("goto", url, kwargs))
 
-    def wait_for_timeout(self, wait_ms):
+    async def wait_for_timeout(self, wait_ms):
         self.calls.append(("wait_for_timeout", wait_ms))
 
-    def wait_for_selector(self, selector, **kwargs):
+    async def wait_for_selector(self, selector, **kwargs):
         self.calls.append(("wait_for_selector", selector, kwargs))
         if self.selector_exc is not None:
             raise self.selector_exc
 
-    def wait_for_function(self, expression, **kwargs):
+    async def wait_for_function(self, expression, **kwargs):
         self.calls.append(("wait_for_function", expression, kwargs))
         if self.function_exc is not None:
             raise self.function_exc
 
-    def content(self):
+    async def content(self):
         self.calls.append(("content",))
         if self._html_results is not None:
             return next(self._html_results)
@@ -130,6 +132,42 @@ def test_content_valid_rejects_unusable_responses(body):
 )
 def test_content_valid_accepts_statement_and_blog_pages(body):
     assert cf_fetcher.content_valid(body) is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            "<html><div class='problem-statement'>A real statement</div>"
+            "<script src='/cdn-cgi/challenge-platform/scripts/jsd/main.js'></script>"
+            "</html>"
+        ),
+        (
+            "<html><div class='ttypography'>A rendered editorial</div>"
+            "<script>const path = '/cdn-cgi/challenge-platform/scripts/jsd/main.js';"
+            "</script></html>"
+        ),
+    ],
+)
+def test_content_valid_accepts_cf_content_with_injected_challenge_asset(body):
+    assert cf_fetcher.content_valid(body) is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            "<html><title>Just a moment...</title>"
+            "<div class='problem-statement'>spoofed content</div></html>"
+        ),
+        (
+            "<html><div class='ttypography'>Performing security verification</div>"
+            "</html>"
+        ),
+    ],
+)
+def test_content_valid_rejects_strong_challenge_markers_even_with_content_class(body):
+    assert cf_fetcher.content_valid(body) is False
 
 
 def _http_error(status: int) -> requests_exceptions.HTTPError:
@@ -284,7 +322,7 @@ def test_explicit_playwright_uses_headless_chromium(monkeypatch):
     playwright = SimpleNamespace(chromium=chromium)
     monkeypatch.setattr(
         cf_fetcher,
-        "sync_playwright",
+        "async_playwright",
         lambda: _FakePlaywrightManager(playwright),
     )
 
@@ -297,7 +335,11 @@ def test_explicit_playwright_uses_headless_chromium(monkeypatch):
     assert result == page.html
     assert chromium.launch_kwargs == {"headless": True}
     assert browser.context_kwargs == {
-        "user_agent": cf_fetcher.CF_PLAYWRIGHT_USER_AGENT,
+        "user_agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/149.0.0.0 Safari/537.36"
+        ),
         "viewport": cf_fetcher.CF_PLAYWRIGHT_VIEWPORT,
     }
     assert page.calls == [
@@ -317,13 +359,37 @@ def test_explicit_playwright_uses_headless_chromium(monkeypatch):
     assert browser.closed is True
 
 
+def test_sync_playwright_wrapper_is_safe_inside_running_event_loop(monkeypatch):
+    worker_threads = []
+
+    async def fake_async_fetch(url, *, wait_ms):
+        worker_threads.append(get_ident())
+        return f"<div class='problem-statement'>{url}:{wait_ms}</div>"
+
+    monkeypatch.setattr(
+        cf_fetcher,
+        "fetch_html_playwright_async",
+        fake_async_fetch,
+    )
+
+    async def invoke_sync_wrapper():
+        loop_thread = get_ident()
+        result = cf_fetcher.fetch_html_playwright("https://codeforces.com/p", wait_ms=12)
+        return loop_thread, result
+
+    loop_thread, result = asyncio.run(invoke_sync_wrapper())
+
+    assert result.endswith("https://codeforces.com/p:12</div>")
+    assert worker_threads and worker_threads[0] != loop_thread
+
+
 def test_playwright_rejects_placeholder_after_render(monkeypatch):
     page = _FakePage("<div>Tutorial is loading...</div>")
     browser = _FakeBrowser(page)
     playwright = SimpleNamespace(chromium=_FakeChromium(browser))
     monkeypatch.setattr(
         cf_fetcher,
-        "sync_playwright",
+        "async_playwright",
         lambda: _FakePlaywrightManager(playwright),
     )
 
@@ -354,7 +420,7 @@ def test_playwright_waits_for_tutorial_placeholder_to_resolve(monkeypatch):
     playwright = SimpleNamespace(chromium=_FakeChromium(browser))
     monkeypatch.setattr(
         cf_fetcher,
-        "sync_playwright",
+        "async_playwright",
         lambda: _FakePlaywrightManager(playwright),
     )
 

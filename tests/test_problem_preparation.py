@@ -14,6 +14,7 @@ from kouhai_bot.problem_preparation import (
     ProblemPreparationError,
     format_previous_problem_reveal,
 )
+from kouhai_bot.problem_summary import SummaryPreparationStatus
 
 
 def _state(pid: str = "542D") -> dict:
@@ -28,7 +29,7 @@ def _state(pid: str = "542D") -> dict:
     }
 
 
-def test_prepare_problem_starts_editorial_before_summary(tmp_path, monkeypatch):
+def test_prepare_problem_returns_complete_card_content(tmp_path, monkeypatch):
     cfg = SimpleNamespace(data_dir=str(tmp_path))
     statement_dir = tmp_path / "statements"
     statement_dir.mkdir()
@@ -40,8 +41,6 @@ def test_prepare_problem_starts_editorial_before_summary(tmp_path, monkeypatch):
         "samples": [{"input": "1", "output": "2"}],
         "images": [],
     }))
-    scheduled = []
-
     monkeypatch.setattr(problem_preparation, "get_config", lambda: cfg)
     monkeypatch.setattr(
         problem_preparation,
@@ -55,17 +54,11 @@ def test_prepare_problem_starts_editorial_before_summary(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         problem_preparation,
-        "schedule_prefetch_editorial",
-        scheduled.append,
-    )
-    monkeypatch.setattr(
-        problem_preparation,
         "build_notes_message",
         AsyncMock(return_value=""),
     )
 
     async def summarize(*_args, **_kwargs):
-        assert scheduled == ["542D"]
         return "中文题意", "『M』"
 
     monkeypatch.setattr(problem_preparation, "summarize_problem", summarize)
@@ -74,12 +67,17 @@ def test_prepare_problem_starts_editorial_before_summary(tmp_path, monkeypatch):
 
     assert prepared.pid == "542D"
     assert prepared.summary == "中文题意"
+    assert prepared.summary_status is SummaryPreparationStatus.READY
     assert prepared.model_tag == "『M』"
+    assert len(prepared.statement_sha256) == 64
     assert prepared.sample_messages == ("样例 1\nInput:\n1\n\nOutput:\n2",)
     assert (prepared.min_rating, prepared.max_rating) == (2500, 2700)
 
 
-def test_prepare_problem_keeps_empty_summary_after_existing_retry(tmp_path, monkeypatch):
+def test_prepare_problem_marks_summary_incomplete_after_existing_retry(
+    tmp_path,
+    monkeypatch,
+):
     cfg = SimpleNamespace(data_dir=str(tmp_path))
     statement_dir = tmp_path / "statements"
     statement_dir.mkdir()
@@ -101,12 +99,13 @@ def test_prepare_problem_keeps_empty_summary_after_existing_retry(tmp_path, monk
         "_run_picker",
         AsyncMock(return_value=_state()),
     )
-    monkeypatch.setattr(problem_preparation, "schedule_prefetch_editorial", lambda _pid: None)
     monkeypatch.setattr(problem_preparation, "summarize_problem", summarize)
 
     prepared = asyncio.run(problem_preparation.prepare_problem(1))
 
     assert prepared.summary == ""
+    assert prepared.summary_status is SummaryPreparationStatus.INCOMPLETE
+    assert prepared.model_tag == ""
     assert summarize.await_count == 2
 
 

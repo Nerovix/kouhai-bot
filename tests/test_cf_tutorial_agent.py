@@ -57,6 +57,104 @@ def test_extract_blog_links_prefers_tutorial_text():
     ]
 
 
+def test_collect_blog_documents_does_not_refetch_rejected_url():
+    problem_url = "https://codeforces.com/problemset/problem/1000/B"
+    rejected_url = "https://codeforces.com/blog/entry/2"
+    remaining_url = "https://codeforces.com/blog/entry/1"
+    pages = {
+        problem_url: _problem_page(),
+        remaining_url: _blog_page("<p>Remaining candidate body.</p>"),
+    }
+    fetched: list[str] = []
+
+    def fake_fetch(url, **_kwargs):
+        fetched.append(url)
+        if url == rejected_url:
+            raise AssertionError("rejected candidate must not be fetched again")
+        return pages[url]
+
+    with patch("cf_tutorial_agent.fetch_html", side_effect=fake_fetch), patch(
+        "cf_tutorial_agent.fetch_dynamic_editorial",
+        return_value=("", ""),
+    ):
+        _, _, blogs, incomplete = agent.collect_blog_documents(
+            pid="1000B",
+            fetcher="http",
+            pw_wait_ms=100,
+            blog_limit=2,
+            excluded_tutorial_urls=frozenset({rejected_url}),
+        )
+
+    assert fetched == [problem_url, remaining_url]
+    assert [blog.tutorial_url for blog in blogs] == [remaining_url]
+    assert incomplete == ()
+
+
+def test_collect_filters_rejected_urls_before_applying_candidate_limit():
+    problem_url = "https://codeforces.com/problemset/problem/1000/B"
+    rejected_urls = frozenset(
+        f"https://codeforces.com/blog/entry/{idx}" for idx in range(1, 4)
+    )
+    remaining_url = "https://codeforces.com/blog/entry/4"
+    problem_page = "".join(
+        f'<a href="/blog/entry/{idx}">Tutorial {idx}</a>'
+        for idx in range(1, 5)
+    )
+    fetched: list[str] = []
+
+    def fake_fetch(url, **_kwargs):
+        fetched.append(url)
+        if url == problem_url:
+            return problem_page
+        if url in rejected_urls:
+            raise AssertionError("rejected candidate must not consume the limit")
+        assert url == remaining_url
+        return _blog_page("<p>Remaining candidate body.</p>")
+
+    with patch("cf_tutorial_agent.fetch_html", side_effect=fake_fetch), patch(
+        "cf_tutorial_agent.fetch_dynamic_editorial",
+        return_value=("", ""),
+    ):
+        _, _, blogs, incomplete = agent.collect_blog_documents(
+            pid="1000B",
+            fetcher="http",
+            pw_wait_ms=100,
+            blog_limit=1,
+            excluded_tutorial_urls=rejected_urls,
+        )
+
+    assert fetched == [problem_url, remaining_url]
+    assert [blog.tutorial_url for blog in blogs] == [remaining_url]
+    assert incomplete == ()
+
+
+def test_collect_marks_bounded_candidate_search_incomplete():
+    problem_url = "https://codeforces.com/problemset/problem/1000/B"
+    pages = {
+        problem_url: _problem_page(),
+        "https://codeforces.com/blog/entry/2": _blog_page(
+            "<p>First candidate body.</p>"
+        ),
+    }
+
+    with patch(
+        "cf_tutorial_agent.fetch_html",
+        side_effect=lambda url, **_kwargs: pages[url],
+    ), patch(
+        "cf_tutorial_agent.fetch_dynamic_editorial",
+        return_value=("", ""),
+    ):
+        _, _, blogs, incomplete = agent.collect_blog_documents(
+            pid="1000B",
+            fetcher="http",
+            pw_wait_ms=100,
+            blog_limit=1,
+        )
+
+    assert len(blogs) == 1
+    assert incomplete == ("candidate_limit_reached",)
+
+
 def test_agent_extracts_editorial_from_full_blog_body(tmp_path):
     _write_statement(tmp_path)
     target_text = (
@@ -250,8 +348,14 @@ def test_agent_skips_placeholder_and_sends_only_valid_blog_to_llm(tmp_path):
 def test_agent_rejects_low_confidence_extraction(tmp_path):
     _write_statement(tmp_path)
     uncertain_text = ("Detailed but uncertain explanation with enough copied source text. " * 3) + "This is the unique final uncertain marker."
+    problem_page = """
+    <html><body>
+      <div class="title">B. Target Problem</div>
+      <a href="/blog/entry/2">Tutorial</a>
+    </body></html>
+    """
     pages = {
-        "https://codeforces.com/problemset/problem/1000/B": _problem_page(),
+        "https://codeforces.com/problemset/problem/1000/B": problem_page,
         "https://codeforces.com/blog/entry/2": _blog_page(f"<p>{uncertain_text}</p>"),
     }
 

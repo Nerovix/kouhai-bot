@@ -7,7 +7,6 @@ Usage:
 """
 
 import hashlib
-import html
 import json
 import os
 import random
@@ -18,10 +17,12 @@ from datetime import datetime, timezone, timedelta
 
 try:
     from . import cf_fetcher, fetcher as cf_statement
+    from .content import normalize_sample_block as _normalize_sample_block
 except ImportError:  # Support direct execution of this file.
     sys.path.insert(0, os.path.dirname(__file__))
     import cf_fetcher
     import fetcher as cf_statement
+    from content import normalize_sample_block as _normalize_sample_block
 
 import cloudscraper
 
@@ -235,27 +236,6 @@ def select_problem() -> dict:
 
 def _cache_path(pid: str) -> str:
     return os.path.join(CACHE_DIR, f"{pid}.json")
-
-
-def _normalize_sample_block(raw_html: str) -> str:
-    """Convert CF sample HTML block to plain text with newlines."""
-    text = raw_html or ""
-    # CF has two sample styles:
-    # - classic <br />
-    # - split lines wrapped by <div class="test-example-line ...">
-    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
-    text = re.sub(r"(?i)</div>\s*<div[^>]*>", "\n", text)
-    text = re.sub(r"(?i)<div[^>]*>", "", text)
-    text = re.sub(r"(?i)</div>", "\n", text)
-    text = re.sub(r"<[^>]+>", "", text)
-    text = html.unescape(text).replace("\r", "")
-    # Keep internal blank lines if any; trim only edges and trailing spaces.
-    lines = [line.rstrip() for line in text.split("\n")]
-    while lines and lines[0] == "":
-        lines.pop(0)
-    while lines and lines[-1] == "":
-        lines.pop()
-    return "\n".join(lines)
 
 
 def _normalize_samples(samples: list[dict]) -> tuple[list[dict], bool]:
@@ -509,23 +489,28 @@ def format_problem_for_qq(p: dict) -> str:
     return f"CF{contest_id}{index} — {name} (rating {rating})"
 
 
-def reveal() -> str:
-    """Reveal the previous problem."""
-    if not os.path.exists(_state_file()):
+def format_reveal(problem: object) -> str:
+    """Format one current-problem state as the previous-problem reveal."""
+    if not isinstance(problem, dict) or not problem:
         return "还没有发过题哦"
 
-    with open(_state_file()) as f:
-        state = json.load(f)
-
-    cf_id = state.get("today", "?")
-    name = state.get("name", "")
-    rating = state.get("rating", "")
+    cf_id = problem.get("today", "?")
+    name = problem.get("name", "")
+    rating = problem.get("rating", "")
     parts = [f"CF{cf_id}"]
     if name:
         parts.append(name)
     if rating:
         parts.append(f"{rating}")
     return f"上一道题来自 {' '.join(parts)}✨"
+
+
+def reveal() -> str:
+    """Reveal the previous problem."""
+    if not os.path.exists(_state_file()):
+        return format_reveal(None)
+    with open(_state_file()) as f:
+        return format_reveal(json.load(f))
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────

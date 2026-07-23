@@ -308,7 +308,12 @@ async def _post_new_problem_locked(
 
         if desc:
             try:
-                save_problem_summary(group_id, pid, desc)
+                save_problem_summary(
+                    group_id,
+                    pid,
+                    desc,
+                    source_sha256=prepared.statement_sha256,
+                )
             except Exception as exc:
                 # Summary persistence was best-effort in the original path;
                 # a cache write must not prevent an otherwise ready card.

@@ -22,7 +22,7 @@ from urllib.parse import urldefrag, urljoin
 from kouhai_bot.handlers.shared import parse_json_with_llm_repair
 from kouhai_bot.llm import chat_completion
 from kouhai_bot.problems.cf_fetcher import content_valid
-from kouhai_bot.tutorials import MIN_EDITORIAL_LEN, extract_editorial
+from kouhai_bot.editorial_content import MIN_EDITORIAL_LEN, extract_editorial
 
 from scrape_cf_tutorial import ScrapeError
 from scrape_cf_tutorial import Section
@@ -134,7 +134,7 @@ def statement_to_text(stmt: dict[str, Any], *, limit: int = 12000) -> str:
     return text
 
 
-def extract_blog_links(problem_html: str, base_url: str, *, limit: int) -> list[str]:
+def extract_blog_links(problem_html: str, base_url: str, *, limit: int = 0) -> list[str]:
     anchor_re = re.compile(
         r"<a[^>]+href\s*=\s*['\"](?P<href>[^'\"]+)['\"][^>]*>(?P<text>[\s\S]*?)</a>",
         re.I,
@@ -158,7 +158,10 @@ def extract_blog_links(problem_html: str, base_url: str, *, limit: int) -> list[
             score -= 20
         scored.append((-score, pos, url))
     scored.sort()
-    return [url for _, _, url in scored[: max(1, limit)]]
+    urls = [url for _, _, url in scored]
+    if limit > 0:
+        return urls[:limit]
+    return urls
 
 
 def _section_from_text(label: str, title: str, text: str) -> Section:
@@ -193,16 +196,31 @@ def collect_blog_documents(
     fetcher: str,
     pw_wait_ms: int,
     blog_limit: int,
+    excluded_tutorial_urls: frozenset[str] = frozenset(),
 ) -> tuple[str, str, list[BlogDocument], tuple[str, ...]]:
     problem_url = build_problem_url_from_pid(pid)
     problem_html = fetch_html(problem_url, fetcher=fetcher, pw_wait_ms=pw_wait_ms)
     problem_title = extract_problem_title(problem_html)
-    blog_urls = extract_blog_links(problem_html, problem_url, limit=blog_limit)
-    if not blog_urls:
+    all_blog_urls = extract_blog_links(problem_html, problem_url)
+    if not all_blog_urls:
         raise AgentNoMatch("problem_page_has_no_blog_entry_links")
+    remaining_blog_urls = [
+        url for url in all_blog_urls if url not in excluded_tutorial_urls
+    ]
+    if not remaining_blog_urls:
+        raise AgentNoMatch("all_blog_entry_links_excluded")
+
+    search_truncated = blog_limit > 0 and len(remaining_blog_urls) > blog_limit
+    blog_urls = (
+        remaining_blog_urls[:blog_limit]
+        if blog_limit > 0
+        else remaining_blog_urls
+    )
 
     blogs: list[BlogDocument] = []
-    incomplete_failures: list[str] = []
+    incomplete_failures: list[str] = (
+        ["candidate_limit_reached"] if search_truncated else []
+    )
     for idx, blog_url in enumerate(blog_urls, start=1):
         try:
             tutorial_html = fetch_html(blog_url, fetcher=fetcher, pw_wait_ms=pw_wait_ms)
@@ -425,6 +443,7 @@ async def run_agent_for_pid(
     selector_timeout_sec: int = DEFAULT_SELECTOR_TIMEOUT_SEC,
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
     llm_text_limit: int = DEFAULT_LLM_TEXT_LIMIT,
+    excluded_tutorial_urls: frozenset[str] = frozenset(),
 ) -> AgentResult:
     started = time.monotonic()
     stmt = load_statement(statements_dir / f"{pid}.json")
@@ -442,6 +461,7 @@ async def run_agent_for_pid(
             fetcher=fetcher,
             pw_wait_ms=pw_wait_ms,
             blog_limit=blog_limit,
+            excluded_tutorial_urls=excluded_tutorial_urls,
         )
         no_match_failures: list[str] = []
         incomplete_failures = list(collection_incomplete)

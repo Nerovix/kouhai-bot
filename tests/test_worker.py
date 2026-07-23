@@ -6,7 +6,7 @@ import asyncio
 import os
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -36,9 +36,23 @@ def test_worker_owns_next_problem_prefetch_lifecycle(monkeypatch):
         await stop_event.wait()
         calls.append("prefetch_stop")
 
+    async def run_editorial(
+        group_id,
+        *,
+        get_next_problem_pid,
+        stop_event,
+    ):
+        assert group_id == 123
+        assert await get_next_problem_pid() == "542D"
+        calls.append("editorial_start")
+        await stop_event.wait()
+        calls.append("editorial_stop")
+
     prefetcher = SimpleNamespace(
         run=run_prefetch,
+        peek_pid=AsyncMock(return_value="542D"),
         shutdown=AsyncMock(),
+        set_ready_observer=MagicMock(),
     )
 
     monkeypatch.setattr(
@@ -50,6 +64,11 @@ def test_worker_owns_next_problem_prefetch_lifecycle(monkeypatch):
     monkeypatch.setattr(worker, "bootstrap_runtime", lambda: calls.append("bootstrap"))
     monkeypatch.setattr(worker, "scheduler_loop", wait_for_stop)
     monkeypatch.setattr(worker, "doubt_friend_request_loop", wait_for_stop)
+    monkeypatch.setattr(
+        worker,
+        "editorial_prefetch_maintenance_loop",
+        run_editorial,
+    )
     monkeypatch.setattr(
         worker,
         "get_next_problem_prefetcher",
@@ -72,10 +91,16 @@ def test_worker_owns_next_problem_prefetch_lifecycle(monkeypatch):
         "bootstrap",
         "napcat_start",
         "prefetch_start",
+        "editorial_start",
         "napcat_stop",
         "prefetch_stop",
+        "editorial_stop",
     ]
     assert runtime._scheduler_stop.is_set()
     assert runtime._friend_request_stop.is_set()
     assert runtime._problem_prefetch_stop.is_set()
+    assert runtime._editorial_prefetch_stop.is_set()
     prefetcher.shutdown.assert_awaited_once()
+    prefetcher.set_ready_observer.assert_called_once_with(
+        worker.ensure_editorial_prefetch,
+    )

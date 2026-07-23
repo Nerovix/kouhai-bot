@@ -54,9 +54,9 @@ NapCat (QQ) ──WS──> worker.py
 - **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before image metadata via `_images_collected`. Stale caches with images are re-fetched so image metadata is available for multimodal tasks.
 - **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
 - **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection,
-  dispatches commands, and owns the scheduler and next-problem prefetch loop in one
-  process. There is no SQLite event queue, ingress supervisor, worker hot-swap, or
-  auto-update loop.
+  dispatches commands, and owns the scheduler, next-problem prefetch loop, and
+  current/next editorial maintenance loop in one process. There is no SQLite event
+  queue, ingress supervisor, worker hot-swap, or auto-update loop.
 - **Next-problem prefetch**: `problem_preparation.py` contains the complete blocking
   group-problem preparation pipeline (pick/fetch, samples, translated notes, audited
   summary), while `problem_prefetch.py` maintains one durable READY slot per group in
@@ -64,15 +64,22 @@ NapCat (QQ) ──WS──> worker.py
   normally only builds/sends the QQ card; if startup preparation is still cold it awaits
   the same single-flight task. A claim prevents refill until publication finishes, then
   release wakes the worker loop. READY-slot validation covers rating-range changes,
-  current/solved problems, statement presence, and multimodal availability. Background
-  preparation is not reported by `/status`; only an admitted post is. While a slot is
-  READY, the worker also idempotently maintains its full official-editorial prefetch:
+  current/solved problems, statement presence and fingerprint, and multimodal
+  availability. Summary generation is a side-effect-free complete action: only a
+  semantically audited result is stored; after the existing two failed attempts the
+  availability fallback is explicitly stored as `summary_status=incomplete` and the
+  problem can still be posted without a summary. Background preparation is not reported
+  by `/status`; only an admitted post is. A newly READY slot notifies the worker's
+  orchestration hook immediately, and the worker also idempotently maintains full
+  official-editorial prefetch for both current and READY problems:
   persisted slots resume crawler + translation work after restart, in-flight work is
   deduplicated by pid, and verified/no-editorial terminal states stop retries. Cancellation,
   deadline exhaustion, scraper/LLM errors, and other incomplete attempts do not write a
-  terminal marker, so startup or the next maintenance pass retries them; only a completed
-  search with no match or an explicit final mismatch may write the versioned
-  `no_editorial` marker with a reason. Legacy zero-byte markers are untrusted and retried.
+  terminal marker, so startup or the next maintenance pass retries them. Only a completed,
+  exhaustive search of all non-rejected candidates may write the versioned
+  `no_editorial` marker with a reason. READY and no-editorial markers are both bound to
+  the statement fingerprint; the READY marker is also bound to the persisted editorial
+  fingerprint. Legacy markers are untrusted and retried.
   This editorial maintenance never blocks a `/newproblem` claim. `/setproblem` and
   `/setproblem random` intentionally keep their live-fetch behavior and never use this
   slot.
@@ -111,15 +118,22 @@ NapCat (QQ) ──WS──> worker.py
   whose omission would make a definition ambiguous (for example, an isolated vertex also
   counting as having only incoming edges). A failed gate or audit triggers one targeted
   repair followed by another audit; indeterminate or repeatedly failing audits reject the
-  summary so the caller can retry instead of posting it.
+  summary so the caller can retry instead of posting it. `problem_summary.py` owns the
+  side-effect-free preparation result; `problem_summaries.json` accepts only a verified
+  result bound to the current statement fingerprint, so stale/legacy cache entries are
+  not used as trusted summaries.
 - **Official CF tutorials**: Scraped editorials live under `{data_dir}/tutorials/{pid}.json`
   (see `tools/cf_tutorial_agent.py`; low-level CF HTML helpers live in
-  `tools/scrape_cf_tutorial.py`). Runtime extraction is in `tutorials.py`. During
-  **next-problem preparation**, `schedule_prefetch_editorial(pid)` starts background
-  translation (using the `llm.general_model` queue) into `tutorial_translations/` so
-  first AC can deliver without waiting. Editorial completion does not gate the
-  next-problem READY slot. Publication reasserts the same trigger so a READY slot that
-  survived a worker restart also resumes any interrupted crawl. On **first AC**,
+  `tools/scrape_cf_tutorial.py`). `editorial_content.py` contains only normalized
+  editorial models and extraction rules, so the scraper and runtime action share parsing
+  without importing each other. `editorial_preparation.py` owns the complete
+  side-effect-free runtime action: discover candidates, validate them against the
+  statement, and translate the first verified match. Candidate bundles are never
+  persisted. `tutorials.py` is the persistence/read boundary and commits source,
+  translation, then the source-bound verified marker last. Editorial completion does
+  not gate the next-problem READY slot. The worker starts editorial work from the READY
+  notification and continuously retries incomplete current/next work; publication
+  reasserts the same trigger. On **first AC**,
   congrats is sent in `_finalize_submit`, then
   `schedule_post_solve_editorial_followup()` only **delivers** (awaits in-flight prefetch if
   needed). Neither path uses the state scheduler. Tutorial scraping depends on Playwright
@@ -395,8 +409,8 @@ An empty `model_tag` disables the feature per-provider.
 groups/<gid>/state.json      # today's problem (+ posted_at unix ts when card was delivered)
 groups/<gid>/scoreboard.json # cumulative {solves, user_submissions}
 groups/<gid>/daily_msg.json  # forward card payload (msg_id/sample_msg_ids/note_msg_id/snake_msg_id 等, for /problem)
-groups/<gid>/next_problem.json # durable READY prefetch slot; atomically claimed by /newproblem
-groups/<gid>/problem_summaries.json # saved Chinese problem summaries keyed by pid
+groups/<gid>/next_problem.json # source-bound durable READY slot; atomically claimed by /newproblem
+groups/<gid>/problem_summaries.json # verified, source-bound Chinese summaries keyed by pid
 groups/<gid>/used.json       # used problem IDs
 groups/<gid>/groupctx_*.json # group message context
 groups/<gid>/problem_ratings.json # cached problem rating by pid for weighted scoreboard totals
@@ -404,8 +418,10 @@ private_judge/users/<uid>.json # per-user private judge current problem, history
 annotations/pending/<gid>/<pid>.json # pending human-label bundle for solved problems
 annotations/labeled/<gid>/<pid>.json # completed human-label bundle for solved problems
 statements/<pid>.json        # cached problem statements
-tutorials/<pid>.json         # scraped CF editorials (hint/solution/raw_text/code_blocks)
+tutorials/<pid>.json         # verified CF editorial source (never an unverified candidate)
 tutorial_translations/<pid>.txt  # cached Chinese editorial for group cards (per pid)
+tutorial_translations/<pid>.verified # statement+editorial-bound READY marker
+tutorial_translations/<pid>.no_editorial # exhaustive source-bound no-match marker
 sessions/                    # per-user session context
 scheduler_config.json        # job config for CURRENT_GROUP
 ```
@@ -701,14 +717,18 @@ newer AC can silently retarget an older review request.
   (shared cooldown + per-group post lock).
 - Plain `/problem` (or `/pb`) still resends the current problem card.
 
-`/newproblem` uses a per-group post lock. If another `/newproblem` is already preparing a card, the user gets a short "新的题目正在准备中，别急～" reply and the request is not queued. Otherwise the command holds the lock while checking cooldown, checking whether plain `/newproblem` is allowed, and building/sending the card. Cooldown starts only after a new problem card is successfully delivered and committed. The locked implementation:
-1. Reveal yesterday's problem via `picker.py reveal`
-2. Pick a candidate problem via `picker.py pick-json --with-statement`; this marks used
-   problems and caches statements but does **not** write `state.json`
-3. Generate Chinese summary via `summarize_problem()` → `llm.general_model` queue,
-   timeout from `llm.summary_timeout_sec`; after the local format/limit/symbol-scope gate,
-   run the general-model semantic double-check. A mismatch is repaired from structured
-   issues and checked again before the summary can be posted.
+`/newproblem` uses a per-group post lock. If another `/newproblem` is already preparing a card, the user gets a short "新的题目正在准备中，别急～" reply and the request is not queued. Otherwise the command holds the lock while checking cooldown, checking whether plain `/newproblem` is allowed, and claiming/sending the card. Cooldown starts only after a new problem card is successfully delivered and committed. The implementation:
+1. The worker maintains one source-bound `next_problem.json` READY slot. Its complete
+   preparation action runs `picker.py pick-json --with-statement`, builds samples and
+   translated notes, and calls the summary action. The picker marks candidates used and
+   caches statements but does **not** write `state.json`.
+2. The summary action calls `summarize_problem()` through `llm.general_model`, using
+   `llm.summary_timeout_sec`; after the local format/limit/symbol-scope gate it runs the
+   general-model semantic double-check. A mismatch is repaired from structured issues
+   and checked again before the action can return READY. If both outer attempts remain
+   incomplete, the established no-summary publication fallback is retained explicitly.
+3. `/newproblem` claims the READY slot (or awaits that same single-flight preparation on
+   a cold start) and formats the previous-problem reveal from current state.
 4. Self-send summary text; self-send each sample as an independent node; if statement has
    `notes`, translate it to Chinese and append a dedicated `样例解释` node (with LaTeX/Markdown
    artifacts normalized to readable symbols such as `→`, `≤`, `<`, `>`); then append snake
@@ -718,8 +738,11 @@ newer AC can silently retarget an older review request.
    counts as successful delivery and must save `daily_msg.json` with `pid`, `post_msg`,
    `sample_messages`, `notes_message`, and `snake_enabled` so `/problem` can rebuild a
    card later. If delivery fails completely, keep the old current problem.
-6. Save the Chinese summary to `problem_summaries.json` keyed by pid for later reuse
-7. `schedule_prefetch_editorial(pid)` — background editorial translation (not sent yet)
+6. Save a successful Chinese summary to `problem_summaries.json` with its statement
+   fingerprint for later verified reuse.
+7. Release the claimed slot and wake background refill. The worker's READY observer and
+   periodic current/next maintenance own editorial preparation; publication only
+   idempotently reasserts that trigger.
 
 `/newproblem` uses a per-group post lock so two new posts
 do not overlap. They no longer block `/submit`, `/clarify`, or `/review`; those commands
@@ -747,14 +770,14 @@ KOUHAI_CONFIG=/path/to/config.yaml uv run python tools/tutorial_tools.py agent \
 uv run python tools/tutorial_tools.py validate --heuristic-only
 ```
 
-**Runtime** (`src/kouhai_bot/tutorials.py`):
+**Runtime** (`editorial_preparation.py` + `tutorials.py`):
 
 | Function | Purpose |
 |----------|---------|
-| `get_official_editorial(pid)` | Load JSON, extract body (priority: non-placeholder `solution` → `hint` → cleaned `raw_text`; append `code_blocks` for review source only) |
-| `prefetch_editorial_zh(pid)` | Background translate on new problem; `{pid}.no_editorial` if none |
-| `get_editorial_zh_for_group(editorial, pid)` | Disk cache or `translate_editorial_to_zh()` |
-| `has_cached_editorial_zh(pid)` / `is_no_official_editorial(pid)` | Fast paths for delivery |
+| `prepare_editorial(pid)` | Side-effect-free exhaustive search + validation + translation; returns READY / EXHAUSTIVE_NO_MATCH / INCOMPLETE |
+| `prefetch_editorial_zh(pid)` | Commit only a complete result; source → translation → verified marker, or exhaustive no-match marker |
+| `get_verified_official_editorial(pid)` | Return English source only when translation marker matches both editorial and statement fingerprints |
+| `has_cached_editorial_zh(pid)` / `is_no_official_editorial(pid)` | Source-bound terminal checks |
 | `format_editorial_for_review(editorial)` | English block for `/review` LLM user message |
 
 **Group card translation** (`handlers/shared.py:translate_editorial_to_zh`):
@@ -766,20 +789,24 @@ uv run python tools/tutorial_tools.py validate --heuristic-only
 - QQ plain text, no Markdown fences in output
 - Re-translate after prompt changes: delete `tutorial_translations/{pid}.txt`
 
-**Prefetch** (on new problem + active-worker startup):
+**Prefetch** (worker-owned current + next maintenance):
 
-- `/newproblem` calls `schedule_prefetch_editorial(pid)` **immediately after pick** (in parallel
-  with `summarize_problem`, not after it — otherwise first AC waits for summary+translation)
-- `worker.py` bootstraps `schedule_prefetch_for_current_group()` on startup (covers worker restart without new post)
-- Background `prefetch_editorial_zh(pid)` → `tutorial_translations/{pid}.txt` or `{pid}.no_editorial`
+- A newly persisted READY problem invokes the generic READY observer, so worker
+  orchestration starts its editorial immediately without coupling problem preparation
+  to tutorial code.
+- `editorial_prefetch_maintenance_loop()` continuously covers both `state.json.today`
+  and the READY slot; this resumes interrupted work and retries INCOMPLETE results.
+- Background `prefetch_editorial_zh(pid)` writes no candidate or transient-failure
+  marker. It commits only verified source+translation or an exhaustive no-match result.
+- `/newproblem` publication idempotently reasserts the current pid trigger.
 - Runs outside the state scheduler (parallel with submit/review/clarify)
 
 **Delivery** (on first AC, `editorial_followup.py`):
 
 - `schedule_post_solve_editorial_followup()` → if cache warm, deliver immediately (no prefetch wait)
-- Otherwise await in-flight prefetch, then deliver; cache miss logs and translates (~30s)
+- Otherwise await an already in-flight prefetch, then deliver only if it became verified
 - Has cached zh: self-send chunk(s) → `send_group_forward_msg` (low latency)
-- No editorial: silent skip (no group message)
+- No editorial or still incomplete: silent skip (no group message)
 - **Not** part of `GroupCoordinator`; do not `await` inside `_finalize_submit`
 
 ## Annotation Tooling
@@ -791,8 +818,8 @@ Solved problems are exported for human labeling:
 - Exported bundles live under `~/.kouhai-bot/annotations/pending/`
 - Bundles include the statement snapshot, per-round `/submit` verdict data, the exact
   `history_before` seen by the judge, and mutable `human_label` fields
-- If a saved Chinese summary exists in `problem_summaries.json`, annotation export
-  reuses it directly instead of re-translating
+- If a source-bound verified Chinese summary exists in `problem_summaries.json`,
+  annotation export reuses it directly instead of re-translating
 
 Local HTML labeling UI:
 
@@ -942,8 +969,9 @@ Per-user submission history is intentionally unbounded. Records with a `request_
 update the matching existing record in place; records without one append normally.
 
 ### 11. Save Chinese summaries by pid if you need later reuse
-The summary shown in the group post is now persisted in `groups/<gid>/problem_summaries.json`.
-Annotation export and the HTML labeling UI reuse this first before attempting any new
+An audited summary shown in the group post is persisted in
+`groups/<gid>/problem_summaries.json` with its statement fingerprint. Annotation export
+and the HTML labeling UI reuse only a matching verified entry before attempting any new
 translation. Do not force synchronous translation on detail-page clicks.
 
 ### 12. `/newproblem` uses merged-forward
@@ -1111,8 +1139,8 @@ uv run python -m kouhai_bot.worker
 ```
 
 The worker starts the WS server, discovers commands, registers scheduler jobs,
-prefetches the current group's tutorial if needed, and runs the scheduler. No
-external cron or process manager needed.
+maintains one READY next problem plus current/next editorial preparation, and runs the
+scheduler. No external cron or process manager needed.
 
 For an already-managed local instance, prefer:
 

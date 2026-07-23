@@ -14,18 +14,17 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from .config import get_config
-from .editorial_followup import ensure_editorial_prefetch
 from .handlers.shared import get_today_problem, load_scoreboard, statement_images
+from .problem_content import load_statement_json, statement_fingerprint
 from .problem_preparation import (
     PreparedProblem,
     effective_rating_range,
-    load_statement_json,
     prepare_problem,
 )
 
 logger = logging.getLogger("kouhai-bot.problem_prefetch")
 
-SLOT_FORMAT_VERSION = 1
+SLOT_FORMAT_VERSION = 2
 DEFAULT_RETRY_INTERVAL_SEC = 60.0
 
 
@@ -79,6 +78,26 @@ class NextProblemPrefetcher:
         self._build_task: asyncio.Task[PrefetchedProblem] | None = None
         self._ready_slot: PrefetchedProblem | None = None
         self._claimed_slot_id: str | None = None
+        self._ready_observer: Callable[[str], None] | None = None
+
+    def set_ready_observer(self, observer: Callable[[str], None] | None) -> None:
+        """Register a non-blocking orchestration hook for newly READY slots."""
+        self._ready_observer = observer
+
+    def _notify_ready(self, pid: str) -> None:
+        observer = self._ready_observer
+        if observer is None:
+            return
+        try:
+            observer(pid)
+        except Exception as exc:
+            logger.warning(
+                "[group_%s] next-problem READY observer failed for %s: %s",
+                self.group_id,
+                pid,
+                exc,
+                exc_info=True,
+            )
 
     @property
     def slot_path(self) -> Path:
@@ -143,9 +162,16 @@ class NextProblemPrefetcher:
         ):
             return False, "already_solved"
 
-        statement = load_statement_json(self.group_id, pid)
+        statement = load_statement_json(
+            pid,
+            data_dir=get_config().data_dir,
+            include_legacy_fallback=True,
+            log_context=f"group_{self.group_id}",
+        )
         if not statement:
             return False, "statement_missing"
+        if statement_fingerprint(statement) != prepared.statement_sha256:
+            return False, "statement_changed"
         if statement_images(statement) and not get_config().llm_multimodal_providers:
             return False, "multimodal_unavailable"
         return True, ""
@@ -228,6 +254,7 @@ class NextProblemPrefetcher:
             prepared.pid,
             asyncio.get_running_loop().time() - started,
         )
+        self._notify_ready(prepared.pid)
         return slot
 
     def _ensure_build_task_locked(self) -> asyncio.Task[PrefetchedProblem]:
@@ -254,6 +281,10 @@ class NextProblemPrefetcher:
     async def peek(self) -> PrefetchedProblem | None:
         async with self._lock:
             return self._load_slot_locked()
+
+    async def peek_pid(self) -> str:
+        slot = await self.peek()
+        return slot.problem.pid if slot is not None else ""
 
     async def claim(self) -> PrefetchedProblem:
         """Claim READY, waiting for the shared build task on a cold path."""
@@ -301,13 +332,6 @@ class NextProblemPrefetcher:
             # group state or rating overrides may have changed during a slow build.
             await asyncio.shield(task)
 
-    def _maintain_editorial_prefetch(self, slot: PrefetchedProblem) -> None:
-        # This is deliberately fire-and-forget: editorial readiness must not
-        # become part of the /newproblem claim latency.  Repeated calls are
-        # idempotent and let a rehydrated READY slot restart work interrupted
-        # by a process exit.
-        ensure_editorial_prefetch(slot.problem.pid)
-
     async def _wait_for_wake_or_stop(self, stop_event: asyncio.Event) -> None:
         wake_task = asyncio.create_task(self._wake.wait())
         stop_task = asyncio.create_task(stop_event.wait())
@@ -333,9 +357,7 @@ class NextProblemPrefetcher:
                 async with self._lock:
                     self._wake.clear()
                 try:
-                    slot = await self._ensure_ready()
-                    if slot is not None:
-                        self._maintain_editorial_prefetch(slot)
+                    await self._ensure_ready()
                 except asyncio.CancelledError:
                     if stop_event.is_set():
                         break

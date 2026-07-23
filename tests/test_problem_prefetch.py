@@ -8,14 +8,23 @@ from unittest.mock import AsyncMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kouhai_bot import problem_prefetch
+from kouhai_bot.problem_content import statement_fingerprint
 from kouhai_bot.problem_prefetch import NextProblemPrefetcher
 from kouhai_bot.problem_preparation import PreparedProblem
+from kouhai_bot.problem_summary import SummaryPreparationStatus
 
 
 GROUP_ID = 123
 
 
-def _prepared(pid: str = "542D", *, min_rating: int = 2000, max_rating: int = 3000):
+def _prepared(
+    pid: str = "542D",
+    *,
+    min_rating: int = 2000,
+    max_rating: int = 3000,
+    statement: dict | None = None,
+):
+    source = statement or {"description": "statement", "images": []}
     return PreparedProblem(
         state={
             "today": pid,
@@ -27,7 +36,9 @@ def _prepared(pid: str = "542D", *, min_rating: int = 2000, max_rating: int = 30
             "date": "2026-01-01",
         },
         summary="中文题意",
+        summary_status=SummaryPreparationStatus.READY,
         model_tag="『M』",
+        statement_sha256=statement_fingerprint(source),
         sample_messages=("样例",),
         notes_message="解释",
         min_rating=min_rating,
@@ -62,12 +73,7 @@ def _configure(tmp_path, monkeypatch, rating=(2000, 3000)):
     monkeypatch.setattr(
         problem_prefetch,
         "load_statement_json",
-        lambda _group_id, _pid: {"description": "statement", "images": []},
-    )
-    monkeypatch.setattr(
-        problem_prefetch,
-        "ensure_editorial_prefetch",
-        lambda *_args, **_kwargs: None,
+        lambda _pid, **_kwargs: {"description": "statement", "images": []},
     )
     return cfg
 
@@ -106,6 +112,26 @@ def test_maintenance_and_cold_claim_share_one_build(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_ready_observer_is_notified_after_complete_slot_is_stored(
+    tmp_path,
+    monkeypatch,
+):
+    _configure(tmp_path, monkeypatch)
+    observed: list[str] = []
+
+    async def run():
+        prefetcher = NextProblemPrefetcher(
+            GROUP_ID,
+            prepare=AsyncMock(return_value=_prepared()),
+        )
+        prefetcher.set_ready_observer(observed.append)
+        slot = await prefetcher._ensure_ready()
+        assert slot is not None
+
+    asyncio.run(run())
+    assert observed == ["542D"]
+
+
 def test_ready_slot_survives_coordinator_recreation(tmp_path, monkeypatch):
     _configure(tmp_path, monkeypatch)
     prepare = AsyncMock(return_value=_prepared())
@@ -126,72 +152,6 @@ def test_ready_slot_survives_coordinator_recreation(tmp_path, monkeypatch):
 
     asyncio.run(run())
     assert prepare.await_count == 1
-
-
-def test_rehydrated_slot_restarts_full_editorial_prefetch(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch)
-    scheduled: list[str] = []
-    resumed = asyncio.Event()
-
-    def ensure(pid):
-        scheduled.append(pid)
-        resumed.set()
-
-    monkeypatch.setattr(problem_prefetch, "ensure_editorial_prefetch", ensure)
-
-    async def run():
-        first = NextProblemPrefetcher(
-            GROUP_ID,
-            prepare=AsyncMock(return_value=_prepared()),
-        )
-        assert await first._ensure_ready() is not None
-
-        second = NextProblemPrefetcher(
-            GROUP_ID,
-            prepare=AsyncMock(side_effect=AssertionError("must reuse disk slot")),
-        )
-        stop = asyncio.Event()
-        runner = asyncio.create_task(second.run(stop_event=stop))
-        await asyncio.wait_for(resumed.wait(), timeout=1)
-        stop.set()
-        await runner
-
-    asyncio.run(run())
-    assert scheduled == ["542D"]
-
-
-def test_ready_slot_retries_unsettled_editorial_maintenance(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch)
-    calls: list[str] = []
-    retried = asyncio.Event()
-
-    def ensure(pid):
-        calls.append(pid)
-        if len(calls) >= 2:
-            retried.set()
-
-    monkeypatch.setattr(problem_prefetch, "ensure_editorial_prefetch", ensure)
-
-    async def run():
-        first = NextProblemPrefetcher(
-            GROUP_ID,
-            prepare=AsyncMock(return_value=_prepared()),
-        )
-        assert await first._ensure_ready() is not None
-
-        restored = NextProblemPrefetcher(
-            GROUP_ID,
-            prepare=AsyncMock(side_effect=AssertionError("must reuse disk slot")),
-            retry_interval_sec=0.01,
-        )
-        stop = asyncio.Event()
-        runner = asyncio.create_task(restored.run(stop_event=stop))
-        await asyncio.wait_for(retried.wait(), timeout=1)
-        stop.set()
-        await runner
-
-    asyncio.run(run())
-    assert calls[:2] == ["542D", "542D"]
 
 
 def test_claim_blocks_refill_until_release(tmp_path, monkeypatch):
@@ -296,23 +256,48 @@ def test_rating_change_invalidates_persisted_slot(tmp_path, monkeypatch):
 def test_multimodal_config_change_invalidates_image_slot(tmp_path, monkeypatch):
     cfg = _configure(tmp_path, monkeypatch)
     cfg.llm_multimodal_providers = [object()]
+    image_statement = {
+        "description": "statement",
+        "images": [{"src": "https://example.invalid/diagram.png"}],
+    }
     monkeypatch.setattr(
         problem_prefetch,
         "load_statement_json",
-        lambda _group_id, _pid: {
-            "description": "statement",
-            "images": [{"src": "https://example.invalid/diagram.png"}],
-        },
+        lambda _pid, **_kwargs: image_statement,
     )
 
     async def run():
         first = NextProblemPrefetcher(
             GROUP_ID,
-            prepare=AsyncMock(return_value=_prepared()),
+            prepare=AsyncMock(return_value=_prepared(statement=image_statement)),
         )
         assert await first._ensure_ready() is not None
         cfg.llm_multimodal_providers = []
 
+        second = NextProblemPrefetcher(GROUP_ID)
+        assert await second.peek() is None
+        assert not second.slot_path.exists()
+
+    asyncio.run(run())
+
+
+def test_statement_change_invalidates_persisted_slot(tmp_path, monkeypatch):
+    _configure(tmp_path, monkeypatch)
+    statement = {"description": "original statement", "images": []}
+    monkeypatch.setattr(
+        problem_prefetch,
+        "load_statement_json",
+        lambda _pid, **_kwargs: statement,
+    )
+
+    async def run():
+        first = NextProblemPrefetcher(
+            GROUP_ID,
+            prepare=AsyncMock(return_value=_prepared(statement=statement)),
+        )
+        assert await first._ensure_ready() is not None
+
+        statement["description"] = "changed statement"
         second = NextProblemPrefetcher(GROUP_ID)
         assert await second.peek() is None
         assert not second.slot_path.exists()

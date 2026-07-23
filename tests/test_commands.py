@@ -118,6 +118,23 @@ def _write_group_file(group_id: int, filename: str, data: dict):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def _verified_summary_record(pid: str, summary: str) -> dict:
+    from kouhai_bot.handlers.shared import PROBLEM_SUMMARY_FORMAT_VERSION
+    from kouhai_bot.problem_content import statement_fingerprint
+
+    with open(
+        os.path.join(_data_dir(), "statements", f"{pid}.json"),
+        encoding="utf-8",
+    ) as f:
+        source_sha256 = statement_fingerprint(json.load(f))
+    return {
+        "format_version": PROBLEM_SUMMARY_FORMAT_VERSION,
+        "status": "verified",
+        "source_sha256": source_sha256,
+        "summary_zh": summary,
+    }
+
+
 def _write_problem_ratings(group_id: int, data: dict):
     _write_group_file(group_id, "problem_ratings.json", data)
 
@@ -134,12 +151,39 @@ def _write_tutorial(pid: str, data: dict):
 
 
 def _write_editorial_translation(pid: str, text: str = "已验证中文题解。"):
+    from kouhai_bot.tutorials import (
+        VERIFIED_EDITORIAL_MARKER_VERSION,
+        _editorial_fingerprint,
+        get_official_editorial,
+    )
+    from kouhai_bot.problem_content import statement_fingerprint
+
     d = os.path.join(_data_dir(), "tutorial_translations")
     os.makedirs(d, exist_ok=True)
     with open(os.path.join(d, f"{pid}.txt"), "w", encoding="utf-8") as f:
         f.write(text * 20)
-    with open(os.path.join(d, f"{pid}.verified"), "w", encoding="utf-8"):
-        pass
+    with patch(
+        "kouhai_bot.tutorials.get_config",
+        return_value=SimpleNamespace(data_dir=_data_dir()),
+    ):
+        editorial = get_official_editorial(pid)
+        assert editorial is not None
+        fingerprint = _editorial_fingerprint(editorial)
+    with open(
+        os.path.join(_data_dir(), "statements", f"{pid}.json"),
+        encoding="utf-8",
+    ) as f:
+        problem_fingerprint = statement_fingerprint(json.load(f))
+    with open(os.path.join(d, f"{pid}.verified"), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "format_version": VERIFIED_EDITORIAL_MARKER_VERSION,
+                "status": "verified",
+                "source_sha256": fingerprint,
+                "statement_sha256": problem_fingerprint,
+            },
+            f,
+        )
 
 
 def _fake_problem_prefetcher(
@@ -150,11 +194,18 @@ def _fake_problem_prefetcher(
     sample_messages: tuple[str, ...] = (),
     notes_message: str = "",
 ):
+    from kouhai_bot.problem_content import statement_fingerprint
+
+    pid = str(state.get("today", "") or "")
+    statement_path = os.path.join(_data_dir(), "statements", f"{pid}.json")
+    with open(statement_path, encoding="utf-8") as f:
+        source_sha256 = statement_fingerprint(json.load(f))
     prepared = SimpleNamespace(
         state=dict(state),
-        pid=str(state.get("today", "") or ""),
+        pid=pid,
         summary=summary,
         model_tag=model_tag,
+        statement_sha256=source_sha256,
         sample_messages=sample_messages,
         notes_message=notes_message,
     )
@@ -600,6 +651,7 @@ def test_submit_correct():
             "raw_text": editorial_body,
         }],
     })
+    _write_editorial_translation(PID, "官方题解中文翻译。")
     global _deepseek_response
     _deepseek_response = {"correct": True, "reason": "Correct divisor sum", "reply": ""}
 
@@ -629,7 +681,7 @@ def test_submit_correct():
 
     asyncio.run(_run_submit())
 
-    assert len(_second_judge_calls) == 0
+    assert len(_second_judge_calls) == 1
     assert _has_sent("恭喜") or _has_sent("通过") or _has_sent("solved"), \
         f"No congrats. Messages: {[_last_text()]}"
     assert _forwarded, f"Expected official tutorial forward, got: {_forwarded}"
@@ -1302,6 +1354,7 @@ def test_review_includes_editorial_in_llm_payload():
             "raw_text": editorial_body,
         }],
     })
+    _write_editorial_translation(PID)
     _write_scoreboard(GID, {
         "solves": [{
             "user_id": UID,
@@ -1326,6 +1379,48 @@ def test_review_includes_editorial_in_llm_payload():
     assert editorial_body[:40] in user_content
     _cleanup()
     print("✅ review: includes official editorial in LLM payload")
+
+
+def test_review_excludes_unverified_editorial_candidate():
+    _reset_state()
+    _setup_problem()
+    dirty_body = "known-wrong-editorial-" * 10
+    _write_tutorial(PID, {
+        "problem_id": PID,
+        "tutorial_url": "https://codeforces.com/blog/entry/wrong",
+        "tutorial_title": "Unverified",
+        "sections": [{
+            "label": "D",
+            "title": "Another Problem",
+            "hint": "",
+            "solution": dirty_body,
+            "code_blocks": [],
+            "raw_text": dirty_body,
+        }],
+    })
+    _write_scoreboard(GID, {
+        "solves": [{
+            "user_id": UID,
+            "nickname": "Alice",
+            "date": "2026-05-13",
+            "problem": PID,
+            "order": 1,
+        }],
+        "user_submissions": {},
+    })
+    global _deepseek_response
+    _deepseek_response = "只根据题面和用户记录复盘。"
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.review import handle
+        asyncio.run(handle(**_kwargs(_make_event("/review 检查一下"))))
+
+    review_calls = [c for c in _deepseek_calls if c.get("task") == "review"]
+    assert review_calls
+    user_content = review_calls[-1]["messages"][-1]["content"]
+    assert "官方题解（仅你可见" not in user_content
+    assert dirty_body not in user_content
+    _cleanup()
 
 
 def test_review_includes_mentioned_user_context():
@@ -2090,7 +2185,7 @@ def test_private_clarify_uses_private_problem_summary():
         "samples": [{"input": "1", "output": "1"}],
     })
     _write_group_file(GID, "problem_summaries.json", {
-        PID2: {"summary_zh": "PRIVATE_PID_SUMMARY"},
+        PID2: _verified_summary_record(PID2, "PRIVATE_PID_SUMMARY"),
     })
     ctx_file = os.path.join(_data_dir(), "groups", f"groupctx_{GID}.json")
     with open(ctx_file, "w") as f:
@@ -4367,7 +4462,7 @@ def test_private_problem_card_hides_original_problem_identity():
         "samples": [{"input": "1", "output": "1"}],
     })
     _write_group_file(GID, "problem_summaries.json", {
-        PID: {"summary_zh": "SUMMARY_ONLY"},
+        PID: _verified_summary_record(PID, "SUMMARY_ONLY"),
     })
 
     with _all_patches():
@@ -4405,7 +4500,10 @@ def test_private_problem_card_strips_cached_problem_summary_thinking_tags():
         "samples": [],
     })
     _write_group_file(GID, "problem_summaries.json", {
-        PID: {"summary_zh": "<reasoning>hidden cached summary</reasoning>SUMMARY_ONLY"},
+        PID: _verified_summary_record(
+            PID,
+            "<reasoning>hidden cached summary</reasoning>SUMMARY_ONLY",
+        ),
     })
 
     with _all_patches():

@@ -19,6 +19,12 @@ from pathlib import Path
 
 from ..config import get_config
 from ..llm import ChatCompletionResult, chat_completion, strip_leaked_thinking
+from ..problem_content import (
+    format_problem_statement_for_llm,
+    load_statement_json,
+    statement_fingerprint,
+    statement_images,
+)
 
 logger = logging.getLogger("kouhai-bot.shared")
 
@@ -251,64 +257,12 @@ def multimodal_model_configured() -> bool:
 
 def load_problem_statement_json(pid: str) -> dict:
     """Load raw problem statement cache JSON."""
-    cfg = get_config()
-    stmt_path = os.path.join(cfg.data_dir, "statements", f"{pid}.json")
-    if not os.path.exists(stmt_path):
-        return {}
-
-    try:
-        with open(stmt_path, encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def format_problem_statement_for_llm(stmt: dict) -> str:
-    """Format statement cache JSON as text for LLM context."""
-    if not isinstance(stmt, dict):
-        return ""
-
-    parts = []
-    if stmt.get("name"):
-        parts.append(f"Problem: {stmt['name']}")
-    if stmt.get("time_limit"):
-        parts.append(f"Time limit: {stmt['time_limit']}")
-    if stmt.get("memory_limit"):
-        parts.append(f"Memory limit: {stmt['memory_limit']}")
-
-    desc = stmt.get("description", "")
-    if desc:
-        parts.append(f"\nDescription:\n{desc}")
-
-    inp = stmt.get("input", "")
-    if inp:
-        parts.append(f"\nInput:\n{inp}")
-
-    output = stmt.get("output", "")
-    if output:
-        parts.append(f"\nOutput:\n{output}")
-
-    samples = stmt.get("samples", [])
-    if samples:
-        for s in samples:
-            parts.append(f"\nInput:\n{s['input']}\nOutput:\n{s['output']}")
-
-    notes = stmt.get("notes", "")
-    if notes:
-        parts.append(f"\nNote:\n{notes}")
-
-    return "\n".join(parts)
+    return load_statement_json(pid)
 
 
 def load_problem_statement(pid: str) -> str:
     """Load full problem statement from cache, formatted for LLM."""
     return format_problem_statement_for_llm(load_problem_statement_json(pid))
-
-
-def statement_images(stmt: dict) -> list[dict]:
-    images = stmt.get("images", []) if isinstance(stmt, dict) else []
-    return [item for item in images if isinstance(item, dict) and item.get("src")]
 
 
 def _download_image_data_url(url: str) -> str:
@@ -436,6 +390,9 @@ async def _multimodal_content_or_text(text: str, images: list[dict]) -> str | li
 
 # ── Today's problem ─────────────────────────────────────────────────────
 
+PROBLEM_SUMMARY_FORMAT_VERSION = 2
+
+
 def _today_state_file(group_id: int) -> str:
     cfg = get_config()
     d = os.path.join(cfg.data_dir, "groups", str(group_id))
@@ -535,21 +492,45 @@ def load_problem_summaries(group_id: int) -> dict:
 def get_problem_summary(group_id: int, pid: str) -> str:
     data = load_problem_summaries(group_id)
     item = data.get(pid)
-    if isinstance(item, dict):
-        return strip_leaked_thinking(item.get("summary_zh", "") or "")
-    if isinstance(item, str):
-        return strip_leaked_thinking(item)
-    return ""
+    if not isinstance(item, dict):
+        return ""
+    source_sha256 = statement_fingerprint(
+        load_statement_json(pid, include_legacy_fallback=True)
+    )
+    if (
+        not source_sha256
+        or item.get("format_version") != PROBLEM_SUMMARY_FORMAT_VERSION
+        or item.get("status") != "verified"
+        or item.get("source_sha256") != source_sha256
+    ):
+        return ""
+    return strip_leaked_thinking(item.get("summary_zh", "") or "")
 
 
-def save_problem_summary(group_id: int, pid: str, summary_zh: str) -> None:
+def save_problem_summary(
+    group_id: int,
+    pid: str,
+    summary_zh: str,
+    *,
+    source_sha256: str = "",
+) -> None:
     if not pid or not summary_zh:
         return
     summary_zh = strip_leaked_thinking(summary_zh)
     if not summary_zh:
         return
+    current_source_sha256 = statement_fingerprint(
+        load_statement_json(pid, include_legacy_fallback=True)
+    )
+    if not current_source_sha256:
+        raise ValueError(f"cannot verify summary source for {pid}: statement missing")
+    if source_sha256 and source_sha256 != current_source_sha256:
+        raise ValueError(f"cannot save stale summary source for {pid}")
     data = load_problem_summaries(group_id)
     data[pid] = {
+        "format_version": PROBLEM_SUMMARY_FORMAT_VERSION,
+        "status": "verified",
+        "source_sha256": current_source_sha256,
         "summary_zh": summary_zh,
     }
     with open(_problem_summary_file(group_id), "w", encoding="utf-8") as f:

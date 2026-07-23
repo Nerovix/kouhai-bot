@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import sys
 import time
 from dataclasses import dataclass
@@ -19,19 +18,26 @@ from pathlib import Path
 from typing import Any
 
 from .config import get_config
-from .editorial_followup import schedule_prefetch_editorial
 from .handlers.shared import (
-    statement_images,
     summarize_problem,
     translate_sample_notes,
 )
-from .llm import strip_leaked_thinking
-from .problems.picker import _normalize_sample_block
+from .problem_content import (
+    build_notes_message as build_shared_notes_message,
+    build_sample_messages,
+    load_statement_json,
+    statement_fingerprint,
+    statement_images,
+)
+from .problem_summary import (
+    SummaryPreparationStatus,
+    prepare_problem_summary,
+)
+from .problems.picker import format_reveal as format_previous_problem_reveal
 
 logger = logging.getLogger("kouhai-bot.problem_preparation")
 
 PICKER_PATH = Path(__file__).resolve().parent / "problems" / "picker.py"
-STATEMENTS_FALLBACK_DIR = Path.home() / ".kouhai-bot" / "statements"
 PICK_ATTEMPTS = 3
 PICK_TIMEOUT_SEC = 120
 
@@ -42,7 +48,9 @@ class PreparedProblem:
 
     state: dict[str, Any]
     summary: str
+    summary_status: SummaryPreparationStatus
     model_tag: str
+    statement_sha256: str
     sample_messages: tuple[str, ...]
     notes_message: str
     min_rating: int
@@ -57,7 +65,9 @@ class PreparedProblem:
         return {
             "state": self.state,
             "summary": self.summary,
+            "summary_status": self.summary_status.value,
             "model_tag": self.model_tag,
+            "statement_sha256": self.statement_sha256,
             "sample_messages": list(self.sample_messages),
             "notes_message": self.notes_message,
             "min_rating": self.min_rating,
@@ -76,10 +86,15 @@ class PreparedProblem:
         if not all(isinstance(item, str) for item in samples):
             return None
         try:
+            summary = str(value.get("summary", "") or "")
+            model_tag = str(value.get("model_tag", "") or "")
+            summary_status = SummaryPreparationStatus(value["summary_status"])
             prepared = cls(
                 state=dict(state),
-                summary=str(value.get("summary", "") or ""),
-                model_tag=str(value.get("model_tag", "") or ""),
+                summary=summary,
+                summary_status=summary_status,
+                model_tag=model_tag,
+                statement_sha256=str(value["statement_sha256"]),
                 sample_messages=tuple(samples),
                 notes_message=str(value.get("notes_message", "") or ""),
                 min_rating=int(value["min_rating"]),
@@ -88,7 +103,11 @@ class PreparedProblem:
             )
         except (KeyError, TypeError, ValueError):
             return None
-        return prepared if prepared.pid else None
+        if not prepared.pid or len(prepared.statement_sha256) != 64:
+            return None
+        if summary_status is SummaryPreparationStatus.READY:
+            return prepared if summary else None
+        return prepared if not summary and not model_tag else None
 
 
 class ProblemPreparationError(RuntimeError):
@@ -165,70 +184,15 @@ def classify_pick_error(stderr_text: str) -> str:
     return "题目选取失败，稍后再试"
 
 
-def load_statement_json(group_id: int, pid: str) -> dict[str, Any]:
-    """Load the configured statement cache, with the legacy fallback."""
-    cfg = get_config()
-    candidate_paths = [
-        Path(cfg.data_dir) / "statements" / f"{pid}.json",
-        STATEMENTS_FALLBACK_DIR / f"{pid}.json",
-    ]
-    for path in candidate_paths:
-        if not path.exists():
-            continue
-        try:
-            with path.open(encoding="utf-8") as f:
-                statement = json.load(f)
-            if isinstance(statement, dict):
-                return statement
-            logger.warning("[group_%s] Statement at %s is not a dict", group_id, path)
-        except Exception as exc:
-            logger.warning(
-                "[group_%s] Failed to load statement %s: %s",
-                group_id,
-                path,
-                exc,
-            )
-    return {}
-
-
-def build_sample_messages(statement: dict[str, Any]) -> tuple[str, ...]:
-    """Build the same one-message-per-sample payload used by /newproblem."""
-    samples = statement.get("samples")
-    if not isinstance(samples, list):
-        return ()
-    messages: list[str] = []
-    for idx, sample in enumerate(samples, 1):
-        if not isinstance(sample, dict):
-            continue
-        sample_input = sample.get("input")
-        sample_output = sample.get("output")
-        if sample_input is None and sample_output is None:
-            continue
-        normalized_input = _normalize_sample_block(sample_input).rstrip("\n")
-        normalized_output = _normalize_sample_block(sample_output).rstrip("\n")
-        messages.append(
-            f"样例 {idx}\n"
-            f"Input:\n{normalized_input}\n\n"
-            f"Output:\n{normalized_output}"
-        )
-    return tuple(messages)
-
-
 async def build_notes_message(statement: dict[str, Any]) -> str:
     """Translate Notes with the existing group-post fallback behavior."""
-    normalized_notes = _normalize_sample_block(statement.get("notes"))
-    if not normalized_notes:
-        return ""
-    try:
-        translated_notes, _model_tag = await translate_sample_notes(
-            normalized_notes,
-            statement_images(statement),
-        )
-    except Exception as exc:
-        logger.warning("Notes translation failed, skipping notes node: %s", exc)
-        return ""
-    final_notes = strip_leaked_thinking(translated_notes or normalized_notes)
-    return f"样例解释：\n{final_notes}" if final_notes else ""
+    return await build_shared_notes_message(
+        statement,
+        translate_notes=translate_sample_notes,
+        images=statement_images(statement),
+        on_translate_exception="skip",
+        log_context="group problem preparation",
+    )
 
 
 async def _stop_process(process: asyncio.subprocess.Process) -> None:
@@ -325,73 +289,57 @@ async def prepare_problem(group_id: int) -> PreparedProblem:
     )
     pid = str(picked_state.get("today", "") or "")
 
-    summary = ""
-    model_tag = ""
-    sample_messages: tuple[str, ...] = ()
-    notes_message = ""
-    try:
-        if pid:
-            schedule_prefetch_editorial(pid)
-
-        statement = load_statement_json(group_id, pid) if pid else {}
-        statement_text = ""
-        input_text = ""
-        limits_text = ""
-        if statement:
-            statement_text = str(statement.get("description", "") or "")
-            input_text = str(statement.get("input", "") or "")
-            limits_text = (
-                f"Time: {statement.get('time_limit', '?')}, "
-                f"Memory: {statement.get('memory_limit', '?')}"
-            )
-            sample_messages = build_sample_messages(statement)
-            notes_message = await build_notes_message(statement)
-
-        images = statement_images(statement)
-        generated, model_tag = await summarize_problem(
-            statement_text,
-            input_text,
-            limits_text,
-            images,
+    statement = (
+        load_statement_json(
+            pid,
+            data_dir=get_config().data_dir,
+            include_legacy_fallback=True,
+            log_context=f"group_{group_id}",
         )
-        if not generated:
-            logger.warning("[group_%s] Summary 1st attempt failed, retrying...", group_id)
-            generated, model_tag = await summarize_problem(
-                statement_text,
-                input_text,
-                limits_text,
-                images,
-            )
-        if generated:
-            summary = generated.strip()
-        else:
-            logger.warning("[group_%s] Summary failed after retry", group_id)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        logger.warning("[group_%s] Summary error: %s", group_id, exc)
+        if pid
+        else {}
+    )
+    source_sha256 = statement_fingerprint(statement)
+    if not source_sha256:
+        raise ProblemPreparationError("题面缓存读取失败")
+
+    sample_messages = build_sample_messages(
+        statement,
+        include_explicit_empty=True,
+    )
+    notes_message = await build_notes_message(statement)
+    summary_result = await prepare_problem_summary(
+        statement,
+        generate=summarize_problem,
+        attempts=2,
+    )
+    if (
+        summary_result.status is SummaryPreparationStatus.READY
+        and summary_result.prepared is not None
+    ):
+        summary = summary_result.prepared.text
+        model_tag = summary_result.prepared.model_tag
+    else:
+        # Preserve the established availability policy: a fully fetched
+        # statement can still be posted without an LLM summary.  The explicit
+        # status prevents this degraded card from masquerading as a summary hit.
+        summary = ""
+        model_tag = ""
+        logger.warning(
+            "[group_%s] Summary unavailable after retries: %s",
+            group_id,
+            summary_result.reason,
+        )
 
     return PreparedProblem(
         state=dict(picked_state),
         summary=summary,
+        summary_status=summary_result.status,
         model_tag=model_tag,
+        statement_sha256=source_sha256,
         sample_messages=sample_messages,
         notes_message=notes_message,
         min_rating=min_rating,
         max_rating=max_rating,
         prepared_at=int(time.time()),
     )
-
-
-def format_previous_problem_reveal(problem: object) -> str:
-    """Format the existing reveal message without spawning the picker CLI."""
-    if not isinstance(problem, dict) or not problem:
-        return "还没有发过题哦"
-    parts = [f"CF{problem.get('today', '?')}"]
-    name = str(problem.get("name", "") or "")
-    rating = str(problem.get("rating", "") or "")
-    if name:
-        parts.append(name)
-    if rating:
-        parts.append(rating)
-    return f"上一道题来自 {' '.join(parts)}✨"

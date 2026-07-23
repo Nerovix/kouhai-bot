@@ -6,6 +6,8 @@ import os
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from unittest.mock import AsyncMock, patch
@@ -22,6 +24,18 @@ from kouhai_bot.tutorials import (
     mark_no_official_editorial,
     prefetch_editorial_zh,
 )
+
+
+class _FakeAgentNoMatch(Exception):
+    pass
+
+
+class _FakeAgentIncomplete(Exception):
+    pass
+
+
+class _FakeScrapeError(Exception):
+    pass
 
 
 def _long_text(prefix: str = "x") -> str:
@@ -275,7 +289,25 @@ def test_prefetch_editorial_zh_recovers_after_rescrape(tmp_path, monkeypatch):
     assert has_cached_editorial_zh("542D")
 
 
-def test_prefetch_editorial_zh_marks_missing(tmp_path, monkeypatch):
+def test_legacy_no_editorial_marker_is_not_a_trusted_terminal_state(
+    tmp_path,
+    monkeypatch,
+):
+    from kouhai_bot.config import BotConfig
+
+    cfg = BotConfig(data_dir=str(tmp_path))
+    monkeypatch.setattr("kouhai_bot.tutorials.get_config", lambda: cfg)
+    marker_dir = tmp_path / "tutorial_translations"
+    marker_dir.mkdir()
+    (marker_dir / "542D.no_editorial").write_text("", encoding="utf-8")
+
+    assert not is_no_official_editorial("542D")
+
+    mark_no_official_editorial("542D", reason="agent_no_match:test")
+    assert is_no_official_editorial("542D")
+
+
+def test_prefetch_editorial_zh_without_statement_stays_incomplete(tmp_path, monkeypatch):
     from kouhai_bot.config import BotConfig
 
     cfg = BotConfig(data_dir=str(tmp_path))
@@ -285,7 +317,7 @@ def test_prefetch_editorial_zh_marks_missing(tmp_path, monkeypatch):
         await prefetch_editorial_zh("999Z")
 
     asyncio.run(_run())
-    assert is_no_official_editorial("999Z")
+    assert not is_no_official_editorial("999Z")
 
 
 def test_prefetch_editorial_zh_no_agent_leaves_missing_unknown(tmp_path, monkeypatch):
@@ -312,8 +344,11 @@ def test_prefetch_editorial_zh_no_agent_leaves_missing_unknown(tmp_path, monkeyp
 def test_tutorial_agent_importable_from_runtime():
     from kouhai_bot.tutorials import _load_tutorial_agent
 
-    AgentNoMatch, ScrapeError, run_agent_for_pid = _load_tutorial_agent()
+    AgentNoMatch, AgentIncomplete, ScrapeError, run_agent_for_pid = (
+        _load_tutorial_agent()
+    )
     assert issubclass(AgentNoMatch, Exception)
+    assert issubclass(AgentIncomplete, Exception)
     assert issubclass(ScrapeError, Exception)
     assert run_agent_for_pid.__name__ == "run_agent_for_pid"
 
@@ -330,12 +365,6 @@ def test_prefetch_editorial_zh_runs_agent_before_translate(tmp_path, monkeypatch
         encoding="utf-8",
     )
     mark_no_official_editorial("542D")
-
-    class FakeAgentNoMatch(Exception):
-        pass
-
-    class FakeScrapeError(Exception):
-        pass
 
     async def _fake_run_agent_for_pid(*, pid, statements_dir):
         assert pid == "542D"
@@ -357,7 +386,12 @@ def test_prefetch_editorial_zh_runs_agent_before_translate(tmp_path, monkeypatch
     async def _run():
         with patch(
             "kouhai_bot.tutorials._load_tutorial_agent",
-            return_value=(FakeAgentNoMatch, FakeScrapeError, _fake_run_agent_for_pid),
+            return_value=(
+                _FakeAgentNoMatch,
+                _FakeAgentIncomplete,
+                _FakeScrapeError,
+                _fake_run_agent_for_pid,
+            ),
         ), patch(
             "kouhai_bot.tutorials.translate_editorial_to_zh",
             AsyncMock(return_value=("自动抓取后的译文。" * 12, "", True)),
@@ -368,6 +402,104 @@ def test_prefetch_editorial_zh_runs_agent_before_translate(tmp_path, monkeypatch
     assert not is_no_official_editorial("542D")
     assert get_official_editorial("542D") is not None
     assert has_cached_editorial_zh("542D")
+
+
+def test_prefetch_editorial_zh_marks_only_completed_no_match(tmp_path, monkeypatch):
+    from kouhai_bot.config import BotConfig
+
+    cfg = BotConfig(data_dir=str(tmp_path))
+    monkeypatch.setattr("kouhai_bot.tutorials.get_config", lambda: cfg)
+    statements_dir = tmp_path / "statements"
+    statements_dir.mkdir()
+    (statements_dir / "542D.json").write_text("{}", encoding="utf-8")
+
+    async def no_match(**_kwargs):
+        raise _FakeAgentNoMatch("complete search found no matching editorial")
+
+    async def _run():
+        with patch(
+            "kouhai_bot.tutorials._load_tutorial_agent",
+            return_value=(
+                _FakeAgentNoMatch,
+                _FakeAgentIncomplete,
+                _FakeScrapeError,
+                no_match,
+            ),
+        ):
+            await prefetch_editorial_zh("542D")
+
+    asyncio.run(_run())
+    assert is_no_official_editorial("542D")
+
+
+def test_prefetch_editorial_zh_incomplete_attempt_remains_retryable(
+    tmp_path,
+    monkeypatch,
+):
+    from kouhai_bot.config import BotConfig
+
+    cfg = BotConfig(data_dir=str(tmp_path))
+    monkeypatch.setattr("kouhai_bot.tutorials.get_config", lambda: cfg)
+    statements_dir = tmp_path / "statements"
+    statements_dir.mkdir()
+    (statements_dir / "542D.json").write_text("{}", encoding="utf-8")
+
+    async def incomplete(**_kwargs):
+        raise _FakeAgentIncomplete("deadline exceeded")
+
+    async def _run():
+        with patch(
+            "kouhai_bot.tutorials._load_tutorial_agent",
+            return_value=(
+                _FakeAgentNoMatch,
+                _FakeAgentIncomplete,
+                _FakeScrapeError,
+                incomplete,
+            ),
+        ):
+            await prefetch_editorial_zh("542D")
+
+    asyncio.run(_run())
+    assert not is_no_official_editorial("542D")
+    assert not has_cached_editorial_zh("542D")
+
+
+def test_prefetch_editorial_zh_cancellation_remains_incomplete(
+    tmp_path,
+    monkeypatch,
+):
+    from kouhai_bot.config import BotConfig
+
+    cfg = BotConfig(data_dir=str(tmp_path))
+    monkeypatch.setattr("kouhai_bot.tutorials.get_config", lambda: cfg)
+    statements_dir = tmp_path / "statements"
+    statements_dir.mkdir()
+    (statements_dir / "542D.json").write_text("{}", encoding="utf-8")
+    started = asyncio.Event()
+
+    async def blocked(**_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    async def _run():
+        with patch(
+            "kouhai_bot.tutorials._load_tutorial_agent",
+            return_value=(
+                _FakeAgentNoMatch,
+                _FakeAgentIncomplete,
+                _FakeScrapeError,
+                blocked,
+            ),
+        ):
+            task = asyncio.create_task(prefetch_editorial_zh("542D"))
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(_run())
+    assert not is_no_official_editorial("542D")
+    assert not has_cached_editorial_zh("542D")
 
 
 def test_ensure_tutorial_json_returns_false_without_statement(tmp_path, monkeypatch):
@@ -447,6 +579,53 @@ def test_ensure_editorial_prefetch_runs_full_pipeline_and_respects_terminal_stat
     no_editorial = True
     editorial_followup.ensure_editorial_prefetch("542D")
     assert scheduled == [("542D", True)]
+
+
+def test_startup_resumes_full_prefetch_for_current_problem(tmp_path, monkeypatch):
+    from kouhai_bot import editorial_followup
+    from kouhai_bot.config import BotConfig
+
+    cfg = BotConfig(data_dir=str(tmp_path))
+    state_dir = tmp_path / "groups" / "1"
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text(
+        json.dumps({"today": "542D"}),
+        encoding="utf-8",
+    )
+    scheduled: list[str] = []
+
+    monkeypatch.setattr(editorial_followup, "get_config", lambda: cfg)
+    monkeypatch.setattr(
+        editorial_followup,
+        "ensure_editorial_prefetch",
+        scheduled.append,
+    )
+
+    editorial_followup.schedule_prefetch_for_group_today(1)
+
+    assert scheduled == ["542D"]
+
+
+def test_post_solve_missing_editorial_does_not_create_terminal_marker(
+    tmp_path,
+    monkeypatch,
+):
+    from kouhai_bot import editorial_followup
+    from kouhai_bot.config import BotConfig
+
+    cfg = BotConfig(data_dir=str(tmp_path))
+    monkeypatch.setattr("kouhai_bot.tutorials.get_config", lambda: cfg)
+    monkeypatch.setattr(editorial_followup, "get_config", lambda: cfg)
+    monkeypatch.setattr(
+        editorial_followup,
+        "_await_prefetch_if_running",
+        AsyncMock(),
+    )
+
+    asyncio.run(editorial_followup.run_post_solve_editorial_followup(1, "542D"))
+
+    assert not is_no_official_editorial("542D")
+    assert not has_cached_editorial_zh("542D")
 
 
 def test_deliver_uses_prefetch_cache_without_translate(tmp_path, monkeypatch):

@@ -68,8 +68,12 @@ NapCat (QQ) ──WS──> worker.py
   preparation is not reported by `/status`; only an admitted post is. While a slot is
   READY, the worker also idempotently maintains its full official-editorial prefetch:
   persisted slots resume crawler + translation work after restart, in-flight work is
-  deduplicated by pid, and completed/no-editorial terminal states stop retries. This
-  editorial maintenance never blocks a `/newproblem` claim. `/setproblem` and
+  deduplicated by pid, and verified/no-editorial terminal states stop retries. Cancellation,
+  deadline exhaustion, scraper/LLM errors, and other incomplete attempts do not write a
+  terminal marker, so startup or the next maintenance pass retries them; only a completed
+  search with no match or an explicit final mismatch may write the versioned
+  `no_editorial` marker with a reason. Legacy zero-byte markers are untrusted and retried.
+  This editorial maintenance never blocks a `/newproblem` claim. `/setproblem` and
   `/setproblem random` intentionally keep their live-fetch behavior and never use this
   slot.
 - **Friend request auto-approval**: Normal OneBot `post_type="request"` / `request_type="friend"` events are parsed by `napcat/client.py`, routed by `handlers.process_event()`, and approved via `set_friend_add_request`. QQ/NapCat "doubtful" friend requests are not reliably pushed as request events, so `worker.py` also runs `friend_requests.doubt_friend_request_loop()`, which polls `get_doubt_friends_add_request` every 60 seconds and approves with `set_doubt_friends_add_request`. Both paths approve only after the requester is confirmed to be a member of `CURRENT_GROUP`; lookup failure, malformed events, non-friend requests, and non-members are ignored without approving. Requests that were already consumed by another QQ client may not appear in the doubtful-request poll.

@@ -19,6 +19,7 @@ from .handlers.shared import translate_editorial_to_zh
 from .llm import strip_leaked_thinking
 
 MIN_EDITORIAL_LEN = 80
+NO_EDITORIAL_MARKER_VERSION = 1
 _REVIEW_EDITORIAL_MAX_LEN = 12000
 
 logger = logging.getLogger("kouhai-bot.tutorials")
@@ -168,17 +169,22 @@ def _tools_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "tools"
 
 
-def _load_tutorial_agent() -> tuple[type[Exception], type[Exception], Any]:
+def _load_tutorial_agent() -> tuple[
+    type[Exception],
+    type[Exception],
+    type[Exception],
+    Any,
+]:
     tools_dir = _tools_dir()
     if tools_dir.is_dir():
         tools_dir_str = str(tools_dir)
         if tools_dir_str not in sys.path:
             sys.path.insert(0, tools_dir_str)
 
-    from cf_tutorial_agent import AgentNoMatch, run_agent_for_pid
+    from cf_tutorial_agent import AgentIncomplete, AgentNoMatch, run_agent_for_pid
     from scrape_cf_tutorial import ScrapeError
 
-    return AgentNoMatch, ScrapeError, run_agent_for_pid
+    return AgentNoMatch, AgentIncomplete, ScrapeError, run_agent_for_pid
 
 
 def _write_tutorial_bundle(pid: str, bundle: dict) -> None:
@@ -207,7 +213,12 @@ async def ensure_tutorial_json(pid: str) -> bool:
         return False
 
     try:
-        AgentNoMatch, ScrapeError, run_agent_for_pid = _load_tutorial_agent()
+        (
+            AgentNoMatch,
+            AgentIncomplete,
+            ScrapeError,
+            run_agent_for_pid,
+        ) = _load_tutorial_agent()
     except Exception as e:
         logger.warning("tutorial agent unavailable for %s: %s", pid, e, exc_info=True)
         return False
@@ -216,6 +227,10 @@ async def ensure_tutorial_json(pid: str) -> bool:
         result = await run_agent_for_pid(pid=pid, statements_dir=statements_dir)
     except AgentNoMatch as e:
         logger.info("tutorial agent found no official editorial for %s: %s", pid, e)
+        mark_no_official_editorial(pid, reason=f"agent_no_match:{e}")
+        return False
+    except AgentIncomplete as e:
+        logger.warning("tutorial agent did not finish reliably for %s: %s", pid, e)
         return False
     except ScrapeError as e:
         logger.warning("tutorial agent scrape failed for %s: %s", pid, e)
@@ -306,13 +321,37 @@ def _save_cached_translation(pid: str, text: str) -> None:
 
 
 def is_no_official_editorial(pid: str) -> bool:
-    return os.path.isfile(_no_editorial_marker_path(pid))
-
-
-def mark_no_official_editorial(pid: str) -> None:
     marker = _no_editorial_marker_path(pid)
-    with open(marker, "w", encoding="utf-8"):
-        pass
+    if not os.path.isfile(marker):
+        return False
+    try:
+        with open(marker, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        # Legacy zero-byte markers may represent transient failures from the
+        # old boolean pipeline, so they are deliberately not trusted.
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("format_version") == NO_EDITORIAL_MARKER_VERSION
+        and payload.get("status") == "no_editorial"
+        and bool(str(payload.get("reason", "") or "").strip())
+    )
+
+
+def mark_no_official_editorial(pid: str, *, reason: str = "confirmed_no_match") -> None:
+    marker = _no_editorial_marker_path(pid)
+    with open(marker, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "format_version": NO_EDITORIAL_MARKER_VERSION,
+                "status": "no_editorial",
+                "reason": reason,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
     path = _translation_cache_path(pid)
     if os.path.isfile(path):
         os.remove(path)
@@ -356,7 +395,7 @@ async def prefetch_editorial_zh(pid: str, *, run_agent: bool = True) -> None:
             return
         clear_no_official_editorial_marker(pid)
     if not editorial:
-        mark_no_official_editorial(pid)
+        logger.info("editorial prefetch remains incomplete for %s", pid)
         return
     await get_editorial_zh_for_group(editorial, pid)
 
@@ -378,7 +417,10 @@ async def get_editorial_zh_for_group(editorial: OfficialEditorial, pid: str) -> 
         images=problem_images,
     )
     if matched is False:
-        mark_no_official_editorial(pid)
+        mark_no_official_editorial(
+            pid,
+            reason="translation_explicit_mismatch",
+        )
         return None, ""
     if not translated:
         return None, ""

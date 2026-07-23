@@ -166,7 +166,7 @@ def test_agent_tries_next_blog_when_extractor_rejects_first(tmp_path):
     assert "prefix sums" in result.bundle["sections"][0]["solution"]
 
 
-def test_agent_rejects_placeholder_before_dynamic_fetch_or_llm(tmp_path):
+def test_agent_keeps_placeholder_retryable_without_dynamic_fetch_or_llm(tmp_path):
     _write_statement(tmp_path)
     pages = {
         "https://codeforces.com/problemset/problem/1000/B": _problem_page(),
@@ -179,7 +179,7 @@ def test_agent_rejects_placeholder_before_dynamic_fetch_or_llm(tmp_path):
     with patch("cf_tutorial_agent.fetch_html", side_effect=fake_fetch), \
             patch("cf_tutorial_agent.fetch_dynamic_editorial") as dynamic_fetch, \
             patch("cf_tutorial_agent.chat_completion") as llm_call:
-        with pytest.raises(agent.AgentNoMatch, match="no_readable_blog_bodies"):
+        with pytest.raises(agent.AgentIncomplete, match="invalid_blog_content"):
             asyncio.run(
                 agent.run_agent_for_pid(
                     pid="1000B",
@@ -289,6 +289,67 @@ def test_agent_rejects_low_confidence_extraction(tmp_path):
             assert "extractor_low_confidence" in str(exc)
         else:
             raise AssertionError("expected low confidence rejection")
+
+
+def test_agent_keeps_incomplete_extractor_failure_retryable(tmp_path, monkeypatch):
+    _write_statement(tmp_path)
+    blog = agent.BlogDocument(
+        blog_id="b1",
+        tutorial_url="https://codeforces.com/blog/entry/1",
+        tutorial_title="Editorial",
+        body="Detailed candidate body " * 10,
+    )
+
+    monkeypatch.setattr(
+        agent,
+        "collect_blog_documents",
+        lambda **_kwargs: (
+            "https://codeforces.com/problemset/problem/1000/B",
+            "Target Problem",
+            [blog],
+            (),
+        ),
+    )
+
+    async def incomplete(**_kwargs):
+        raise agent.AgentIncomplete("extractor_llm_failed:timeout")
+
+    monkeypatch.setattr(agent, "extract_editorial_from_blog", incomplete)
+
+    with pytest.raises(agent.AgentIncomplete, match="extractor_llm_failed"):
+        asyncio.run(
+            agent.run_agent_for_pid(
+                pid="1000B",
+                statements_dir=tmp_path,
+                deadline_sec=10,
+            )
+        )
+
+
+def test_extractor_empty_llm_result_is_incomplete(monkeypatch):
+    blog = agent.BlogDocument(
+        blog_id="b1",
+        tutorial_url="https://codeforces.com/blog/entry/1",
+        tutorial_title="Editorial",
+        body="Detailed official explanation " * 10,
+    )
+
+    async def empty_result(*_args, **_kwargs):
+        return ChatCompletionResult(text=None, failure_kind="timeout")
+
+    monkeypatch.setattr(agent, "chat_completion", empty_result)
+
+    with pytest.raises(agent.AgentIncomplete, match="extractor_llm_failed:timeout"):
+        asyncio.run(
+            agent.extract_editorial_from_blog(
+                pid="1000B",
+                problem_title="Target Problem",
+                problem_text="statement",
+                blog=blog,
+                timeout=5,
+                llm_text_limit=1000,
+            )
+        )
 
 
 def test_extractor_uses_json_repair(monkeypatch):

@@ -25,7 +25,6 @@ from .tutorials import (
     has_cached_editorial_zh,
     is_no_official_editorial,
     load_cached_editorial_zh,
-    mark_no_official_editorial,
     prefetch_editorial_zh,
 )
 
@@ -104,7 +103,7 @@ def ensure_editorial_prefetch(pid: str) -> None:
 
 
 def schedule_prefetch_for_group_today(group_id: int) -> None:
-    """Prefetch editorial for the group's current problem (e.g. on bot startup)."""
+    """Resume full editorial prefetch for the current problem on bot startup."""
     state_path = os.path.join(get_config().data_dir, "groups", str(group_id), "state.json")
     if not os.path.isfile(state_path):
         return
@@ -115,7 +114,7 @@ def schedule_prefetch_for_group_today(group_id: int) -> None:
         return
     pid = str(state.get("today", "") or "").strip()
     if pid:
-        schedule_prefetch_editorial(pid, run_agent=False)
+        ensure_editorial_prefetch(pid)
 
 
 def schedule_prefetch_for_current_group() -> None:
@@ -209,10 +208,8 @@ async def run_post_solve_editorial_followup(group_id: int, pid: str) -> None:
             return
         editorial = get_official_editorial(pid)
         if not editorial:
-            if not has_cached_editorial_zh(pid):
-                mark_no_official_editorial(pid)
             logger.info(
-                "[group_%s] no official editorial for %s, skipping delivery",
+                "[group_%s] editorial for %s remains incomplete, skipping delivery",
                 group_id,
                 pid,
             )

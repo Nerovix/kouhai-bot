@@ -24,7 +24,11 @@ sys.path.insert(0, str(ROOT / "src"))
 from kouhai_bot.config import get_config
 from kouhai_bot.handlers.shared import robust_json_parse, translate_editorial_to_zh
 from kouhai_bot.llm import chat_completion
-from kouhai_bot.tutorials import MIN_EDITORIAL_LEN, _is_placeholder, extract_editorial
+from kouhai_bot.editorial_content import (
+    MIN_EDITORIAL_LEN,
+    extract_editorial,
+    is_placeholder as _is_placeholder,
+)
 
 from cf_tutorial_agent import AgentNoMatch
 from cf_tutorial_agent import DEFAULT_CANDIDATE_LIMIT

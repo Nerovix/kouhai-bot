@@ -17,7 +17,6 @@ from typing import Any
 import cloudscraper
 
 from .config import get_config
-from .llm import strip_leaked_thinking
 from .handlers.shared import (
     get_problem_summary,
     get_today_problem,
@@ -27,7 +26,6 @@ from .handlers.shared import (
     save_problem_summary,
     save_problem_card_ref,
     sanitize_cached_problem_card_payload,
-    statement_images,
     summarize_problem,
     translate_sample_notes,
 )
@@ -38,7 +36,12 @@ from .napcat.client import (
     send_private_forward_msg,
     send_private_msg,
 )
-from .problems.picker import _normalize_sample_block
+from .problem_content import (
+    build_notes_message,
+    build_sample_messages,
+    statement_images,
+)
+from .problem_summary import SummaryPreparationStatus, prepare_problem_summary
 
 logger = logging.getLogger("kouhai-bot.private_judge")
 
@@ -340,22 +343,6 @@ def problem_id_from_ref(contest_id: int, index: str) -> str:
     return f"{int(contest_id)}{str(index).upper()}"
 
 
-def _statement_path(pid: str) -> Path:
-    return _data_dir() / "statements" / f"{pid}.json"
-
-
-def load_statement_json(pid: str) -> dict:
-    path = _statement_path(pid)
-    if not path.exists():
-        return {}
-    try:
-        with path.open(encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
 def _problem_id(problem: dict) -> str:
     contest_id = problem.get("contestId")
     index = problem.get("index")
@@ -473,9 +460,9 @@ def resolve_problem_by_pid(pid: str) -> dict:
 
 
 def resolve_random_problem(group_id: int) -> dict:
-    from .handlers.cmd.newproblem import _effective_rating_range
+    from .problem_preparation import effective_rating_range
 
-    min_rating, max_rating = _effective_rating_range(group_id)
+    min_rating, max_rating = effective_rating_range(group_id)
     candidates: list[dict] = []
     for item in _fetch_problemset():
         if not isinstance(item, dict):
@@ -512,57 +499,29 @@ def resolve_random_problem(group_id: int) -> dict:
     raise RuntimeError(f"no statement-ready random candidate: {last_error}")
 
 
-def _build_sample_messages(stmt: dict) -> list[str]:
-    samples = stmt.get("samples")
-    if not isinstance(samples, list):
-        return []
-    messages: list[str] = []
-    for idx, sample in enumerate(samples, 1):
-        if not isinstance(sample, dict):
-            continue
-        sample_input = _normalize_sample_block(sample.get("input", "")).rstrip("\n")
-        sample_output = _normalize_sample_block(sample.get("output", "")).rstrip("\n")
-        if not sample_input and not sample_output:
-            continue
-        messages.append(
-            f"样例 {idx}\n"
-            f"Input:\n{sample_input}\n\n"
-            f"Output:\n{sample_output}"
-        )
-    return messages
-
-
-async def _build_notes_message(stmt: dict) -> str:
-    raw_notes = _normalize_sample_block(stmt.get("notes", ""))
-    if not raw_notes:
-        return ""
-    try:
-        translated, _tag = await translate_sample_notes(raw_notes, statement_images(stmt))
-    except Exception:
-        translated = ""
-    text = strip_leaked_thinking(translated or raw_notes)
-    return f"样例解释：\n{text}" if text else ""
-
-
 async def _problem_summary(group_id: int, pid: str, stmt: dict) -> str:
     summary = get_problem_summary(group_id, pid)
     if summary:
         return summary
-    stmt_text = stmt.get("description", "") or ""
-    input_text = stmt.get("input", "") or ""
-    tl = stmt.get("time_limit", "?")
-    ml = stmt.get("memory_limit", "?")
-    result, model_tag = await summarize_problem(
-        stmt_text,
-        input_text,
-        f"Time: {tl}, Memory: {ml}",
-        statement_images(stmt),
+    result = await prepare_problem_summary(
+        stmt,
+        generate=summarize_problem,
+        attempts=1,
     )
-    summary = (result or "").strip()
-    if summary:
-        if model_tag:
-            summary += model_tag
-        save_problem_summary(group_id, pid, summary)
+    if (
+        result.status is not SummaryPreparationStatus.READY
+        or result.prepared is None
+    ):
+        return ""
+    summary = result.prepared.text
+    if result.prepared.model_tag:
+        summary += result.prepared.model_tag
+    save_problem_summary(
+        group_id,
+        pid,
+        summary,
+        source_sha256=result.prepared.source_sha256,
+    )
     return summary
 
 
@@ -576,8 +535,14 @@ async def build_problem_card_payload(group_id: int, problem: dict, *, greeting: 
     return {
         "pid": pid,
         "post_msg": post_msg,
-        "sample_messages": _build_sample_messages(stmt),
-        "notes_message": await _build_notes_message(stmt),
+        "sample_messages": list(build_sample_messages(stmt)),
+        "notes_message": await build_notes_message(
+            stmt,
+            translate_notes=translate_sample_notes,
+            images=statement_images(stmt),
+            on_translate_exception="source",
+            log_context="private judge",
+        ),
         "snake_enabled": False,
     }
 

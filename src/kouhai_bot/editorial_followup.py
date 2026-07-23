@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable
 
 from .config import get_config
 from .napcat.client import (
@@ -20,12 +21,10 @@ from .napcat.client import (
 from .tutorials import (
     MIN_EDITORIAL_LEN,
     OfficialEditorial,
-    get_editorial_zh_for_group,
-    get_official_editorial,
+    get_verified_official_editorial,
     has_cached_editorial_zh,
     is_no_official_editorial,
     load_cached_editorial_zh,
-    mark_no_official_editorial,
     prefetch_editorial_zh,
 )
 
@@ -49,14 +48,10 @@ def _chunk_text(text: str, chunk_size: int) -> list[str]:
     return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
 
 
-def _prefetch_needed(pid: str, *, run_agent: bool) -> bool:
+def _prefetch_needed(pid: str) -> bool:
     if has_cached_editorial_zh(pid):
         return False
-    if (
-        is_no_official_editorial(pid)
-        and not run_agent
-        and get_official_editorial(pid) is None
-    ):
+    if is_no_official_editorial(pid):
         return False
     return True
 
@@ -64,7 +59,7 @@ def _prefetch_needed(pid: str, *, run_agent: bool) -> bool:
 def schedule_prefetch_editorial(pid: str, *, run_agent: bool = True) -> None:
     """Start translating editorial when a new problem is set."""
     pid = (pid or "").strip()
-    if not pid or not _prefetch_needed(pid, run_agent=run_agent):
+    if not pid or not _prefetch_needed(pid):
         return
     existing = _prefetch_tasks.get(pid)
     if existing is not None and not existing.done():
@@ -84,25 +79,83 @@ def schedule_prefetch_editorial(pid: str, *, run_agent: bool = True) -> None:
     task.add_done_callback(_drop)
 
 
-def schedule_prefetch_for_group_today(group_id: int) -> None:
-    """Prefetch editorial for the group's current problem (e.g. on bot startup)."""
+def ensure_editorial_prefetch(pid: str) -> None:
+    """Keep full editorial prefetch active for an unpublished READY problem.
+
+    This entry point is safe to call from a maintenance loop: an in-flight task
+    is deduplicated by ``schedule_prefetch_editorial``, while a verified cache
+    or a confirmed no-editorial marker is treated as terminal.  If a task dies
+    before reaching either terminal state, the next maintenance pass retries
+    the complete crawler + translation pipeline.
+    """
+    pid = (pid or "").strip()
+    if (
+        not pid
+        or has_cached_editorial_zh(pid)
+        or is_no_official_editorial(pid)
+    ):
+        return
+    schedule_prefetch_editorial(pid, run_agent=True)
+
+
+def _load_group_today_pid(group_id: int) -> str:
     state_path = os.path.join(get_config().data_dir, "groups", str(group_id), "state.json")
     if not os.path.isfile(state_path):
-        return
+        return ""
     try:
         with open(state_path, encoding="utf-8") as f:
             state = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return
-    pid = str(state.get("today", "") or "").strip()
+        return ""
+    if not isinstance(state, dict):
+        return ""
+    return str(state.get("today", "") or "").strip()
+
+
+def schedule_prefetch_for_group_today(group_id: int) -> None:
+    """Resume full editorial prefetch for the current problem."""
+    pid = _load_group_today_pid(group_id)
     if pid:
-        schedule_prefetch_editorial(pid, run_agent=False)
+        ensure_editorial_prefetch(pid)
 
 
 def schedule_prefetch_for_current_group() -> None:
     cfg = get_config()
     if cfg.current_group:
         schedule_prefetch_for_group_today(cfg.current_group)
+
+
+async def editorial_prefetch_maintenance_loop(
+    group_id: int,
+    *,
+    get_next_problem_pid: Callable[[], Awaitable[str]],
+    stop_event: asyncio.Event,
+    interval_seconds: float = 60.0,
+) -> None:
+    """Continuously maintain editorial work for both current and READY problems."""
+    logger.info("[group_%s] editorial prefetch maintenance started", group_id)
+    while not stop_event.is_set():
+        try:
+            current_pid = _load_group_today_pid(group_id)
+            next_pid = (await get_next_problem_pid()).strip()
+            for pid in dict.fromkeys([current_pid, next_pid]):
+                if pid:
+                    ensure_editorial_prefetch(pid)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[group_%s] editorial prefetch maintenance failed: %s",
+                group_id,
+                exc,
+                exc_info=True,
+            )
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            continue
+    logger.info("[group_%s] editorial prefetch maintenance stopped", group_id)
 
 
 async def _run_prefetch_editorial(pid: str, *, run_agent: bool) -> None:
@@ -130,6 +183,7 @@ async def _run_prefetch_editorial(pid: str, *, run_agent: bool) -> None:
 
 
 async def _await_prefetch_if_running(pid: str) -> None:
+    """Wait for the shared preparation task when one is already in flight."""
     task = _prefetch_tasks.get(pid)
     if task is None or task.done():
         return
@@ -161,24 +215,23 @@ def schedule_post_solve_editorial_followup(group_id: int, pid: str) -> None:
 async def run_post_solve_editorial_followup(group_id: int, pid: str) -> None:
     started = time.monotonic()
     try:
-        if has_cached_editorial_zh(pid):
-            editorial = get_official_editorial(pid)
-            if editorial:
-                await deliver_official_tutorial_forward(group_id, pid, editorial)
-                logger.info(
-                    "[group_%s] editorial delivered from cache for %s in %.1fs",
-                    group_id,
-                    pid,
-                    time.monotonic() - started,
-                )
-                return
-            if is_no_official_editorial(pid):
-                logger.info(
-                    "[group_%s] no official editorial for %s, skipping delivery",
-                    group_id,
-                    pid,
-                )
-                return
+        editorial = get_verified_official_editorial(pid)
+        if editorial:
+            await deliver_official_tutorial_forward(group_id, pid, editorial)
+            logger.info(
+                "[group_%s] editorial delivered from cache for %s in %.1fs",
+                group_id,
+                pid,
+                time.monotonic() - started,
+            )
+            return
+        if is_no_official_editorial(pid):
+            logger.info(
+                "[group_%s] no official editorial for %s, skipping delivery",
+                group_id,
+                pid,
+            )
+            return
 
         await _await_prefetch_if_running(pid)
         if is_no_official_editorial(pid):
@@ -188,12 +241,10 @@ async def run_post_solve_editorial_followup(group_id: int, pid: str) -> None:
                 pid,
             )
             return
-        editorial = get_official_editorial(pid)
+        editorial = get_verified_official_editorial(pid)
         if not editorial:
-            if not has_cached_editorial_zh(pid):
-                mark_no_official_editorial(pid)
             logger.info(
-                "[group_%s] no official editorial for %s, skipping delivery",
+                "[group_%s] editorial for %s remains incomplete, skipping delivery",
                 group_id,
                 pid,
             )
@@ -220,19 +271,20 @@ async def deliver_official_tutorial_forward(
     pid: str,
     editorial: OfficialEditorial,
 ) -> None:
-    """Send cached Chinese editorial; translate only if prefetch did not finish."""
-    zh_text = load_cached_editorial_zh(pid)
-    if len(zh_text) < MIN_EDITORIAL_LEN:
-        logger.info(
-            "[group_%s] editorial cache miss for %s, translating on delivery",
+    """Deliver one already verified and cached Chinese editorial."""
+    verified_editorial = get_verified_official_editorial(pid)
+    if verified_editorial is None:
+        logger.warning(
+            "[group_%s] refused unverified tutorial delivery for %s",
             group_id,
             pid,
         )
-        zh_text, _model_tag = await get_editorial_zh_for_group(editorial, pid)
-        zh_text = zh_text or ""
+        return
+    editorial = verified_editorial
+    zh_text = load_cached_editorial_zh(pid)
     if len(zh_text) < MIN_EDITORIAL_LEN:
         logger.warning(
-            "[group_%s] official tutorial translation unavailable for %s",
+            "[group_%s] verified tutorial translation missing for %s",
             group_id,
             pid,
         )

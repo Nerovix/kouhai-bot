@@ -5,7 +5,8 @@ no-problem, with-problem, empty-input, cooldown.
 """
 
 import sys, os, json, asyncio, tempfile, shutil, time
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -65,6 +66,9 @@ def _reset_state():
         ],
     }
     _deepseek_calls.clear()
+    from kouhai_bot.problem_prefetch import reset_prefetchers_for_tests
+
+    reset_prefetchers_for_tests()
     _temp_dir = tempfile.mkdtemp(prefix="xcpc_test_")
     data_dir = os.path.join(_temp_dir, "data")
     os.makedirs(os.path.join(data_dir, "groups", str(GID)), exist_ok=True)
@@ -136,6 +140,29 @@ def _write_editorial_translation(pid: str, text: str = "已验证中文题解。
         f.write(text * 20)
     with open(os.path.join(d, f"{pid}.verified"), "w", encoding="utf-8"):
         pass
+
+
+def _fake_problem_prefetcher(
+    state: dict,
+    *,
+    summary: str = "summary",
+    model_tag: str = "",
+    sample_messages: tuple[str, ...] = (),
+    notes_message: str = "",
+):
+    prepared = SimpleNamespace(
+        state=dict(state),
+        pid=str(state.get("today", "") or ""),
+        summary=summary,
+        model_tag=model_tag,
+        sample_messages=sample_messages,
+        notes_message=notes_message,
+    )
+    slot = SimpleNamespace(slot_id="slot-1", problem=prepared)
+    return SimpleNamespace(
+        claim=AsyncMock(return_value=slot),
+        release=AsyncMock(),
+    )
 
 
 def _has_sent(substring: str) -> bool:
@@ -506,7 +533,9 @@ def _all_patches():
     stack.enter_context(patch("kouhai_bot.handlers.cmd.clear.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.send_private_msg", _mock_send_private))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.send_group_forward_msg", _mock_send_group_forward))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.react_emoji", _mock_react))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.schedule_prefetch_editorial"))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.stubs.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.stubs.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.setproblem.send_group_msg", _mock_send_group))
@@ -874,103 +903,180 @@ def test_submit_correct_schedules_editorial_without_blocking():
     print("✅ submit: editorial followup does not block coordinator")
 
 
-def test_newproblem_post_schedules_editorial_prefetch():
-  _reset_state()
-  pid = "542D"
-  state_dir = os.path.join(_data_dir(), "groups", str(GID))
-  os.makedirs(state_dir, exist_ok=True)
-  with open(os.path.join(state_dir, "state.json"), "w") as f:
-      json.dump({"today": pid}, f)
-  _write_statement(pid, {"description": "d", "input": "i", "time_limit": "1s", "memory_limit": "256MB"})
+def test_newproblem_post_uses_prepared_hot_path():
+    _reset_state()
+    pid = "542D"
+    state_dir = os.path.join(_data_dir(), "groups", str(GID))
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, "state.json"), "w") as f:
+        json.dump({"today": "100A"}, f)
+    _write_statement(
+        pid,
+        {
+            "description": "d",
+            "input": "i",
+            "time_limit": "1s",
+            "memory_limit": "256MB",
+        },
+    )
 
-  scheduled: list[str] = []
-  summary_started = asyncio.Event()
+    payload = {
+        "today": pid,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": [],
+        "date": "2026-05-22",
+    }
+    prefetcher = _fake_problem_prefetcher(payload, model_tag="『M』")
+    send_card = AsyncMock(return_value=(123, {}))
+    schedule_editorial = MagicMock()
 
-  def _record_prefetch(p):
-      scheduled.append(p)
+    async def _run():
+        with _all_patches(), \
+                patch(
+                    "kouhai_bot.handlers.cmd.newproblem.get_next_problem_prefetcher",
+                    return_value=prefetcher,
+                ), \
+                patch(
+                    "kouhai_bot.handlers.cmd.newproblem._send_problem_forward_card",
+                    send_card,
+                ), \
+                patch(
+                    "kouhai_bot.handlers.cmd.newproblem.save_problem_summary",
+                    side_effect=OSError("summary cache unavailable"),
+                ), \
+                patch(
+                    "kouhai_bot.handlers.cmd.newproblem.schedule_prefetch_editorial",
+                    schedule_editorial,
+                ), \
+                patch(
+                    "kouhai_bot.problem_preparation.prepare_problem",
+                    AsyncMock(side_effect=AssertionError("hot path must not prepare")),
+                ):
+            from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
+            await _post_new_problem_locked(GID, prefix="test")
 
-  async def _slow_summary(*args, **kwargs):
-      summary_started.set()
-      await asyncio.sleep(0.2)
-      return "summary", ""
-
-  async def _mock_picker_proc(*args, **kwargs):
-      proc = MagicMock()
-      proc.returncode = 0
-      payload = {
-          "today": pid,
-          "contestId": 542,
-          "index": "D",
-          "name": "Superhero's Job",
-          "rating": 2600,
-          "tags": [],
-          "date": "2026-05-22",
-      }
-      proc.communicate = AsyncMock(return_value=(json.dumps(payload).encode(), b""))
-      return proc
-
-  async def _run():
-      with _all_patches(), \
-              patch("kouhai_bot.handlers.cmd.newproblem._picker_args", return_value=["picker"]), \
-              patch("kouhai_bot.handlers.cmd.newproblem.asyncio.create_subprocess_exec", _mock_picker_proc), \
-              patch("kouhai_bot.handlers.cmd.newproblem.summarize_problem", _slow_summary), \
-              patch("kouhai_bot.handlers.cmd.newproblem._send_problem_forward_card", AsyncMock(return_value=(123, {}))), \
-              patch("kouhai_bot.handlers.cmd.newproblem.schedule_prefetch_editorial", _record_prefetch):
-          from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
-          await _post_new_problem_locked(GID, prefix="test")
-
-  asyncio.run(_run())
-  assert scheduled == [pid]
-  assert summary_started.is_set() and scheduled, \
-      "prefetch should run before summarize finishes"
-  _cleanup()
-  print("✅ newproblem: schedules editorial prefetch early")
+    asyncio.run(_run())
+    prefetcher.claim.assert_awaited_once()
+    prefetcher.release.assert_awaited_once_with("slot-1")
+    schedule_editorial.assert_called_once_with(pid)
+    assert "『M』" in send_card.await_args.kwargs["post_msg"]
+    _cleanup()
+    print("✅ newproblem: prepared hot path does no preparation work")
 
 
 def test_newproblem_post_does_not_switch_state_when_send_fails():
-  _reset_state()
-  old_pid = "542D"
-  new_pid = "100A"
-  state_dir = os.path.join(_data_dir(), "groups", str(GID))
-  os.makedirs(state_dir, exist_ok=True)
-  with open(os.path.join(state_dir, "state.json"), "w") as f:
-      json.dump({"today": old_pid, "contestId": 542, "index": "D"}, f)
-  _write_statement(new_pid, {"description": "d", "input": "i", "time_limit": "1s", "memory_limit": "256MB"})
+    _reset_state()
+    old_pid = "542D"
+    new_pid = "100A"
+    state_dir = os.path.join(_data_dir(), "groups", str(GID))
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, "state.json"), "w") as f:
+        json.dump({"today": old_pid, "contestId": 542, "index": "D"}, f)
+    _write_statement(
+        new_pid,
+        {
+            "description": "d",
+            "input": "i",
+            "time_limit": "1s",
+            "memory_limit": "256MB",
+        },
+    )
 
-  async def _mock_picker_proc(*args, **kwargs):
-      proc = MagicMock()
-      proc.returncode = 0
-      payload = {
-          "today": new_pid,
-          "contestId": 100,
-          "index": "A",
-          "name": "New Problem",
-          "rating": 2000,
-          "tags": [],
-          "date": "2026-05-22",
-      }
-      proc.communicate = AsyncMock(return_value=(json.dumps(payload).encode(), b""))
-      return proc
+    payload = {
+        "today": new_pid,
+        "contestId": 100,
+        "index": "A",
+        "name": "New Problem",
+        "rating": 2000,
+        "tags": [],
+        "date": "2026-05-22",
+    }
+    prefetcher = _fake_problem_prefetcher(payload)
 
-  async def _fail_send_group(*args, **kwargs):
-      return False
+    async def _fail_send_group(*args, **kwargs):
+        return False
 
-  async def _run():
-      with _all_patches(), \
-              patch("kouhai_bot.handlers.cmd.newproblem._picker_args", return_value=["picker"]), \
-              patch("kouhai_bot.handlers.cmd.newproblem.asyncio.create_subprocess_exec", _mock_picker_proc), \
-              patch("kouhai_bot.handlers.cmd.newproblem.summarize_problem", AsyncMock(return_value=("summary", ""))), \
-              patch("kouhai_bot.handlers.cmd.newproblem._send_problem_forward_card", AsyncMock(return_value=(None, {}))), \
-              patch("kouhai_bot.handlers.cmd.newproblem.send_group_msg", _fail_send_group):
-          from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
-          await _post_new_problem_locked(GID, prefix="test")
+    async def _run():
+        with _all_patches(), \
+                patch(
+                    "kouhai_bot.handlers.cmd.newproblem.get_next_problem_prefetcher",
+                    return_value=prefetcher,
+                ), \
+                patch(
+                    "kouhai_bot.handlers.cmd.newproblem._send_problem_forward_card",
+                    AsyncMock(return_value=(None, {})),
+                ), \
+                patch(
+                    "kouhai_bot.handlers.cmd.newproblem.send_group_msg",
+                    _fail_send_group,
+                ):
+            from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
+            await _post_new_problem_locked(GID, prefix="test")
 
-  asyncio.run(_run())
-  with open(os.path.join(state_dir, "state.json")) as f:
-      state = json.load(f)
-  assert state["today"] == old_pid, f"Failed post should leave old state intact: {state}"
-  _cleanup()
-  print("✅ newproblem: failed delivery does not switch current problem")
+    asyncio.run(_run())
+    with open(os.path.join(state_dir, "state.json")) as f:
+        state = json.load(f)
+    assert state["today"] == old_pid, (
+        f"Failed post should leave old state intact: {state}"
+    )
+    prefetcher.release.assert_awaited_once_with("slot-1")
+    _cleanup()
+    print("✅ newproblem: failed delivery does not switch current problem")
+
+
+def test_newproblem_cancel_releases_claimed_prefetch_slot():
+    _reset_state()
+    old_pid = "542D"
+    new_pid = "100A"
+    _write_state(GID, {"today": old_pid, "contestId": 542, "index": "D"})
+    _write_statement(
+        new_pid,
+        {
+            "description": "d",
+            "input": "i",
+            "time_limit": "1s",
+            "memory_limit": "256MB",
+        },
+    )
+    prefetcher = _fake_problem_prefetcher({
+        "today": new_pid,
+        "contestId": 100,
+        "index": "A",
+        "name": "New Problem",
+        "rating": 2000,
+        "tags": [],
+    })
+    send_started = asyncio.Event()
+
+    async def _blocked_send(*_args, **_kwargs):
+        send_started.set()
+        await asyncio.Event().wait()
+
+    async def _run():
+        with _all_patches(), \
+                patch(
+                    "kouhai_bot.handlers.cmd.newproblem.get_next_problem_prefetcher",
+                    return_value=prefetcher,
+                ), \
+                patch(
+                    "kouhai_bot.handlers.cmd.newproblem._send_problem_forward_card",
+                    _blocked_send,
+                ):
+            from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
+
+            task = asyncio.create_task(_post_new_problem_locked(GID, prefix="test"))
+            await send_started.wait()
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    asyncio.run(_run())
+    prefetcher.release.assert_awaited_once_with("slot-1")
+    _cleanup()
+    print("✅ newproblem: cancellation releases claimed prefetch slot")
 
 
 def test_submit_correct_no_editorial_sends_nothing():
@@ -2924,25 +3030,16 @@ def test_newproblem_notify_group_on_pick_failure():
     _setup_problem()
     _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
 
-    async def _mock_pick_fail(*args, **kwargs):
-        """Fail the pick-json subprocess, succeed reveal."""
-        cmd_args = args[1:]  # skip 'python' executable
-        if any("reveal" in str(a) for a in cmd_args):
-            proc = AsyncMock()
-            proc.returncode = 0
-            proc.communicate = AsyncMock(return_value=(b"", b""))
-            return proc
-        if any("pick-json" in str(a) for a in cmd_args):
-            proc = AsyncMock()
-            proc.returncode = 1
-            proc.communicate = AsyncMock(return_value=(b"", b"SSL EOF"))
-            return proc
-        raise RuntimeError(f"unexpected subprocess: {cmd_args}")
+    from kouhai_bot.problem_preparation import ProblemPreparationError
+
+    prefetcher = SimpleNamespace(
+        claim=AsyncMock(side_effect=ProblemPreparationError("Codeforces 连接失败")),
+        release=AsyncMock(),
+    )
 
     with _all_patches(), patch(
-        "asyncio.create_subprocess_exec", _mock_pick_fail
-    ), patch(
-        "asyncio.sleep", AsyncMock()
+        "kouhai_bot.handlers.cmd.newproblem.get_next_problem_prefetcher",
+        return_value=prefetcher,
     ):
         from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
 
@@ -2983,25 +3080,16 @@ def test_newproblem_fallback_direct_saves_daily_msg_for_current_pid():
         "rating": 2000,
         "tags": ["dp"],
     }
-
-    async def _mock_subprocess(*args, **kwargs):
-        cmd_args = args[1:]
-        proc = AsyncMock()
-        if any("reveal" in str(a) for a in cmd_args):
-            proc.returncode = 0
-            proc.communicate = AsyncMock(return_value=(b"", b""))
-            return proc
-        if any("pick-json" in str(a) for a in cmd_args):
-            proc.returncode = 0
-            proc.communicate = AsyncMock(return_value=(json.dumps(picked).encode(), b""))
-            return proc
-        raise RuntimeError(f"unexpected subprocess: {cmd_args}")
+    prefetcher = _fake_problem_prefetcher(picked)
 
     async def _fail_forward(group_id, messages):
         return None
 
     with _all_patches(), \
-            patch("asyncio.create_subprocess_exec", _mock_subprocess), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem.get_next_problem_prefetcher",
+                return_value=prefetcher,
+            ), \
             patch("kouhai_bot.handlers.cmd.newproblem.send_group_forward_msg", _fail_forward), \
             patch("kouhai_bot.handlers.cmd.newproblem.asyncio.sleep", AsyncMock()):
         from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
@@ -3018,6 +3106,7 @@ def test_newproblem_fallback_direct_saves_daily_msg_for_current_pid():
     assert daily["post_msg"].startswith("刷新了一道新题"), daily
     assert "sample_messages" in daily
     assert "fwd_message_id" not in daily
+    prefetcher.release.assert_awaited_once_with("slot-1")
     _cleanup()
     print("✅ newproblem: fallback direct saves daily_msg for current pid")
 
@@ -3062,9 +3151,9 @@ def test_submit_scoreboard_update_settles_late_old_problem():
 def test_newproblem_picker_args_follow_env_rating_range():
     _reset_state()
     with _all_patches(), patch.dict(_LazyConfig._config, {"min_rating": 2100, "max_rating": 2900}):
-        from kouhai_bot.handlers.cmd.newproblem import _picker_args
+        from kouhai_bot.problem_preparation import picker_args
 
-        args = _picker_args("pick", GID, "--with-statement")
+        args = picker_args("pick", GID, "--with-statement")
 
     assert "--data-dir" in args, f"Missing data_dir flag: {args}"
     assert args[args.index("--data-dir") + 1] == _data_dir(), f"Wrong data_dir args: {args}"
@@ -3082,9 +3171,9 @@ def test_newproblem_picker_args_prefer_scheduler_override():
             patch("kouhai_bot.scheduler.engine.load_group_configs", return_value={
                 GID: MagicMock(min_rating=2300, max_rating=2700)
             }):
-        from kouhai_bot.handlers.cmd.newproblem import _picker_args
+        from kouhai_bot.problem_preparation import picker_args
 
-        args = _picker_args("pick", GID, "--with-statement")
+        args = picker_args("pick", GID, "--with-statement")
 
     assert args[args.index("--data-dir") + 1] == _data_dir(), f"Wrong data_dir args: {args}"
     assert args[args.index("--min-rating") + 1] == "2300", f"Scheduler min override ignored: {args}"

@@ -473,9 +473,9 @@ def resolve_problem_by_pid(pid: str) -> dict:
 
 
 def resolve_random_problem(group_id: int) -> dict:
-    from .handlers.cmd.newproblem import _effective_rating_range
+    from .problem_preparation import effective_rating_range
 
-    min_rating, max_rating = _effective_rating_range(group_id)
+    min_rating, max_rating = effective_rating_range(group_id)
     candidates: list[dict] = []
     for item in _fetch_problemset():
         if not isinstance(item, dict):

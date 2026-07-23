@@ -117,6 +117,20 @@ def _load_solved_problem_ids() -> set[str]:
     }
 
 
+def _load_current_problem_id() -> str:
+    path = _state_file()
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path) as f:
+            state = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(state, dict):
+        return ""
+    return str(state.get("today", "") or "").strip()
+
+
 def _problem_id(p: dict) -> str:
     return f"{p['contestId']}{p['index']}"
 
@@ -190,14 +204,24 @@ def select_problem() -> dict:
 
     used = _load_used()
     solved = _load_solved_problem_ids()
+    current = _load_current_problem_id()
+    excluded = used | solved
+    if current:
+        excluded.add(current)
 
     # Filter to unused and unsolved problems. solved comes from scoreboard.json so
     # historical solves remain excluded even if used.json is lost or rebuilt.
-    available = [p for p in problems if _problem_id(p) not in used | solved]
+    # state.json additionally protects the active unsolved problem if used.json
+    # is lost while the next-problem prefetcher is rebuilding.
+    available = [p for p in problems if _problem_id(p) not in excluded]
     if not available:
         # All unsolved problems have been used in this cycle - reset only used.
         _save_used(set())
-        available = [p for p in problems if _problem_id(p) not in solved]
+        available = [
+            p for p in problems
+            if _problem_id(p) not in solved
+            and _problem_id(p) != current
+        ]
         if not available:
             raise RuntimeError(
                 f"No unsolved problems found in range {RATING_MIN}-{RATING_MAX}"

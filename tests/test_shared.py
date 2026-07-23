@@ -167,6 +167,9 @@ def test_second_judge_prompt_rejects_repaired_greedy_for_teleporters():
 
 
 class _DummySession:
+    def __init__(self, *_args, **_kwargs):
+        pass
+
     async def __aenter__(self):
         return self
 

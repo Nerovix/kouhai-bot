@@ -11,6 +11,7 @@ from .config import get_config
 from .friend_requests import doubt_friend_request_loop
 from .handlers import process_event
 from .napcat.client import NapCatServer
+from .problem_prefetch import get_next_problem_prefetcher
 from .runtime import bootstrap_runtime, setup_logging
 from .scheduler.engine import scheduler_loop
 
@@ -24,8 +25,11 @@ class WorkerRuntime:
         self._shutdown = asyncio.Event()
         self._scheduler_stop = asyncio.Event()
         self._friend_request_stop = asyncio.Event()
+        self._problem_prefetch_stop = asyncio.Event()
         self._scheduler_task: asyncio.Task | None = None
         self._friend_request_task: asyncio.Task | None = None
+        self._problem_prefetch_task: asyncio.Task | None = None
+        self._problem_prefetcher = get_next_problem_prefetcher(self.cfg.current_group)
 
     async def run(self) -> None:
         bootstrap_runtime()
@@ -38,6 +42,10 @@ class WorkerRuntime:
             doubt_friend_request_loop(stop_event=self._friend_request_stop),
             name="worker_doubt_friend_requests",
         )
+        self._problem_prefetch_task = asyncio.create_task(
+            self._problem_prefetcher.run(stop_event=self._problem_prefetch_stop),
+            name="worker_next_problem_prefetch",
+        )
         self._install_signal_handlers()
         logger.info("Worker runtime is running. Press Ctrl+C to stop.")
         try:
@@ -49,13 +57,18 @@ class WorkerRuntime:
         self._shutdown.set()
         self._scheduler_stop.set()
         self._friend_request_stop.set()
+        self._problem_prefetch_stop.set()
         await self.napcat.stop()
+        await self._problem_prefetcher.shutdown()
         if self._scheduler_task is not None:
             with suppress(asyncio.CancelledError):
                 await self._scheduler_task
         if self._friend_request_task is not None:
             with suppress(asyncio.CancelledError):
                 await self._friend_request_task
+        if self._problem_prefetch_task is not None:
+            with suppress(asyncio.CancelledError):
+                await self._problem_prefetch_task
         await self._wait_for_background_tasks()
 
     async def _on_event(self, event: dict) -> None:
@@ -77,6 +90,7 @@ class WorkerRuntime:
                 if task is not current
                 and task is not self._scheduler_task
                 and task is not self._friend_request_task
+                and task is not self._problem_prefetch_task
                 and not task.done()
             ]
             if not pending:

@@ -7,16 +7,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
 def test_build_notes_message_translates_and_formats():
-    from kouhai_bot.handlers.cmd import newproblem
+    from kouhai_bot import problem_preparation
 
     async def _run():
         stmt = {"notes": "Line A<br />Line B"}
         with patch.object(
-            newproblem,
+            problem_preparation,
             "translate_sample_notes",
             AsyncMock(return_value=("第一行\n第二行", "")),
         ) as mocked_translate:
-            result = await newproblem._build_notes_message(stmt)
+            result = await problem_preparation.build_notes_message(stmt)
         assert result == "样例解释：\n第一行\n第二行"
         mocked_translate.assert_awaited_once_with("Line A\nLine B", [])
 
@@ -24,7 +24,7 @@ def test_build_notes_message_translates_and_formats():
 
 
 def test_build_notes_message_falls_back_to_normalized_original():
-    from kouhai_bot.handlers.cmd import newproblem
+    from kouhai_bot import problem_preparation
 
     async def _run():
         stmt = {
@@ -34,18 +34,18 @@ def test_build_notes_message_falls_back_to_normalized_original():
             )
         }
         with patch.object(
-            newproblem,
+            problem_preparation,
             "translate_sample_notes",
             AsyncMock(return_value=(None, "")),
         ):
-            result = await newproblem._build_notes_message(stmt)
+            result = await problem_preparation.build_notes_message(stmt)
         assert result == "样例解释：\nFirst line\nSecond & line"
 
     asyncio.run(_run())
 
 
 def test_build_notes_message_strips_leaked_thinking_without_rewriting_text():
-    from kouhai_bot.handlers.cmd import newproblem
+    from kouhai_bot import problem_preparation
 
     async def _run():
         stmt = {"notes": "placeholder"}
@@ -59,27 +59,27 @@ def test_build_notes_message_strips_leaked_thinking_without_rewriting_text():
             "with p \\leq q \\ge r and s \\oplus t."
         )
         with patch.object(
-            newproblem,
+            problem_preparation,
             "translate_sample_notes",
             AsyncMock(return_value=(raw, "")),
         ):
-            result = await newproblem._build_notes_message(stmt)
+            result = await problem_preparation.build_notes_message(stmt)
         assert result == f"样例解释：\n{expected}"
 
     asyncio.run(_run())
 
 
 def test_build_notes_message_returns_empty_on_translate_exception():
-    from kouhai_bot.handlers.cmd import newproblem
+    from kouhai_bot import problem_preparation
 
     async def _run():
         stmt = {"notes": "Line A<br />Line B"}
         with patch.object(
-            newproblem,
+            problem_preparation,
             "translate_sample_notes",
             AsyncMock(side_effect=RuntimeError("llm down")),
         ):
-            result = await newproblem._build_notes_message(stmt)
+            result = await problem_preparation.build_notes_message(stmt)
         assert result == ""
 
     asyncio.run(_run())

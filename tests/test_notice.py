@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -41,10 +42,12 @@ def _poke_event(**overrides) -> dict:
 
 def _reset_newproblem_runtime():
     from kouhai_bot.handlers.cmd import newproblem
+    from kouhai_bot.problem_prefetch import reset_prefetchers_for_tests
 
     newproblem._cooldowns.clear()
     newproblem._newproblem_active.clear()
     newproblem._newproblem_locks.clear()
+    reset_prefetchers_for_tests()
     return newproblem
 
 
@@ -81,7 +84,6 @@ def test_bot_poke_is_returned_and_posts_when_eligible(monkeypatch):
 def test_quiet_poke_picker_failure_sends_no_group_message(monkeypatch, tmp_path):
     newproblem = _reset_newproblem_runtime()
     group_messages = []
-    pick_attempts = 0
 
     cfg = SimpleNamespace(
         bot_qq=BOT_QQ,
@@ -92,14 +94,6 @@ def test_quiet_poke_picker_failure_sends_no_group_message(monkeypatch, tmp_path)
         max_rating=3000,
     )
 
-    class FakeProcess:
-        def __init__(self, returncode, stdout=b"", stderr=b""):
-            self.returncode = returncode
-            self._result = (stdout, stderr)
-
-        async def communicate(self):
-            return self._result
-
     async def fake_poke(_group_id, _user_id):
         return True
 
@@ -107,29 +101,29 @@ def test_quiet_poke_picker_failure_sends_no_group_message(monkeypatch, tmp_path)
         group_messages.append((group_id, message))
         return True
 
-    async def fake_subprocess(*args, **_kwargs):
-        nonlocal pick_attempts
-        if "reveal" in args:
-            return FakeProcess(0)
-        if "pick-json" in args:
-            pick_attempts += 1
-            return FakeProcess(1, stderr=b"SSL EOF")
-        raise AssertionError(f"unexpected subprocess: {args}")
+    from kouhai_bot.problem_preparation import ProblemPreparationError
 
-    async def no_sleep(_delay):
-        return None
+    prefetcher = SimpleNamespace(
+        claim=AsyncMock(
+            side_effect=ProblemPreparationError("Codeforces 连接失败")
+        ),
+        release=AsyncMock(),
+    )
 
     monkeypatch.setattr("kouhai_bot.handlers.notice.get_config", lambda: cfg)
     monkeypatch.setattr(newproblem, "get_config", lambda: cfg)
     monkeypatch.setattr("kouhai_bot.handlers.notice.send_group_poke", fake_poke)
     monkeypatch.setattr(newproblem, "_has_unsolved_problem", lambda _gid: False)
     monkeypatch.setattr(newproblem, "send_group_msg", fake_send_group_msg)
-    monkeypatch.setattr(newproblem.asyncio, "create_subprocess_exec", fake_subprocess)
-    monkeypatch.setattr(newproblem.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        newproblem,
+        "get_next_problem_prefetcher",
+        lambda _group_id: prefetcher,
+    )
 
     asyncio.run(process_event(_poke_event(), spawn_handlers=False))
 
-    assert pick_attempts == 3
+    prefetcher.claim.assert_awaited_once()
     assert group_messages == []
     assert GROUP_ID not in newproblem._cooldowns
 

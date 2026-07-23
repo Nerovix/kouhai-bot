@@ -25,7 +25,8 @@ NapCat (QQ) ──WS──> worker.py
                          │
                          ├── process_event(..., spawn_handlers=True)
                          ├── cmd/*.py  auto-discovered by registry
-                         └── scheduler/ background loop (60s tick)
+                         ├── scheduler/ background loop (60s tick)
+                         └── next-problem prefetch loop (one READY slot)
 ```
 
 ## Key Design Decisions
@@ -52,7 +53,21 @@ NapCat (QQ) ──WS──> worker.py
   `fetcher.process_problem()` for image/text extraction as well as metadata parsing.
 - **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before image metadata via `_images_collected`. Stale caches with images are re-fetched so image metadata is available for multimodal tasks.
 - **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
-- **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection, dispatches commands, and owns the scheduler in one process. There is no SQLite event queue, ingress supervisor, worker hot-swap, or auto-update loop.
+- **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection,
+  dispatches commands, and owns the scheduler and next-problem prefetch loop in one
+  process. There is no SQLite event queue, ingress supervisor, worker hot-swap, or
+  auto-update loop.
+- **Next-problem prefetch**: `problem_preparation.py` contains the complete blocking
+  group-problem preparation pipeline (pick/fetch, samples, translated notes, audited
+  summary), while `problem_prefetch.py` maintains one durable READY slot per group in
+  `next_problem.json`. `/newproblem` claims that slot under its existing post lock and
+  normally only builds/sends the QQ card; if startup preparation is still cold it awaits
+  the same single-flight task. A claim prevents refill until publication finishes, then
+  release wakes the worker loop. READY-slot validation covers rating-range changes,
+  current/solved problems, statement presence, and multimodal availability. Background
+  preparation is not reported by `/status`; only an admitted post is. `/setproblem`
+  and `/setproblem random` intentionally keep their live-fetch behavior and never use
+  this slot.
 - **Friend request auto-approval**: Normal OneBot `post_type="request"` / `request_type="friend"` events are parsed by `napcat/client.py`, routed by `handlers.process_event()`, and approved via `set_friend_add_request`. QQ/NapCat "doubtful" friend requests are not reliably pushed as request events, so `worker.py` also runs `friend_requests.doubt_friend_request_loop()`, which polls `get_doubt_friends_add_request` every 60 seconds and approves with `set_doubt_friends_add_request`. Both paths approve only after the requester is confirmed to be a member of `CURRENT_GROUP`; lookup failure, malformed events, non-friend requests, and non-members are ignored without approving. Requests that were already consumed by another QQ client may not appear in the doubtful-request poll.
 - **User groups**: `user_groups.py` — all users default to `default`; `USER_GROUPS` configures
   non-default groups such as `starred`/`打星`, their members, submit delay, and rejection
@@ -90,10 +105,14 @@ NapCat (QQ) ──WS──> worker.py
   repair followed by another audit; indeterminate or repeatedly failing audits reject the
   summary so the caller can retry instead of posting it.
 - **Official CF tutorials**: Scraped editorials live under `{data_dir}/tutorials/{pid}.json`
-  (see `tools/cf_tutorial_agent.py`; low-level CF HTML helpers live in `tools/scrape_cf_tutorial.py`). Runtime extraction is in `tutorials.py`. On the
-  On **new problem** (`/newproblem`), `schedule_prefetch_editorial(pid)`
-  starts background translation (using the `llm.general_model` queue) into `tutorial_translations/` so first AC
-  can deliver without waiting. On **first AC**, congrats is sent in `_finalize_submit`, then
+  (see `tools/cf_tutorial_agent.py`; low-level CF HTML helpers live in
+  `tools/scrape_cf_tutorial.py`). Runtime extraction is in `tutorials.py`. During
+  **next-problem preparation**, `schedule_prefetch_editorial(pid)` starts background
+  translation (using the `llm.general_model` queue) into `tutorial_translations/` so
+  first AC can deliver without waiting. Editorial completion does not gate the
+  next-problem READY slot. Publication reasserts the same trigger so a READY slot that
+  survived a worker restart also resumes any interrupted crawl. On **first AC**,
+  congrats is sent in `_finalize_submit`, then
   `schedule_post_solve_editorial_followup()` only **delivers** (awaits in-flight prefetch if
   needed). Neither path uses the state scheduler. Tutorial scraping depends on Playwright
   with Chromium installed for browser fallback when HTTP fetches hit Codeforces blocking.
@@ -368,6 +387,7 @@ An empty `model_tag` disables the feature per-provider.
 groups/<gid>/state.json      # today's problem (+ posted_at unix ts when card was delivered)
 groups/<gid>/scoreboard.json # cumulative {solves, user_submissions}
 groups/<gid>/daily_msg.json  # forward card payload (msg_id/sample_msg_ids/note_msg_id/snake_msg_id 等, for /problem)
+groups/<gid>/next_problem.json # durable READY prefetch slot; atomically claimed by /newproblem
 groups/<gid>/problem_summaries.json # saved Chinese problem summaries keyed by pid
 groups/<gid>/used.json       # used problem IDs
 groups/<gid>/groupctx_*.json # group message context
@@ -396,7 +416,7 @@ No repository-local runtime queue is used.
 | `/submit` (`/sbm`) | submit.py | `handle` | ✅ state scheduler | `llm.smart_model` queue | Judge solution, save history, serialize only first-blood/scoreboard; configured dynamic-wait group submits redirect to private judge; private AC does not score until synced |
 | `/clarify` (`/clrf`) | clarify.py | `handle` | ✅ state scheduler | `llm.general_model` queue | Clarify problem details (JSON output, anti-spoiler, no original problem identity), using admission-time pid; private uses pid-specific summary |
 | `/clear` | clear.py | `handle` | ✅ state scheduler | — | Clear the current user's stored submit/clarify/review history for the admission-time current problem or current private problem |
-| `/newproblem` (`/np`) | newproblem.py | `handle` | ✅ post lock | `llm.general_model` queue | Force new problem when solved (or none); unsolved needs exact `/newproblem --force`; samples are forwarded as separate nodes; if statement has `notes`, translate+symbol-normalize and append as a dedicated notes node; commits state only after card delivery succeeds and keeps `daily_msg.json` in sync even on direct-text fallback |
+| `/newproblem` (`/np`) | newproblem.py | `handle` | ✅ post lock | prefetched `llm.general_model` result | Force new problem when solved (or none); unsolved needs exact `/newproblem --force`; claims the one-slot group prefetch (or awaits its single-flight cold build); samples are forwarded as separate nodes; if statement has `notes`, translate+symbol-normalize and append as a dedicated notes node; commits state only after card delivery succeeds and keeps `daily_msg.json` in sync even on direct-text fallback |
 | `/problem` (`/pb`) | stubs.py | `handle_problem` | ❌ | — | Resend current group/private problem via forward card; group path only uses `daily_msg.json` when pid matches `state.json.today`; if solved, add a friendly `/newproblem` hint |
 | `/tag` | stubs.py | `handle_tag` | ❌ | — | Show current group/private problem CF tags |
 | `/scoreboard` | stubs.py | `handle_scoreboard` | ❌ | — | Cumulative weighted leaderboard; shows the formula at the top, then refreshes latest group nicknames at display time |
@@ -412,9 +432,8 @@ No repository-local runtime queue is used.
 Stateful commands (`/submit`, `/clarify`, `/review`, `/clear`) no longer serialize
 through one global lock or one per-group FIFO execution queue. Group requests run
 through a **per-group state scheduler** implemented in `submit.py`; private judge
-requests run through a separate **per-user private coordinator**. `/newproblem` and
-`/newproblem` uses its own per-group post lock and commits current-problem state only
-after delivery.
+requests run through a separate **per-user private coordinator**. `/newproblem` uses
+its own per-group post lock and commits current-problem state only after delivery.
 
 Key rules:
 
@@ -457,15 +476,16 @@ Key rules:
   addendum can refer to it after a restart, and the received `/submit` still counts as a
   submit attempt in saved user history. When superseded by `/clear`,
   it is removed with the rest of that user's current-problem context.
-- **New problem visibility**: `/newproblem` picks and summarizes a candidate
-  without changing `state.json`. Until the new card is successfully delivered, all
-  commands still see the old problem. Failed delivery leaves the old current problem
-  intact.
-- **New problem serialization/status**: `/newproblem`, `/newproblem --force`, and
-  `/newproblem` uses a per-group post lock. User-triggered new-problem
-  commands are rejected immediately with a busy reminder while another new problem is
-  being prepared. `/status` reports this post work as busy while the lock holder is
-  building/sending the card.
+- **New problem visibility**: the worker prepares one candidate without changing
+  `state.json`. `/newproblem` atomically claims it, but all commands continue to see the
+  old problem until the new card is successfully delivered. Failed delivery leaves the
+  old current problem intact; the claimed candidate is discarded, then background
+  refill begins.
+- **New problem serialization/status**: `/newproblem`, `/newproblem --force`, and the
+  poke trigger use a per-group post lock. User-triggered new-problem commands are
+  rejected immediately with a busy reminder while another post is claiming/building/
+  sending. `/status` reports only admitted post work as busy; routine background
+  prefetch is deliberately invisible.
 
 Status helpers used by `/status`:
 

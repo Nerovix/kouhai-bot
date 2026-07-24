@@ -22,7 +22,7 @@ from urllib.parse import urldefrag, urljoin
 from kouhai_bot.handlers.shared import parse_json_with_llm_repair
 from kouhai_bot.llm import chat_completion
 from kouhai_bot.problems.cf_fetcher import content_valid
-from kouhai_bot.tutorials import MIN_EDITORIAL_LEN, extract_editorial
+from kouhai_bot.editorial_content import MIN_EDITORIAL_LEN, extract_editorial
 
 from scrape_cf_tutorial import ScrapeError
 from scrape_cf_tutorial import Section
@@ -45,6 +45,10 @@ DEFAULT_LLM_TEXT_LIMIT = 200000
 
 class AgentNoMatch(RuntimeError):
     """Expected no-result outcome. The caller should not write a tutorial JSON."""
+
+
+class AgentIncomplete(RuntimeError):
+    """The search did not reach a reliable terminal result and may be retried."""
 
 
 @dataclass(frozen=True)
@@ -130,7 +134,7 @@ def statement_to_text(stmt: dict[str, Any], *, limit: int = 12000) -> str:
     return text
 
 
-def extract_blog_links(problem_html: str, base_url: str, *, limit: int) -> list[str]:
+def extract_blog_links(problem_html: str, base_url: str, *, limit: int = 0) -> list[str]:
     anchor_re = re.compile(
         r"<a[^>]+href\s*=\s*['\"](?P<href>[^'\"]+)['\"][^>]*>(?P<text>[\s\S]*?)</a>",
         re.I,
@@ -154,7 +158,10 @@ def extract_blog_links(problem_html: str, base_url: str, *, limit: int) -> list[
             score -= 20
         scored.append((-score, pos, url))
     scored.sort()
-    return [url for _, _, url in scored[: max(1, limit)]]
+    urls = [url for _, _, url in scored]
+    if limit > 0:
+        return urls[:limit]
+    return urls
 
 
 def _section_from_text(label: str, title: str, text: str) -> Section:
@@ -189,19 +196,36 @@ def collect_blog_documents(
     fetcher: str,
     pw_wait_ms: int,
     blog_limit: int,
-) -> tuple[str, str, list[BlogDocument]]:
+    excluded_tutorial_urls: frozenset[str] = frozenset(),
+) -> tuple[str, str, list[BlogDocument], tuple[str, ...]]:
     problem_url = build_problem_url_from_pid(pid)
     problem_html = fetch_html(problem_url, fetcher=fetcher, pw_wait_ms=pw_wait_ms)
     problem_title = extract_problem_title(problem_html)
-    blog_urls = extract_blog_links(problem_html, problem_url, limit=blog_limit)
-    if not blog_urls:
+    all_blog_urls = extract_blog_links(problem_html, problem_url)
+    if not all_blog_urls:
         raise AgentNoMatch("problem_page_has_no_blog_entry_links")
+    remaining_blog_urls = [
+        url for url in all_blog_urls if url not in excluded_tutorial_urls
+    ]
+    if not remaining_blog_urls:
+        raise AgentNoMatch("all_blog_entry_links_excluded")
+
+    search_truncated = blog_limit > 0 and len(remaining_blog_urls) > blog_limit
+    blog_urls = (
+        remaining_blog_urls[:blog_limit]
+        if blog_limit > 0
+        else remaining_blog_urls
+    )
 
     blogs: list[BlogDocument] = []
+    incomplete_failures: list[str] = (
+        ["candidate_limit_reached"] if search_truncated else []
+    )
     for idx, blog_url in enumerate(blog_urls, start=1):
         try:
             tutorial_html = fetch_html(blog_url, fetcher=fetcher, pw_wait_ms=pw_wait_ms)
             if not content_valid(tutorial_html):
+                incomplete_failures.append(f"b{idx}:invalid_blog_content")
                 continue
             tutorial_title = extract_page_title(tutorial_html)
             body_html = extract_blog_body_html(tutorial_html)
@@ -218,7 +242,8 @@ def collect_blog_documents(
                     f"[Codeforces dynamic tutorial fragment for {pid} - {title}]\n"
                     f"{dynamic_text.strip()}"
                 ).strip()
-        except ScrapeError:
+        except ScrapeError as exc:
+            incomplete_failures.append(f"b{idx}:scrape_error:{exc}")
             continue
         if body.strip():
             blogs.append(
@@ -231,8 +256,10 @@ def collect_blog_documents(
             )
 
     if not blogs:
+        if incomplete_failures:
+            raise AgentIncomplete("; ".join(incomplete_failures))
         raise AgentNoMatch("no_readable_blog_bodies")
-    return problem_url, problem_title, blogs
+    return problem_url, problem_title, blogs, tuple(incomplete_failures)
 
 
 def _build_extractor_messages(
@@ -331,7 +358,7 @@ async def extract_editorial_from_blog(
         send_reasoning_effort=False,
     )
     if not result.text:
-        raise AgentNoMatch(f"extractor_llm_failed:{result.failure_kind}")
+        raise AgentIncomplete(f"extractor_llm_failed:{result.failure_kind}")
 
     parsed, _repair_tag = await parse_json_with_llm_repair(
         result.text,
@@ -344,14 +371,17 @@ async def extract_editorial_from_blog(
         task="summary",
         timeout=timeout,
     )
-    if parsed.get("match") is not True:
+    match = parsed.get("match")
+    if match is False:
         raise AgentNoMatch(str(parsed.get("reason") or "extractor_no_match"))
+    if match is not True:
+        raise AgentIncomplete("extractor_invalid_match_result")
 
     start_text = str(parsed.get("start_text") or "").strip()
     end_text = str(parsed.get("end_text") or "").strip()
     editorial_text = _extract_body_span(blog.body, start_text, end_text)
     if len(editorial_text) < MIN_EDITORIAL_LEN:
-        raise AgentNoMatch("extractor_span_not_found_or_too_short")
+        raise AgentIncomplete("extractor_span_not_found_or_too_short")
 
     try:
         confidence = float(parsed.get("confidence"))
@@ -413,20 +443,28 @@ async def run_agent_for_pid(
     selector_timeout_sec: int = DEFAULT_SELECTOR_TIMEOUT_SEC,
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
     llm_text_limit: int = DEFAULT_LLM_TEXT_LIMIT,
+    excluded_tutorial_urls: frozenset[str] = frozenset(),
 ) -> AgentResult:
     started = time.monotonic()
     stmt = load_statement(statements_dir / f"{pid}.json")
     problem_text = statement_to_text(stmt)
 
     async def _run() -> AgentResult:
-        problem_url, problem_title, blogs = await asyncio.to_thread(
+        (
+            problem_url,
+            problem_title,
+            blogs,
+            collection_incomplete,
+        ) = await asyncio.to_thread(
             collect_blog_documents,
             pid=pid,
             fetcher=fetcher,
             pw_wait_ms=pw_wait_ms,
             blog_limit=blog_limit,
+            excluded_tutorial_urls=excluded_tutorial_urls,
         )
-        failures: list[str] = []
+        no_match_failures: list[str] = []
+        incomplete_failures = list(collection_incomplete)
         selected: EditorialCandidate | None = None
         confidence = 0.0
         reason = ""
@@ -441,11 +479,14 @@ async def run_agent_for_pid(
                     timeout=selector_timeout_sec,
                     llm_text_limit=llm_text_limit,
                 )
+            except AgentIncomplete as exc:
+                incomplete_failures.append(f"{blog.blog_id}:{exc}")
+                continue
             except AgentNoMatch as exc:
-                failures.append(f"{blog.blog_id}:{exc}")
+                no_match_failures.append(f"{blog.blog_id}:{exc}")
                 continue
             if candidate_confidence < confidence_threshold:
-                failures.append(
+                no_match_failures.append(
                     f"{blog.blog_id}:extractor_low_confidence:{candidate_confidence:.2f}:"
                     f"{candidate_reason or candidate.title}"
                 )
@@ -456,7 +497,10 @@ async def run_agent_for_pid(
             break
 
         if selected is None:
-            detail = "; ".join(failures) if failures else "extractor_no_match"
+            all_failures = [*no_match_failures, *incomplete_failures]
+            detail = "; ".join(all_failures) if all_failures else "extractor_no_match"
+            if incomplete_failures:
+                raise AgentIncomplete(detail)
             raise AgentNoMatch(detail)
 
         elapsed = time.monotonic() - started
@@ -482,4 +526,4 @@ async def run_agent_for_pid(
     try:
         return await asyncio.wait_for(_run(), timeout=max(1, deadline_sec))
     except asyncio.TimeoutError as exc:
-        raise AgentNoMatch(f"deadline_exceeded:{deadline_sec}s") from exc
+        raise AgentIncomplete(f"deadline_exceeded:{deadline_sec}s") from exc

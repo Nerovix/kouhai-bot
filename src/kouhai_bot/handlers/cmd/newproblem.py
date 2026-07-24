@@ -6,8 +6,9 @@ import asyncio
 import json
 import logging
 import os
-import sys
 import time
+from contextlib import suppress
+from datetime import datetime, timedelta, timezone
 
 from .. import registry
 from ..registry import CommandDef
@@ -19,16 +20,11 @@ from ..shared import (
     save_problem_card_ref,
     save_problem_summary,
     save_scoreboard,
-    statement_images,
     snake_replace,
-    summarize_problem,
-    translate_sample_notes,
 )
 from ...config import get_config
 from ...context import append_group_ctx
 from ...editorial_followup import schedule_prefetch_editorial
-from ...llm import strip_leaked_thinking
-from ...user_groups import settle_dynamic_submit_wait_for_problem
 from ...napcat.client import (
     build_plain_message,
     react_emoji,
@@ -36,10 +32,17 @@ from ...napcat.client import (
     send_group_forward_msg,
     send_private_msg,
 )
-from ...problems.picker import _normalize_sample_block
+from ...problem_prefetch import get_next_problem_prefetcher
+from ...problem_preparation import (
+    PICKER_PATH,
+    ProblemPreparationError,
+    format_previous_problem_reveal,
+)
+from ...user_groups import settle_dynamic_submit_wait_for_problem
 from .submit import run_group_state_update
 
 logger = logging.getLogger("kouhai-bot.cmd.newproblem")
+TZ = timezone(timedelta(hours=8))
 
 # ── Cooldown ────────────────────────────────────────────────────────────
 
@@ -138,71 +141,6 @@ async def enqueue_new_problem(
     finally:
         lock.release()
 
-# ── Picker path ─────────────────────────────────────────────────────────
-
-_PICKER_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "kouhai_bot", "problems", "picker.py",
-)
-_PICKER_PATH = os.path.abspath(os.path.normpath(_PICKER_PATH))
-_STATEMENTS_FALLBACK_DIR = os.path.expanduser("~/.kouhai-bot/statements")
-
-
-def _effective_rating_range(group_id: int) -> tuple[int, int]:
-    cfg = get_config()
-    min_rating = int(cfg.min_rating)
-    max_rating = int(cfg.max_rating)
-    try:
-        from ...scheduler.engine import load_group_configs
-
-        group_cfg = load_group_configs().get(group_id)
-        if group_cfg:
-            if group_cfg.min_rating is not None:
-                min_rating = int(group_cfg.min_rating)
-            if group_cfg.max_rating is not None:
-                max_rating = int(group_cfg.max_rating)
-    except Exception:
-        logger.warning(
-            f"[group_{group_id}] Failed to load scheduler rating overrides; using config range",
-            exc_info=True,
-        )
-    return min_rating, max_rating
-
-
-def _picker_args(command: str, group_id: int, *extra: str) -> list[str]:
-    min_rating, max_rating = _effective_rating_range(group_id)
-    args = [
-        _PICKER_PATH,
-        command,
-        "--group",
-        str(group_id),
-        "--data-dir",
-        str(get_config().data_dir),
-        "--min-rating",
-        str(min_rating),
-        "--max-rating",
-        str(max_rating),
-    ]
-    args.extend(extra)
-    return args
-
-
-def _classify_pick_error(stderr_text: str) -> str:
-    """Classify picker stderr into a user-friendly Chinese message."""
-    lower = stderr_text.lower()
-    # CF-specific connectivity issues
-    if any(kw in stderr_text for kw in (
-        "codeforces.com", "SSL", "SSLEOFError", "SSLError",
-        "ConnectionError", "Max retries exceeded", "RemoteDisconnected",
-    )):
-        return "Codeforces 连接失败"
-    if any(kw in lower for kw in ("timeout", "timed out")):
-        return "Codeforces 请求超时"
-    if any(kw in lower for kw in ("permission", "access denied", "ioerror", "filenotfound")):
-        return "本地数据读取异常"
-    # fallback — still log the raw text above
-    return "题目选取失败，稍后再试"
-
-
 def _newproblem_lock(group_id: int) -> asyncio.Lock:
     lock = _newproblem_locks.get(group_id)
     if lock is None:
@@ -264,66 +202,6 @@ def _save_daily_msg(
         json.dump(daily_msg, f, ensure_ascii=False, indent=2)
 
 
-def _load_statement_json(cfg, group_id: int, pid: str) -> dict:
-    """Load statement JSON from runtime dir, then fallback dir."""
-    candidate_paths = [
-        os.path.join(cfg.data_dir, "statements", f"{pid}.json"),
-        os.path.join(_STATEMENTS_FALLBACK_DIR, f"{pid}.json"),
-    ]
-    for path in candidate_paths:
-        if not os.path.exists(path):
-            continue
-        try:
-            with open(path) as f:
-                stmt = json.load(f)
-            if isinstance(stmt, dict):
-                return stmt
-            logger.warning(f"[group_{group_id}] Statement at {path} is not a dict")
-        except Exception as e:
-            logger.warning(f"[group_{group_id}] Failed to load statement {path}: {e}")
-    return {}
-
-
-def _build_sample_messages(stmt: dict) -> list[str]:
-    """Build one message per sample."""
-    samples = stmt.get("samples")
-    if not isinstance(samples, list):
-        return []
-    lines: list[str] = []
-    for idx, sample in enumerate(samples, 1):
-        if not isinstance(sample, dict):
-            continue
-        sample_input = sample.get("input")
-        sample_output = sample.get("output")
-        if sample_input is None and sample_output is None:
-            continue
-        normalized_input = _normalize_sample_block(sample_input).rstrip("\n")
-        normalized_output = _normalize_sample_block(sample_output).rstrip("\n")
-        text = (
-            f"样例 {idx}\n"
-            f"Input:\n{normalized_input}\n\n"
-            f"Output:\n{normalized_output}"
-        )
-        lines.append(text)
-    return lines
-
-
-async def _build_notes_message(stmt: dict) -> str:
-    raw_notes = stmt.get("notes")
-    normalized_notes = _normalize_sample_block(raw_notes)
-    if not normalized_notes:
-        return ""
-    try:
-        translated_notes, _model_tag = await translate_sample_notes(normalized_notes, statement_images(stmt))
-    except Exception as e:
-        logger.warning("Notes translation failed, skipping notes node: %s", e)
-        return ""
-    final_notes = strip_leaked_thinking(translated_notes or normalized_notes)
-    if not final_notes:
-        return ""
-    return f"样例解释：\n{final_notes}"
-
-
 async def _send_problem_forward_card(
     group_id: int,
     post_msg: str,
@@ -338,7 +216,7 @@ async def _send_problem_forward_card(
 
     snake_msg_id = None
     if snake_enabled:
-        snake_path = os.path.join(os.path.dirname(_PICKER_PATH), "snake_trio.jpg")
+        snake_path = str(PICKER_PATH.parent / "snake_trio.jpg")
         if os.path.exists(snake_path):
             try:
                 import base64
@@ -392,127 +270,85 @@ async def _post_new_problem_locked(
     group_id: int, prefix: str | None = None, *, notify_group: bool = False,
 ) -> bool:
     cfg = get_config()
-    python = sys.executable
     state_dir = os.path.join(cfg.data_dir, "groups", str(group_id))
     os.makedirs(state_dir, exist_ok=True)
-
-    # Step 1: Reveal yesterday's problem
-    reveal_text = ""
+    prefetcher = get_next_problem_prefetcher(group_id)
     try:
-        proc = await asyncio.create_subprocess_exec(
-            python, *_picker_args("reveal", group_id),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        if proc.returncode == 0:
-            reveal_text = stdout.decode().strip()
-    except Exception as e:
-        logger.error(f"Reveal error (group {group_id}): {e}")
-
-    # Step 2: Pick today's problem (w/ retry)
-    picked_state: dict = {}
-    pick_error_msg = ""
-    for attempt in range(1, 4):
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                python, *_picker_args("pick-json", group_id, "--with-statement"),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-            if proc.returncode != 0:
-                err_text = stderr.decode()[:200]
-                logger.error(
-                    f"Pick failed (group {group_id}, attempt {attempt}/3): {err_text}"
-                )
-                pick_error_msg = _classify_pick_error(err_text)
-            else:
-                picked_state = json.loads(stdout.decode())
-                if not isinstance(picked_state, dict):
-                    logger.error(
-                        f"Pick failed (group {group_id}, attempt {attempt}/3): "
-                        f"invalid picker payload"
-                    )
-                    pick_error_msg = "题目选取结果异常"
-                    picked_state = {}  # reset to ensure truthiness check catches it
-                else:
-                    break  # success
-        except Exception as e:
-            logger.error(
-                f"Pick error (group {group_id}, attempt {attempt}/3): {e}"
-            )
-            pick_error_msg = f"Codeforces 连接失败"
-        if attempt < 3:
-            delay = 2 * attempt
-            logger.info(f"Retrying pick in {delay}s...")
-            await asyncio.sleep(delay)
-
-    if not picked_state:
+        slot = await prefetcher.claim()
+    except ProblemPreparationError as exc:
         if notify_group:
             await send_group_msg(group_id, build_plain_message(
-                f"刷题失败了…{pick_error_msg}，连试 3 次都没成功，等一会儿再试试吧😢"
+                f"刷题失败了…{exc.user_message}，连试 3 次都没成功，等一会儿再试试吧😢"
             ))
         return False
 
-    # Step 3: Generate Chinese summary
-    desc = ""
-    model_tag = ""
-    pid = str(picked_state.get("today", "") or "")
-    sample_messages: list[str] = []
-    notes_message = ""
     try:
-        if pid:
+        prepared = slot.problem
+        picked_state = dict(prepared.state)
+        picked_state["date"] = datetime.now(TZ).strftime("%Y-%m-%d")
+        pid = prepared.pid
+        desc = prepared.summary
+        model_tag = prepared.model_tag
+        sample_messages = list(prepared.sample_messages)
+        notes_message = prepared.notes_message
+        reveal_text = format_previous_problem_reveal(get_today_problem(group_id))
+
+        # Preserve the original publication-time trigger.  Normally this
+        # deduplicates against preparation; after a process restart it resumes
+        # a crawler that may have died while the durable slot survived.
+        try:
             schedule_prefetch_editorial(pid)
+        except Exception as exc:
+            logger.warning(
+                "[group_%s] Failed to schedule editorial prefetch for %s: %s",
+                group_id,
+                pid,
+                exc,
+            )
 
-        stmt: dict = {}
-        stmt_text = ""
-        input_text = ""
-        limits_text = ""
-        if pid:
-            stmt = _load_statement_json(cfg, group_id, pid)
-        if stmt:
-            stmt_text = stmt.get("description", "") or ""
-            input_text = stmt.get("input", "") or ""
-            tl = stmt.get("time_limit", "?")
-            ml = stmt.get("memory_limit", "?")
-            limits_text = f"Time: {tl}, Memory: {ml}"
-            sample_messages = _build_sample_messages(stmt)
-            notes_message = await _build_notes_message(stmt)
+        if desc:
+            try:
+                save_problem_summary(
+                    group_id,
+                    pid,
+                    desc,
+                    source_sha256=prepared.statement_sha256,
+                )
+            except Exception as exc:
+                # Summary persistence was best-effort in the original path;
+                # a cache write must not prevent an otherwise ready card.
+                logger.warning(
+                    "[group_%s] Failed to save problem summary for %s: %s",
+                    group_id,
+                    pid,
+                    exc,
+                )
 
-        images = statement_images(stmt)
-        summary, model_tag = await summarize_problem(stmt_text, input_text, limits_text, images)
-        if not summary:
-            logger.warning(f"[group_{group_id}] Summary 1st attempt failed, retrying...")
-            summary, model_tag = await summarize_problem(stmt_text, input_text, limits_text, images)
-        if summary:
-            desc = summary.strip()
-            save_problem_summary(group_id, pid, desc)
-        else:
-            logger.warning(f"[group_{group_id}] Summary failed after retry")
-    except Exception as e:
-        logger.warning(f"[group_{group_id}] Summary error: {e}")
+        greeting = prefix if prefix else "来看看这道新题吧！"
+        post_msg = f"{greeting}\n\n{desc}" if desc else greeting
+        if model_tag:
+            post_msg += model_tag
+        if reveal_text and "还没有发过题哦" not in reveal_text:
+            post_msg += "\n\n" + reveal_text
+        post_msg = snake_replace(post_msg)
 
-    # Step 4: Compose and deliver via merged-forward card
-    greeting = prefix if prefix else "来看看这道新题吧！"
-    post_msg = f"{greeting}\n\n{desc}" if desc else greeting
-    if model_tag:
-        post_msg += model_tag
+        fwd_resp, node_payload = await _send_problem_forward_card(
+            group_id=group_id,
+            post_msg=post_msg,
+            sample_messages=sample_messages,
+            notes_message=notes_message,
+            snake_enabled=True,
+        )
+        if not fwd_resp:
+            logger.error(
+                "[group_%s] Problem forward-card send failed, falling back to direct",
+                group_id,
+            )
+            ok = await send_group_msg(group_id, build_plain_message(post_msg))
+            if not ok:
+                logger.error("[group_%s] New problem post send failed", group_id)
+                return False
 
-    if reveal_text and "还没有发过题哦" not in reveal_text:
-        post_msg = post_msg + "\n\n" + reveal_text
-
-    post_msg = snake_replace(post_msg)
-
-    fwd_resp, node_payload = await _send_problem_forward_card(
-        group_id=group_id,
-        post_msg=post_msg,
-        sample_messages=sample_messages,
-        notes_message=notes_message,
-        snake_enabled=True,
-    )
-    if not fwd_resp:
-        logger.error(f"[group_{group_id}] Problem forward-card send failed, falling back to direct")
-        ok = await send_group_msg(group_id, build_plain_message(post_msg))
-        if ok:
             await _send_high_difficulty_notice_group(group_id, picked_state)
             await _commit_problem_state(group_id, picked_state)
             try:
@@ -525,38 +361,57 @@ async def _post_new_problem_locked(
                     snake_enabled=True,
                     node_payload=node_payload,
                 )
-            except Exception as e:
-                logger.warning(f"[group_{group_id}] Failed to save fallback daily_msg.json: {e}")
+            except Exception as exc:
+                logger.warning(
+                    "[group_%s] Failed to save fallback daily_msg.json: %s",
+                    group_id,
+                    exc,
+                )
             append_group_ctx(group_id, {"role": "assistant", "content": post_msg})
-            logger.info(f"[group_{group_id}] New problem post sent (fallback) ✓")
+            logger.info("[group_%s] New problem post sent (fallback) ✓", group_id)
             return True
-        else:
-            logger.error(f"[group_{group_id}] New problem post send failed")
-        return False
-    append_group_ctx(group_id, {"role": "assistant", "content": post_msg})
-    logger.info(
-        f"[group_{group_id}] New problem post forwarded ✓ "
-        f"({1 + len(sample_messages) + (1 if node_payload.get('note_msg_id') else 0) + (1 if node_payload.get('snake_msg_id') else 0)} msgs)"
-    )
-    await _commit_problem_state(group_id, picked_state)
-    if pid:
-        save_problem_card_ref(group_id, fwd_resp, pid, "newproblem")
-    await _send_high_difficulty_notice_group(group_id, picked_state)
 
-    try:
-        _save_daily_msg(
-            state_dir,
-            pid=pid,
-            post_msg=post_msg,
-            sample_messages=sample_messages,
-            notes_message=notes_message,
-            snake_enabled=True,
-            node_payload=node_payload,
-            fwd_message_id=fwd_resp,
+        append_group_ctx(group_id, {"role": "assistant", "content": post_msg})
+        logger.info(
+            "[group_%s] New problem post forwarded ✓ (%s msgs)",
+            group_id,
+            1
+            + len(sample_messages)
+            + (1 if node_payload.get("note_msg_id") else 0)
+            + (1 if node_payload.get("snake_msg_id") else 0),
         )
-    except Exception as e:
-        logger.warning(f"[group_{group_id}] Failed to save daily_msg.json: {e}")
-    return True
+        await _commit_problem_state(group_id, picked_state)
+        if pid:
+            save_problem_card_ref(group_id, fwd_resp, pid, "newproblem")
+        await _send_high_difficulty_notice_group(group_id, picked_state)
+
+        try:
+            _save_daily_msg(
+                state_dir,
+                pid=pid,
+                post_msg=post_msg,
+                sample_messages=sample_messages,
+                notes_message=notes_message,
+                snake_enabled=True,
+                node_payload=node_payload,
+                fwd_message_id=fwd_resp,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[group_%s] Failed to save daily_msg.json: %s",
+                group_id,
+                exc,
+            )
+        return True
+    finally:
+        # A cancelled command must not strand the coordinator in CLAIMED.
+        release_task = asyncio.create_task(prefetcher.release(slot.slot_id))
+        try:
+            await asyncio.shield(release_task)
+        except asyncio.CancelledError:
+            with suppress(asyncio.CancelledError):
+                await release_task
+            raise
 
 
 # ── Command handler ─────────────────────────────────────────────────────

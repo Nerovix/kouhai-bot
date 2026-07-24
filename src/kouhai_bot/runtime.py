@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import sys
 
-from .editorial_followup import schedule_prefetch_for_current_group
 from .handlers.registry import discover_commands
 from .scheduler.jobs import register_builtin_jobs
 
@@ -28,5 +27,4 @@ def bootstrap_runtime() -> None:
         return
     discover_commands()
     register_builtin_jobs()
-    schedule_prefetch_for_current_group()
     _BOOTSTRAPPED = True

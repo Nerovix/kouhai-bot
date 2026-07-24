@@ -75,7 +75,10 @@ from ...private_judge import (
     send_problem_card_private,
     set_private_current_problem,
 )
-from ...tutorials import format_editorial_for_review, get_official_editorial, has_cached_editorial_zh
+from ...tutorials import (
+    format_editorial_for_review,
+    get_verified_official_editorial,
+)
 from ...napcat.client import (
     build_at,
     build_private_reaction_message,
@@ -827,7 +830,7 @@ class GroupCoordinator:
             _log_preview(parsed.get("reason", "")),
         )
         if parsed.get("correct", False) and parsed.get("reaction", "") != "123":
-            editorial = get_official_editorial(pid) if has_cached_editorial_zh(pid) else None
+            editorial = get_verified_official_editorial(pid)
             if editorial:
                 source = "\n".join(
                     part for part in [editorial.tutorial_title, editorial.tutorial_url]
@@ -985,7 +988,7 @@ class GroupCoordinator:
             user_parts.append(
                 "被 @ 群友在此题的上下文：\n" + "\n\n".join(mentioned_parts)
             )
-        editorial = get_official_editorial(pid)
+        editorial = get_verified_official_editorial(pid)
         if editorial:
             user_parts.append(format_editorial_for_review(editorial))
         user_parts.append(f"用户的问题：\n{req.payload}")

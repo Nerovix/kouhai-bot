@@ -78,6 +78,38 @@ def test_select_problem_resets_used_but_keeps_solved_excluded(monkeypatch, tmp_p
     assert json.loads((group_dir / "used.json").read_text()) == []
 
 
+def test_select_problem_excludes_current_when_used_is_missing(monkeypatch, tmp_path):
+    _data_dir, group_dir = _configure_picker_tmp(tmp_path)
+    (group_dir / "state.json").write_text(json.dumps({"today": "1A"}))
+    monkeypatch.setattr(
+        picker,
+        "_get_cached_targets",
+        lambda: [_problem(1, "A"), _problem(2, "B")],
+    )
+    monkeypatch.setattr(picker.random, "choice", lambda seq: seq[0])
+
+    selected = picker.select_problem()
+
+    assert picker._problem_id(selected) == "2B"
+
+
+def test_select_problem_reset_keeps_current_excluded(monkeypatch, tmp_path):
+    _data_dir, group_dir = _configure_picker_tmp(tmp_path)
+    (group_dir / "state.json").write_text(json.dumps({"today": "1A"}))
+    (group_dir / "used.json").write_text(json.dumps(["2B"]))
+    monkeypatch.setattr(
+        picker,
+        "_get_cached_targets",
+        lambda: [_problem(1, "A"), _problem(2, "B")],
+    )
+    monkeypatch.setattr(picker.random, "choice", lambda seq: seq[0])
+
+    selected = picker.select_problem()
+
+    assert picker._problem_id(selected) == "2B"
+    assert json.loads((group_dir / "used.json").read_text()) == []
+
+
 def test_select_problem_raises_when_every_candidate_is_solved(monkeypatch, tmp_path):
     _data_dir, group_dir = _configure_picker_tmp(tmp_path)
     (group_dir / "scoreboard.json").write_text(json.dumps({

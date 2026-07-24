@@ -5,6 +5,8 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kouhai_bot.config import BotConfig
@@ -22,10 +24,12 @@ from kouhai_bot.handlers.shared import (
     get_judge_prompt,
     call_chat_completion_result,
     doublecheck_problem_summary,
+    get_problem_summary,
     judge_submission,
     judge_submission_result,
     parse_json_with_llm_repair,
     robust_json_parse,
+    save_problem_summary,
     summarize_problem,
     translate_editorial_to_zh,
     translate_sample_notes,
@@ -37,6 +41,52 @@ from kouhai_bot.llm import (
     strip_leaked_thinking,
 )
 from tools import summary_doublecheck as summary_doublecheck_tool
+
+
+def test_problem_summary_cache_is_bound_to_statement_source(tmp_path):
+    cfg = BotConfig(data_dir=str(tmp_path))
+    statement_dir = tmp_path / "statements"
+    statement_dir.mkdir()
+    statement_path = statement_dir / "542D.json"
+    statement_path.write_text(
+        json.dumps({"description": "original", "images": []}),
+        encoding="utf-8",
+    )
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), patch(
+        "kouhai_bot.problem_content.get_config",
+        return_value=cfg,
+    ):
+        save_problem_summary(1, "542D", "已审计题意")
+        assert get_problem_summary(1, "542D") == "已审计题意"
+
+        statement_path.write_text(
+            json.dumps({"description": "changed", "images": []}),
+            encoding="utf-8",
+        )
+        assert get_problem_summary(1, "542D") == ""
+
+
+def test_problem_summary_cache_rejects_stale_prepared_source(tmp_path):
+    cfg = BotConfig(data_dir=str(tmp_path))
+    statement_dir = tmp_path / "statements"
+    statement_dir.mkdir()
+    (statement_dir / "542D.json").write_text(
+        json.dumps({"description": "current", "images": []}),
+        encoding="utf-8",
+    )
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), patch(
+        "kouhai_bot.problem_content.get_config",
+        return_value=cfg,
+    ):
+        with pytest.raises(ValueError, match="stale summary source"):
+            save_problem_summary(
+                1,
+                "542D",
+                "旧题面对应的题意",
+                source_sha256="0" * 64,
+            )
 
 
 def test_judge_prompt_rejects_repaired_greedy_and_unbatched_simulation():
@@ -167,6 +217,9 @@ def test_second_judge_prompt_rejects_repaired_greedy_for_teleporters():
 
 
 class _DummySession:
+    def __init__(self, *_args, **_kwargs):
+        pass
+
     async def __aenter__(self):
         return self
 

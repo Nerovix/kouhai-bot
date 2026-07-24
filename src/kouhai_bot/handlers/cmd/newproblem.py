@@ -385,11 +385,13 @@ async def _post_new_problem_locked(
             post_msg += model_tag
         post_msg = snake_replace(post_msg)
 
-        if (
-            announce_skipped
-            and not await _send_forced_skip_followup(group_id, previous_problem)
-        ):
-            return False
+        forced_skip_announced = False
+        if announce_skipped:
+            forced_skip_announced = bool(
+                _format_forced_skip_notice(previous_problem)
+            )
+            if not await _send_forced_skip_followup(group_id, previous_problem):
+                return False
 
         fwd_resp, node_payload = await _send_problem_forward_card(
             group_id=group_id,
@@ -406,6 +408,18 @@ async def _post_new_problem_locked(
             ok = await send_group_msg(group_id, build_plain_message(post_msg))
             if not ok:
                 logger.error("[group_%s] New problem post send failed", group_id)
+                if forced_skip_announced:
+                    correction_sent = await send_group_msg(
+                        group_id,
+                        build_plain_message(
+                            "新题发送失败，目前仍暂使用原题。请联系管理员。"
+                        ),
+                    )
+                    if not correction_sent:
+                        logger.error(
+                            "[group_%s] New problem failure correction send failed",
+                            group_id,
+                        )
                 return False
 
             await _send_high_difficulty_notice_group(group_id, picked_state)

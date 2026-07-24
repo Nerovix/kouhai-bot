@@ -1211,6 +1211,73 @@ def test_newproblem_post_does_not_switch_state_when_send_fails():
     print("✅ newproblem: failed delivery does not switch current problem")
 
 
+def test_newproblem_force_corrects_skip_notice_when_new_card_send_fails():
+    _reset_state()
+    _setup_problem_for(GID, PID2)
+    _setup_problem_for(GID, PID)
+    picked = {
+        "today": PID2,
+        "contestId": 100,
+        "index": "A",
+        "name": "Next",
+        "rating": 2000,
+        "tags": ["dp"],
+    }
+    prefetcher = _fake_problem_prefetcher(picked)
+    attempted_messages: list[str] = []
+    send_results = iter([101, None, 102])
+
+    async def _send_group(_group_id, message):
+        attempted_messages.append(" ".join(
+            segment.get("data", {}).get("text", "")
+            for segment in message
+            if segment.get("type") == "text"
+        ))
+        return next(send_results)
+
+    with _all_patches(), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem.get_next_problem_prefetcher",
+                return_value=prefetcher,
+            ), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem.send_group_msg",
+                _send_group,
+            ), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem.get_verified_official_editorial",
+                return_value=None,
+            ), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem._send_problem_forward_card",
+                AsyncMock(return_value=(None, {})),
+            ):
+        from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
+
+        posted = asyncio.run(_post_new_problem_locked(
+            GID,
+            announce_skipped=True,
+        ))
+
+    assert posted is False
+    assert attempted_messages == [
+        "当前题目已被跳过，原题为 CF542D Superhero's Job 2600。",
+        "来看看这道新题吧！\n\nsummary",
+        "新题发送失败，目前仍暂使用原题。请联系管理员。",
+    ]
+    with open(os.path.join(
+        _data_dir(),
+        "groups",
+        str(GID),
+        "state.json",
+    )) as f:
+        state = json.load(f)
+    assert state["today"] == PID
+    prefetcher.release.assert_awaited_once_with("slot-1")
+    _cleanup()
+    print("✅ newproblem --force: failed new card corrects skip notice")
+
+
 def test_newproblem_cancel_releases_claimed_prefetch_slot():
     _reset_state()
     old_pid = "542D"

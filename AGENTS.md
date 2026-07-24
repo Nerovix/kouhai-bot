@@ -503,8 +503,9 @@ Key rules:
 - **New problem visibility**: the worker prepares one candidate without changing
   `state.json`. `/newproblem` atomically claims it, but all commands continue to see the
   old problem until the new card is successfully delivered. Failed delivery leaves the
-  old current problem intact; the claimed candidate is discarded, then background
-  refill begins.
+  old current problem intact; after a forced-refresh skip notice, a final new-card
+  delivery failure sends a correction that the original problem remains active. The
+  claimed candidate is discarded, then background refill begins.
 - **New problem serialization/status**: `/newproblem`, `/newproblem --force`, and the
   poke trigger use a per-group post lock. User-triggered new-problem commands are
   rejected immediately with a busy reminder while another post is claiming/building/

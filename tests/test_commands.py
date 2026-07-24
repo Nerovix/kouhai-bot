@@ -1015,8 +1015,140 @@ def test_newproblem_post_uses_prepared_hot_path():
     prefetcher.release.assert_awaited_once_with("slot-1")
     schedule_editorial.assert_called_once_with(pid)
     assert "『M』" in send_card.await_args.kwargs["post_msg"]
+    assert "上一道题来自" not in send_card.await_args.kwargs["post_msg"]
     _cleanup()
     print("✅ newproblem: prepared hot path does no preparation work")
+
+
+def test_newproblem_force_sends_skip_editorial_then_new_card():
+    _reset_state()
+    _setup_problem_for(GID, PID2)
+    _setup_problem_for(GID, PID)
+    picked = {
+        "today": PID2,
+        "contestId": 100,
+        "index": "A",
+        "name": "Next",
+        "rating": 2000,
+        "tags": ["dp"],
+    }
+    prefetcher = _fake_problem_prefetcher(picked)
+    editorial = object()
+    deliveries: list[tuple[str, object]] = []
+
+    async def _send_notice(_group_id, message):
+        text = " ".join(
+            segment.get("data", {}).get("text", "")
+            for segment in message
+            if segment.get("type") == "text"
+        )
+        deliveries.append(("notice", text))
+        return True
+
+    async def _send_editorial(_group_id, pid, actual_editorial):
+        assert actual_editorial is editorial
+        deliveries.append(("editorial", pid))
+
+    async def _send_new_card(**kwargs):
+        deliveries.append(("new_card", kwargs["post_msg"]))
+        return 123, {}
+
+    with _all_patches(), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem.get_next_problem_prefetcher",
+                return_value=prefetcher,
+            ), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem.send_group_msg",
+                _send_notice,
+            ), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem.get_verified_official_editorial",
+                return_value=editorial,
+            ), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem.deliver_official_tutorial_forward",
+                _send_editorial,
+            ), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem._send_problem_forward_card",
+                _send_new_card,
+            ):
+        from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
+
+        posted = asyncio.run(_post_new_problem_locked(
+            GID,
+            prefix="刷新了一道新题🌟",
+            announce_skipped=True,
+        ))
+
+    assert posted is True
+    assert deliveries == [
+        ("notice", "当前题目已被跳过，原题为 CF542D Superhero's Job 2600。"),
+        ("editorial", PID),
+        ("new_card", "刷新了一道新题🌟\n\nsummary"),
+    ]
+    prefetcher.release.assert_awaited_once_with("slot-1")
+    _cleanup()
+    print("✅ newproblem --force: skip notice, editorial, then new card")
+
+
+def test_newproblem_force_skips_missing_editorial_without_blocking_new_card():
+    _reset_state()
+    _setup_problem_for(GID, PID2)
+    _setup_problem_for(GID, PID)
+    picked = {
+        "today": PID2,
+        "contestId": 100,
+        "index": "A",
+        "name": "Next",
+        "rating": 2000,
+        "tags": ["dp"],
+    }
+    prefetcher = _fake_problem_prefetcher(picked)
+    deliveries: list[str] = []
+
+    async def _send_notice(_group_id, _message):
+        deliveries.append("notice")
+        return True
+
+    async def _send_new_card(**_kwargs):
+        deliveries.append("new_card")
+        return 123, {}
+
+    with _all_patches(), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem.get_next_problem_prefetcher",
+                return_value=prefetcher,
+            ), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem.send_group_msg",
+                _send_notice,
+            ), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem.get_verified_official_editorial",
+                return_value=None,
+            ), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem.deliver_official_tutorial_forward",
+                AsyncMock(),
+            ) as send_editorial, \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem._send_problem_forward_card",
+                _send_new_card,
+            ):
+        from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
+
+        posted = asyncio.run(_post_new_problem_locked(
+            GID,
+            announce_skipped=True,
+        ))
+
+    assert posted is True
+    assert deliveries == ["notice", "new_card"]
+    send_editorial.assert_not_awaited()
+    _cleanup()
+    print("✅ newproblem --force: missing editorial does not block new card")
 
 
 def test_newproblem_post_does_not_switch_state_when_send_fails():
@@ -3001,15 +3133,15 @@ def test_newproblem_force_posts_when_unsolved():
     with _all_patches():
         from kouhai_bot.handlers.cmd.newproblem import handle, _cooldowns
         _cooldowns.clear()
-        ran: list[int] = []
+        ran: list[tuple[int, bool]] = []
 
-        async def _mock_post(gid, prefix=None, **_):
-            ran.append(gid)
+        async def _mock_post(gid, prefix=None, **kwargs):
+            ran.append((gid, kwargs.get("announce_skipped", False)))
             return True
 
         with patch("kouhai_bot.handlers.cmd.newproblem._post_new_problem_locked", _mock_post):
             asyncio.run(handle(**_kwargs(_make_event("/newproblem --force"))))
-    assert ran == [GID], f"Force should post: {ran}"
+    assert ran == [(GID, True)], f"Force should announce the skipped problem: {ran}"
     _cleanup()
     print("✅ newproblem --force: posts when unsolved")
 

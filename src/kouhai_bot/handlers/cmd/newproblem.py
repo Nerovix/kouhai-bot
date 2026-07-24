@@ -24,7 +24,10 @@ from ..shared import (
 )
 from ...config import get_config
 from ...context import append_group_ctx
-from ...editorial_followup import schedule_prefetch_editorial
+from ...editorial_followup import (
+    deliver_official_tutorial_forward,
+    schedule_prefetch_editorial,
+)
 from ...napcat.client import (
     build_plain_message,
     react_emoji,
@@ -36,8 +39,8 @@ from ...problem_prefetch import get_next_problem_prefetcher
 from ...problem_preparation import (
     PICKER_PATH,
     ProblemPreparationError,
-    format_previous_problem_reveal,
 )
+from ...tutorials import get_verified_official_editorial
 from ...user_groups import settle_dynamic_submit_wait_for_problem
 from .submit import run_group_state_update
 
@@ -68,6 +71,49 @@ async def _send_high_difficulty_notice_group(group_id: int, problem: dict | None
         await send_group_msg(group_id, build_plain_message(notice))
     except Exception as e:
         logger.warning("[group_%s] Failed to send high-difficulty notice: %s", group_id, e)
+
+
+def _format_forced_skip_notice(problem: object) -> str:
+    if not isinstance(problem, dict) or not problem:
+        return ""
+
+    pid = str(problem.get("today", "") or "").strip()
+    if not pid:
+        return ""
+    parts = [f"CF{pid}"]
+    name = str(problem.get("name", "") or "").strip()
+    if name:
+        parts.append(name)
+    rating = str(problem.get("rating", "") or "").strip()
+    if rating:
+        parts.append(rating)
+    return f"当前题目已被跳过，原题为 {' '.join(parts)}。"
+
+
+async def _send_forced_skip_followup(group_id: int, problem: object) -> bool:
+    """Announce a forced skip and deliver its ready editorial, if available."""
+    notice = _format_forced_skip_notice(problem)
+    if not notice:
+        return True
+    sent = await send_group_msg(group_id, build_plain_message(notice))
+    if not sent:
+        logger.error("[group_%s] Forced-skip notice send failed", group_id)
+        return False
+
+    pid = str(problem.get("today", "") or "").strip()
+    try:
+        editorial = get_verified_official_editorial(pid)
+        if editorial is not None:
+            await deliver_official_tutorial_forward(group_id, pid, editorial)
+    except Exception as exc:
+        logger.warning(
+            "[group_%s] Forced-skip editorial delivery failed for %s: %s",
+            group_id,
+            pid,
+            exc,
+            exc_info=True,
+        )
+    return True
 
 
 async def enqueue_new_problem(
@@ -123,10 +169,15 @@ async def enqueue_new_problem(
             "admitted_at": now,
         }
         try:
+            post_kwargs = {
+                "prefix": prefix,
+                "notify_group": not quiet,
+            }
+            if force:
+                post_kwargs["announce_skipped"] = True
             posted = await _post_new_problem_locked(
                 group_id,
-                prefix=prefix,
-                notify_group=not quiet,
+                **post_kwargs,
             )
         except Exception:
             if not quiet:
@@ -267,7 +318,11 @@ async def _send_problem_forward_card(
 
 
 async def _post_new_problem_locked(
-    group_id: int, prefix: str | None = None, *, notify_group: bool = False,
+    group_id: int,
+    prefix: str | None = None,
+    *,
+    notify_group: bool = False,
+    announce_skipped: bool = False,
 ) -> bool:
     cfg = get_config()
     state_dir = os.path.join(cfg.data_dir, "groups", str(group_id))
@@ -283,6 +338,7 @@ async def _post_new_problem_locked(
         return False
 
     try:
+        previous_problem = get_today_problem(group_id)
         prepared = slot.problem
         picked_state = dict(prepared.state)
         picked_state["date"] = datetime.now(TZ).strftime("%Y-%m-%d")
@@ -291,7 +347,6 @@ async def _post_new_problem_locked(
         model_tag = prepared.model_tag
         sample_messages = list(prepared.sample_messages)
         notes_message = prepared.notes_message
-        reveal_text = format_previous_problem_reveal(get_today_problem(group_id))
 
         # Preserve the original publication-time trigger.  Normally this
         # deduplicates against preparation; after a process restart it resumes
@@ -328,9 +383,13 @@ async def _post_new_problem_locked(
         post_msg = f"{greeting}\n\n{desc}" if desc else greeting
         if model_tag:
             post_msg += model_tag
-        if reveal_text and "还没有发过题哦" not in reveal_text:
-            post_msg += "\n\n" + reveal_text
         post_msg = snake_replace(post_msg)
+
+        if (
+            announce_skipped
+            and not await _send_forced_skip_followup(group_id, previous_problem)
+        ):
+            return False
 
         fwd_resp, node_payload = await _send_problem_forward_card(
             group_id=group_id,

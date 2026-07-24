@@ -597,11 +597,12 @@ visible to the poller.
 
 Private `/submit` uses the same judge path and private history, but a correct result
 only marks the problem solved in `private_judge/users/<uid>.json`; it does not update
-the group scoreboard. The private success message includes the
-problem id (for example `做对了 1234A！`) so users can tell which private problem was
-accepted. If the private problem is the current group problem, the success message
-tells the user they can `/sync` in the service group to score it if the group has not
-already solved it.
+the group scoreboard. The private success message includes the full available problem
+identity (`CF{pid} {name} {rating}`, for example `做对了 CF33C Wonderful Randomized
+Sum 1800！`) so users can tell which private problem was accepted. Missing name/rating
+metadata is omitted gracefully. If the private problem is the current group problem,
+the success message tells the user they can `/sync` in the service group to score it
+if the group has not already solved it.
 
 ### `/clarify` — Anti-Spoiler Clarification
 

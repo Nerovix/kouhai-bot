@@ -2151,7 +2151,7 @@ def test_clarify_with_problem():
     print("✅ clarify: with problem")
 
 
-def test_private_submit_correct_message_includes_problem_id():
+def test_private_submit_correct_message_includes_full_problem_details():
     _reset_state()
     _setup_problem_for(GID, PID)
     global _deepseek_response
@@ -2166,10 +2166,48 @@ def test_private_submit_correct_message_includes_problem_id():
         asyncio.run(handle(**_kwargs(_make_private_event("/submit valid private solution"))))
 
     private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
-    assert f"做对了 {PID}" in private_text, private_text
+    assert f"做对了 CF{PID} Superhero's Job 2600！🎉" in private_text, private_text
     assert "/sync" in private_text, private_text
     _cleanup()
-    print("✅ private submit: correct message includes pid")
+    print("✅ private submit: correct message includes full problem details")
+
+
+def test_private_submit_correct_non_group_problem_includes_full_problem_details():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_statement("33C", {
+        "name": "C. Wonderful Randomized Sum",
+        "time_limit": "2s",
+        "memory_limit": "256MB",
+        "description": "Find the maximum randomized subarray sum.",
+        "input": "An array of integers.",
+        "samples": [{"input": "1\n0", "output": "0"}],
+    })
+    global _deepseek_response
+    _deepseek_response = {"correct": True, "reason": "ok", "reply": ""}
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.submit import handle
+        from kouhai_bot.private_judge import set_private_current_problem
+
+        set_private_current_problem(UID, {
+            "today": "33C",
+            "contestId": 33,
+            "index": "C",
+            "name": "Wonderful Randomized Sum",
+            "rating": 1800,
+            "tags": ["dp"],
+            "date": "2026-05-14",
+        })
+        asyncio.run(handle(**_kwargs(_make_private_event("/submit valid private solution"))))
+
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
+    assert (
+        "做对了 CF33C Wonderful Randomized Sum 1800！🎉 "
+        "这次通过只记录在 private judge，不计入群榜。"
+    ) in private_text, private_text
+    _cleanup()
+    print("✅ private submit: non-group success includes full problem details")
 
 
 def test_private_clarify_uses_private_problem_summary():
@@ -5219,7 +5257,8 @@ if __name__ == "__main__":
     test_private_clear_invalid_usage_sends_text_ack_instead_of_face()
     test_submit_no_problem()
     test_clarify_with_problem()
-    test_private_submit_correct_message_includes_problem_id()
+    test_private_submit_correct_message_includes_full_problem_details()
+    test_private_submit_correct_non_group_problem_includes_full_problem_details()
     test_clarify_no_problem()
     test_clarify_alias_dispatches_to_clarify_handler()
     test_problem_with_data()

@@ -1044,30 +1044,34 @@ class GroupCoordinator:
         await _send_req_plain(req, text)
         req.submit_waiting_reply_sent = True
 
-    def _problem_source_from_snapshot(self, req: PendingRequest, pid: str) -> str:
+    def _problem_label_from_snapshot(self, req: PendingRequest, pid: str) -> str:
         problem = req.submit_problem or {}
-        name = str(problem.get("name", "") or "")
-        rating = str(problem.get("rating", "") or "")
+        name = str(problem.get("name", "") or "").strip()
+        rating = str(problem.get("rating", "") or "").strip()
         parts = [f"CF{pid}"]
         if name:
             parts.append(name)
         if rating and rating != "?":
             parts.append(rating)
-        return f"本题来自 {' '.join(parts)}✨" if parts else ""
+        return " ".join(parts)
+
+    def _problem_source_from_snapshot(self, req: PendingRequest, pid: str) -> str:
+        return f"本题来自 {self._problem_label_from_snapshot(req, pid)}✨"
 
     async def _send_private_success(self, req: PendingRequest, pid: str, model_tag: str = "") -> None:
         mark_private_solved(req.user_id, pid, source="private")
+        problem_label = self._problem_label_from_snapshot(req, pid)
         current_pid = ""
         current = get_today_problem(req.group_id)
         if current:
             current_pid = str(current.get("today", "") or "")
         if current_pid and current_pid == pid:
             text = (
-                f"做对了 {pid}！🎉 private judge 不直接加分。"
+                f"做对了 {problem_label}！🎉 private judge 不直接加分。"
                 "如果群里还没人通过这题，可以到服务群发 /sync，把这次通过同步到群榜。"
             )
         else:
-            text = f"做对了 {pid}！🎉 这次通过只记录在 private judge，不计入群榜。"
+            text = f"做对了 {problem_label}！🎉 这次通过只记录在 private judge，不计入群榜。"
         if model_tag:
             text = text.rstrip() + model_tag
         self._log_finished(req, "correct", problem=pid, extra={"scope": PRIVATE_SCOPE})

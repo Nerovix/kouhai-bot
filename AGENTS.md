@@ -440,7 +440,7 @@ No repository-local runtime queue is used.
 | `/submit` (`/sbm`) | submit.py | `handle` | ✅ state scheduler | `llm.smart_model` queue | Judge solution, save history, serialize only first-blood/scoreboard; configured dynamic-wait group submits redirect to private judge; private AC does not score until synced |
 | `/clarify` (`/clrf`) | clarify.py | `handle` | ✅ state scheduler | `llm.general_model` queue | Clarify problem details (JSON output, anti-spoiler, no original problem identity), using admission-time pid; private uses pid-specific summary |
 | `/clear` | clear.py | `handle` | ✅ state scheduler | — | Clear the current user's stored submit/clarify/review history for the admission-time current problem or current private problem |
-| `/newproblem` (`/np`) | newproblem.py | `handle` | ✅ post lock | prefetched `llm.general_model` result | Force new problem when solved (or none); unsolved needs exact `/newproblem --force`; claims the one-slot group prefetch (or awaits its single-flight cold build); samples are forwarded as separate nodes; if statement has `notes`, translate+symbol-normalize and append as a dedicated notes node; commits state only after card delivery succeeds and keeps `daily_msg.json` in sync even on direct-text fallback |
+| `/newproblem` (`/np`) | newproblem.py | `handle` | ✅ post lock | prefetched `llm.general_model` result | Force new problem when solved (or none); unsolved needs exact `/newproblem --force`; a forced refresh announces the skipped problem and sends its verified cached editorial card, when available, before the new-problem card; new-problem cards do not repeat the previous problem; claims the one-slot group prefetch (or awaits its single-flight cold build); samples are forwarded as separate nodes; if statement has `notes`, translate+symbol-normalize and append as a dedicated notes node; commits state only after card delivery succeeds and keeps `daily_msg.json` in sync even on direct-text fallback |
 | `/problem` (`/pb`) | stubs.py | `handle_problem` | ❌ | — | Resend current group/private problem via forward card; group path only uses `daily_msg.json` when pid matches `state.json.today`; if solved, add a friendly `/newproblem` hint |
 | `/tag` | stubs.py | `handle_tag` | ❌ | — | Show current group/private problem CF tags |
 | `/scoreboard` | stubs.py | `handle_scoreboard` | ❌ | — | Cumulative weighted leaderboard; shows the formula at the top, then refreshes latest group nicknames at display time |
@@ -503,8 +503,9 @@ Key rules:
 - **New problem visibility**: the worker prepares one candidate without changing
   `state.json`. `/newproblem` atomically claims it, but all commands continue to see the
   old problem until the new card is successfully delivered. Failed delivery leaves the
-  old current problem intact; the claimed candidate is discarded, then background
-  refill begins.
+  old current problem intact; after a forced-refresh skip notice, a final new-card
+  delivery failure sends a correction that the original problem remains active. The
+  claimed candidate is discarded, then background refill begins.
 - **New problem serialization/status**: `/newproblem`, `/newproblem --force`, and the
   poke trigger use a per-group post lock. User-triggered new-problem commands are
   rejected immediately with a busy reminder while another post is claiming/building/

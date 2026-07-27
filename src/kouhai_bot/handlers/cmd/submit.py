@@ -81,6 +81,7 @@ from ...tutorials import (
 )
 from ...napcat.client import (
     build_at,
+    build_face,
     build_private_reaction_message,
     build_plain_message,
     build_text,
@@ -830,6 +831,10 @@ class GroupCoordinator:
             _log_preview(parsed.get("reason", "")),
         )
         if parsed.get("correct", False) and parsed.get("reaction", "") != "123":
+            if req.is_private:
+                await send_private_msg(req.user_id, [build_face("314")])
+            else:
+                await react_emoji(req.message_id, "314")
             editorial = get_verified_official_editorial(pid)
             if editorial:
                 source = "\n".join(

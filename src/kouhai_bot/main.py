@@ -144,8 +144,12 @@ def _load_proxy_env() -> dict[str, str]:
     proxy_env_path = Path.home() / ".proxy_env"
     if not proxy_env_path.is_file():
         return {}
+    try:
+        lines = proxy_env_path.read_text().splitlines()
+    except OSError:
+        return {}
     env_vars: dict[str, str] = {}
-    for line in proxy_env_path.read_text().splitlines():
+    for line in lines:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -161,7 +165,7 @@ def _load_proxy_env() -> dict[str, str]:
         # Resolve $var references (single level only, enough for proxy_env)
         value = re.sub(
             r"[$](\w+)",
-            lambda m2: env_vars.get(m2.group(1), os.environ.get(m2.group(1), "")),
+            lambda m2: env_vars.get(m2.group(1), ""),
             value,
         )
         env_vars[key] = value

@@ -220,6 +220,8 @@ def build_private_reaction_message(emoji_id: str | int) -> list[dict]:
         return [build_face("289")]
     if emoji == "123":
         return [build_face("123")]
+    if emoji == "314":
+        return [build_face("314")]
     text = {
         "10060": "👌",
     }.get(emoji, "收到～")

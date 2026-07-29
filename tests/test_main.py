@@ -19,6 +19,30 @@ def test_bot_log_path_uses_group_and_local_date(tmp_path):
     assert path == tmp_path / "logs" / "123456" / f"{expected_date}.log"
 
 
+def test_load_proxy_env_does_not_resolve_forward_refs_from_process_env(tmp_path):
+    (tmp_path / ".proxy_env").write_text(
+        "export HTTPS_PROXY=$PROXY_URL\n"
+        "export PROXY_URL=http://proxy.example:8080\n"
+    )
+
+    with patch("kouhai_bot.main.Path.home", return_value=tmp_path), \
+            patch.dict(os.environ, {"PROXY_URL": "http://unrelated.example:3128"}):
+        proxy_vars = main._load_proxy_env()
+
+    assert proxy_vars == {
+        "HTTPS_PROXY": "",
+        "PROXY_URL": "http://proxy.example:8080",
+    }
+
+
+def test_load_proxy_env_returns_empty_when_file_cannot_be_read(tmp_path):
+    (tmp_path / ".proxy_env").touch()
+
+    with patch("kouhai_bot.main.Path.home", return_value=tmp_path), \
+            patch("kouhai_bot.main.Path.read_text", side_effect=PermissionError):
+        assert main._load_proxy_env() == {}
+
+
 def test_start_reports_already_running_without_spawning():
     cfg = SimpleNamespace(napcat_ws_port=8097, current_group=123456, data_dir="/tmp/data")
     printed = []

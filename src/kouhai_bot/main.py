@@ -139,8 +139,48 @@ def _wait_for_port_bind(port: int, timeout_sec: float) -> bool:
     return _port_has_listener(port)
 
 
+def _load_proxy_env() -> dict[str, str]:
+    """Load proxy variables from ~/.proxy_env, returning a dict suitable for env=."""
+    proxy_env_path = Path.home() / ".proxy_env"
+    if not proxy_env_path.is_file():
+        return {}
+    try:
+        lines = proxy_env_path.read_text().splitlines()
+    except OSError:
+        return {}
+    env_vars: dict[str, str] = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Match "export KEY=value" or "export KEY="value""
+        m = re.match(r"export\s+(\w+)=(.*)", line)
+        if not m:
+            continue
+        key = m.group(1)
+        value = m.group(2).strip()
+        # Strip surrounding quotes if present
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        # Resolve $var references (single level only, enough for proxy_env)
+        value = re.sub(
+            r"[$](\w+)",
+            lambda m2: env_vars.get(m2.group(1), ""),
+            value,
+        )
+        env_vars[key] = value
+    return env_vars
+
+
 def _spawn_detached_bot(port: int, group_id: int, data_dir: str) -> tuple[int, Path]:
     log_path = _bot_log_path(group_id, data_dir)
+    env = os.environ.copy()
+    if not env.get("HTTPS_PROXY") and not env.get("https_proxy"):
+        proxy_vars = _load_proxy_env()
+        for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+                     "NO_PROXY", "no_proxy"):
+            if key in proxy_vars:
+                env[key] = proxy_vars[key]
     with open(log_path, "ab") as log_file:
         proc = subprocess.Popen(
             ["nohup", sys.executable, "-m", "kouhai_bot.worker"],
@@ -150,6 +190,7 @@ def _spawn_detached_bot(port: int, group_id: int, data_dir: str) -> tuple[int, P
             stderr=subprocess.STDOUT,
             start_new_session=True,
             close_fds=True,
+            env=env,
         )
     return proc.pid, log_path
 

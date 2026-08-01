@@ -831,12 +831,12 @@ class GroupCoordinator:
             _log_preview(parsed.get("reason", "")),
         )
         if parsed.get("correct", False) and parsed.get("reaction", "") != "123":
-            if req.is_private:
-                await send_private_msg(req.user_id, [build_face("314")])
-            else:
-                await react_emoji(req.message_id, "314")
             editorial = get_verified_official_editorial(pid)
             if editorial:
+                if req.is_private:
+                    await send_private_msg(req.user_id, [build_face("314")])
+                else:
+                    await react_emoji(req.message_id, "314")
                 source = "\n".join(
                     part for part in [editorial.tutorial_title, editorial.tutorial_url]
                     if part

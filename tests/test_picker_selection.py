@@ -122,6 +122,75 @@ def test_select_problem_raises_when_every_candidate_is_solved(monkeypatch, tmp_p
         picker.select_problem()
 
 
+def test_fetch_statement_retries_after_parse_failure(monkeypatch, tmp_path):
+    """A first attempt that yields an unusable page (challenge/redirect
+    variant) must be retried once before giving up."""
+    _configure_picker_tmp(tmp_path)
+    monkeypatch.setattr(picker, "_multimodal_model_configured", lambda: True)
+    fetch_calls = []
+    process_calls = []
+
+    raw_html = (
+        '<div class="problem-statement">'
+        '<div class="title">A. Retry</div>'
+        '<div class="time-limit">1 second</div>'
+        '<div class="memory-limit">256 megabytes</div>'
+        '<div class="section-title">Input</div>n'
+        '<div class="sample-test">'
+        '<div class="input"><pre>1</pre></div>'
+        '<div class="output"><pre>1</pre></div>'
+        '</div>'
+        "</div><script"
+    )
+
+    def fake_fetch(url):
+        fetch_calls.append(url)
+        return raw_html
+
+    def fake_process(contest_id, index, vl_backend="none", *, html=None):
+        process_calls.append((contest_id, index, html))
+        if len(process_calls) == 1:
+            return {"error": "Could not find problem-statement div", "pid": f"{contest_id}{index}"}
+        return {
+            "pid": f"{contest_id}{index}",
+            "text": "Statement",
+            "formulas_found": 0,
+            "graphics_found": 0,
+            "images": [],
+        }
+
+    monkeypatch.setattr(picker.cf_fetcher, "fetch_html", fake_fetch)
+    monkeypatch.setattr(picker.cf_statement, "process_problem", fake_process)
+
+    stmt = picker.fetch_statement(_problem(1, "A"))
+
+    assert stmt is not None
+    assert len(fetch_calls) == 2
+    assert len(process_calls) == 2
+    assert stmt["samples"] == [{"input": "1", "output": "1"}]
+
+
+def test_fetch_statement_gives_up_after_second_parse_failure(monkeypatch, tmp_path):
+    _configure_picker_tmp(tmp_path)
+    monkeypatch.setattr(picker, "_multimodal_model_configured", lambda: True)
+    fetch_calls = []
+
+    def fake_fetch(url):
+        fetch_calls.append(url)
+        return "<html>homepage</html>"
+
+    def fake_process(contest_id, index, vl_backend="none", *, html=None):
+        return {"error": "Could not find problem-statement div", "pid": f"{contest_id}{index}"}
+
+    monkeypatch.setattr(picker.cf_fetcher, "fetch_html", fake_fetch)
+    monkeypatch.setattr(picker.cf_statement, "process_problem", fake_process)
+
+    stmt = picker.fetch_statement(_problem(1, "A"))
+
+    assert stmt is None
+    assert len(fetch_calls) == 2
+
+
 def test_fetch_statement_skips_image_statement_without_multimodal_model(monkeypatch, tmp_path):
     _configure_picker_tmp(tmp_path)
 

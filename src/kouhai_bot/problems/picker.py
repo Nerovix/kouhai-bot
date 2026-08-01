@@ -390,6 +390,12 @@ def fetch_statement(problem: dict) -> object:
         )
 
         if "error" in cf_result:
+            if attempt == 0:
+                print(
+                    f"[{pid}] statement parse failed ({cf_result['error']}); retrying fetch",
+                    file=sys.stderr,
+                )
+                continue
             print(f"Warning: {pid} cf_statement error: {cf_result['error']}", file=sys.stderr)
             return None
 

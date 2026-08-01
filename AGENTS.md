@@ -596,6 +596,11 @@ visible to the poller.
     not-counted message and **do not** send the official tutorial again.
 15. If incorrect: reply with judge's reason.
 
+The face 314 reaction (group `react_emoji` / private `face` 314) is sent only when a
+first-pass correct verdict is followed by an actual second judge — i.e. a verified
+official editorial is cached (`get_verified_official_editorial` returns non-None).
+Without a cached editorial there is no second judge and no 314 reaction.
+
 Private `/submit` uses the same judge path and private history, but a correct result
 only marks the problem solved in `private_judge/users/<uid>.json`; it does not update
 the group scoreboard. The private success message includes the full available problem

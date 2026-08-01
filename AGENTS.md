@@ -57,7 +57,9 @@ NapCat (QQ) ──WS──> worker.py
   fetches each uncached statement once (with one retry when the page is usable
   but the sample container yields nothing — CF serves template variants where
   sample `<pre>` tags may carry an `id` and multi-line inputs render as
-  `test-example-line` divs) and passes that HTML into
+  `test-example-line` divs — and one retry when the statement block cannot be
+  parsed at all, e.g. a challenge/redirect page slipped through) and passes that
+  HTML into
   `fetcher.process_problem()` for image/text extraction as well as metadata
   parsing. Samples are extracted from the page-unique `.sample-test` container
   by `.input`/`.output` class pairs (not bare `<pre>` scanning), and the

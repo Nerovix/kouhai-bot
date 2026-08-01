@@ -32,9 +32,41 @@ logger = logging.getLogger("kouhai-bot.editorial_followup")
 
 _TUTORIAL_FORWARD_CHUNK_SIZE = 5000
 _PREFETCH_WAIT_TIMEOUT_SEC = 600
+_PREFETCH_BACKOFF_BASE_SEC = 60.0
+_PREFETCH_BACKOFF_MAX_SEC = 6 * 3600.0
 
 _background_tasks: set[asyncio.Task] = set()
 _prefetch_tasks: dict[str, asyncio.Task] = {}
+_prefetch_attempts: dict[str, int] = {}
+_prefetch_last_attempt_at: dict[str, float] = {}
+
+
+def _prefetch_backoff_remaining(pid: str) -> float:
+    """Seconds until the next prefetch attempt is allowed (0.0 = allowed now).
+
+    Exponential backoff on consecutive incomplete attempts: 60s, 2m, 4m, ...
+    capped at 6h. A successful terminal state (verified cache or confirmed
+    no-editorial marker) resets the counter.
+    """
+    attempts = _prefetch_attempts.get(pid, 0)
+    if attempts <= 0:
+        return 0.0
+    delay = min(
+        _PREFETCH_BACKOFF_BASE_SEC * (2 ** (attempts - 1)),
+        _PREFETCH_BACKOFF_MAX_SEC,
+    )
+    elapsed = time.monotonic() - _prefetch_last_attempt_at.get(pid, 0.0)
+    return max(0.0, delay - elapsed)
+
+
+def _mark_prefetch_failed(pid: str) -> None:
+    _prefetch_attempts[pid] = _prefetch_attempts.get(pid, 0) + 1
+    _prefetch_last_attempt_at[pid] = time.monotonic()
+
+
+def _mark_prefetch_succeeded(pid: str) -> None:
+    _prefetch_attempts.pop(pid, None)
+    _prefetch_last_attempt_at.pop(pid, None)
 
 
 def _track_task(task: asyncio.Task) -> None:
@@ -60,6 +92,8 @@ def schedule_prefetch_editorial(pid: str, *, run_agent: bool = True) -> None:
     """Start translating editorial when a new problem is set."""
     pid = (pid or "").strip()
     if not pid or not _prefetch_needed(pid):
+        return
+    if _prefetch_backoff_remaining(pid) > 0:
         return
     existing = _prefetch_tasks.get(pid)
     if existing is not None and not existing.done():
@@ -164,16 +198,20 @@ async def _run_prefetch_editorial(pid: str, *, run_agent: bool) -> None:
         await prefetch_editorial_zh(pid, run_agent=run_agent)
         elapsed = time.monotonic() - started
         if has_cached_editorial_zh(pid):
+            _mark_prefetch_succeeded(pid)
             logger.info("editorial prefetch ready for %s in %.1fs (cached)", pid, elapsed)
         elif is_no_official_editorial(pid):
+            _mark_prefetch_succeeded(pid)
             logger.info("editorial prefetch: no editorial for %s (%.1fs)", pid, elapsed)
         else:
+            _mark_prefetch_failed(pid)
             logger.warning(
                 "editorial prefetch finished for %s in %.1fs without cache",
                 pid,
                 elapsed,
             )
     except Exception as e:
+        _mark_prefetch_failed(pid)
         logger.warning(
             "editorial prefetch failed for %s: %s",
             pid,

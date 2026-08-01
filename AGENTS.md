@@ -808,6 +808,10 @@ uv run python tools/tutorial_tools.py validate --heuristic-only
   to tutorial code.
 - `editorial_prefetch_maintenance_loop()` continuously covers both `state.json.today`
   and the READY slot; this resumes interrupted work and retries INCOMPLETE results.
+  Consecutive incomplete attempts back off exponentially (60s base, capped at 6h,
+  in-memory) so a persistently failing pid (challenge pages, LLM outage) is not
+  re-crawled every maintenance tick; a verified cache or confirmed no-editorial
+  marker resets the backoff.
 - Background `prefetch_editorial_zh(pid)` writes no candidate or transient-failure
   marker. It commits only verified source+translation or an exhaustive no-match result.
 - `/newproblem` publication idempotently reasserts the current pid trigger.

@@ -99,12 +99,27 @@ def fetch_problem_html(
 # ── Extract problem statement block ─────────────────────────────────────
 
 def extract_problem_statement(html: str) -> str | None:
-    """Extract the <div class='problem-statement'> HTML block."""
-    m = re.search(
-        r'<div class="problem-statement"[^>]*>([\s\S]*?)</div>\s*<script',
-        html,
-    )
-    return m.group(1) if m else None
+    """Extract the <div class='problem-statement'> HTML block.
+
+    Uses div-depth counting instead of assuming a ``</div><script`` terminator:
+    Codeforces serves template variants where the statement container is not
+    followed by a script tag, and a naive non-greedy regex then truncates or
+    misses the block entirely.
+    """
+    m = re.search(r'<div class="problem-statement"[^>]*>', html)
+    if not m:
+        return None
+    start = m.start()
+    depth = 1
+    pos = m.end()
+    for dm in re.finditer(r"<div\b[^>]*>|</div\s*>", html[pos:], re.I):
+        if dm.group(0).startswith("</"):
+            depth -= 1
+        else:
+            depth += 1
+        if depth <= 0:
+            return html[start : pos + dm.end()]
+    return None
 
 
 # ── Find formula / graphics images ──────────────────────────────────────

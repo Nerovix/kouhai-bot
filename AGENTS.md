@@ -54,8 +54,15 @@ NapCat (QQ) ──WS──> worker.py
   retryable instead of writing a permanent `no_editorial` marker. The Playwright path uses the async API, derives its user agent
   from the bundled Chromium major version, and keeps synchronous compatibility callers
   safe when an asyncio loop is already running. `picker.fetch_statement()`
-  fetches each uncached statement once and passes that HTML into
-  `fetcher.process_problem()` for image/text extraction as well as metadata parsing.
+  fetches each uncached statement once (with one retry when the page is usable
+  but the sample container yields nothing — CF serves template variants where
+  sample `<pre>` tags may carry an `id` and multi-line inputs render as
+  `test-example-line` divs) and passes that HTML into
+  `fetcher.process_problem()` for image/text extraction as well as metadata
+  parsing. Samples are extracted from the page-unique `.sample-test` container
+  by `.input`/`.output` class pairs (not bare `<pre>` scanning), and the
+  `problem-statement` block itself is located by div-depth counting since the
+  `</div><script` terminator is not present in every template variant.
 - **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before image metadata via `_images_collected`. Stale caches with images are re-fetched so image metadata is available for multimodal tasks.
 - **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
 - **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection,

@@ -253,6 +253,53 @@ def _normalize_samples(samples: list[dict]) -> tuple[list[dict], bool]:
     return normalized, changed
 
 
+_SAMPLE_TEST_RE = re.compile(
+    r'<div class="sample-test"[^>]*>([\s\S]*?)</div>\s*(?=<div class="note"|</div>\s*<script|$)',
+    re.I,
+)
+_SAMPLE_IO_SPLIT_RE = re.compile(r'<div class="(input|output)"[^>]*>', re.I)
+_SAMPLE_PRE_RE = re.compile(r'<pre[^>]*>([\s\S]*?)</pre>', re.I | re.S)
+
+
+def _extract_samples(ps_html: str) -> list[dict]:
+    """Extract (input, output) sample pairs from a problem-statement fragment.
+
+    Anchors on the stable ``.sample-test`` container and its ``.input`` /
+    ``.output`` children instead of bare ``<pre>`` tags. Codeforces renders
+    samples with template variants — ``<pre>`` with or without an ``id``, and
+    multi-line inputs as ``test-example-line`` divs inside the ``<pre>`` — so
+    tag-shape assumptions break silently. The class hierarchy has been stable
+    across every Codeforces template version.
+
+    Returns an empty list when the page has no sample container (or when every
+    pair comes out empty). A pair whose block contains no ``<pre>`` is skipped.
+    """
+    container = _SAMPLE_TEST_RE.search(ps_html)
+    if not container:
+        return []
+    parts = _SAMPLE_IO_SPLIT_RE.split(container.group(1))
+    # parts[0] is the prefix before the first .input/.output div; afterwards
+    # labels and bodies strictly alternate: [label, body, label, body, ...]
+    labels = parts[1::2]
+    bodies = parts[2::2]
+    samples: list[dict] = []
+    for i in range(0, len(labels) - 1, 2):
+        if labels[i].lower() != "input" or labels[i + 1].lower() != "output":
+            continue
+        pre_m = _SAMPLE_PRE_RE.search(bodies[i])
+        if not pre_m:
+            continue
+        pre_in = _normalize_sample_block(pre_m.group(1))
+        pre_m = _SAMPLE_PRE_RE.search(bodies[i + 1])
+        if not pre_m:
+            continue
+        pre_out = _normalize_sample_block(pre_m.group(1))
+        if not pre_in and not pre_out:
+            continue
+        samples.append({"input": pre_in, "output": pre_out})
+    return samples
+
+
 def fetch_statement(problem: dict) -> object:
     """
     Fetch full problem statement from Codeforces.
@@ -318,102 +365,114 @@ def fetch_statement(problem: dict) -> object:
 
     # Fetch once, then share the same rendered document between statement/image
     # extraction and title/limits/sample parsing.
+    # Fetch + parse with one retry: Codeforces serves template variants that
+    # can silently drop samples (sample <pre> with/without id, statement
+    # container terminator shape). A second fetch frequently hits the other
+    # variant, so retry once when the page is otherwise usable but no samples
+    # were extracted.
     url = f"https://codeforces.com/problemset/problem/{contest_id}/{index}"
-    try:
-        raw_html = cf_fetcher.fetch_html(url)
-    except Exception as e:
-        print(f"Warning: failed to fetch {url}: {e}", file=sys.stderr)
-        return None
+    samples: list[dict] = []
+    result: dict = {}
+    desc = ""
+    for attempt in range(2):
+        try:
+            raw_html = cf_fetcher.fetch_html(url)
+        except Exception as e:
+            print(f"Warning: failed to fetch {url}: {e}", file=sys.stderr)
+            return None
 
-    # Step 1: Process problem text and collect image metadata.
-    cf_result = cf_statement.process_problem(
-        contest_id,
-        index,
-        vl_backend="none",
-        html=raw_html,
-    )
-
-    if "error" in cf_result:
-        print(f"Warning: {pid} cf_statement error: {cf_result['error']}", file=sys.stderr)
-        return None
-
-    images = cf_result.get("images", [])
-    if images and not _multimodal_model_configured():
-        print(
-            f"Warning: {pid} has {len(images)} image(s), but llm.multimodal_model is not configured; skipping",
-            file=sys.stderr,
+        # Step 1: Process problem text and collect image metadata.
+        cf_result = cf_statement.process_problem(
+            contest_id,
+            index,
+            vl_backend="none",
+            html=raw_html,
         )
-        return None
 
-    # Step 2: Parse metadata from that same HTML document.
-    html = raw_html
+        if "error" in cf_result:
+            print(f"Warning: {pid} cf_statement error: {cf_result['error']}", file=sys.stderr)
+            return None
 
-    result = {}
+        images = cf_result.get("images", [])
+        if images and not _multimodal_model_configured():
+            print(
+                f"Warning: {pid} has {len(images)} image(s), but llm.multimodal_model is not configured; skipping",
+                file=sys.stderr,
+            )
+            return None
 
-    # Problem name (from <div class="title">)
-    m = re.search(r'<div class="title">([^<]+)</div>', html)
-    if m:
-        result["name"] = m.group(1).strip()
+        # Step 2: Parse metadata from that same HTML document.
+        html = raw_html
 
-    # Time/memory limits
-    m = re.search(r'(\d+\.?\d*)\s*seconds?\b', html, re.I)
-    if m:
-        result["time_limit"] = m.group(1) + "s"
-    m = re.search(r'(\d+)\s*megabytes?\b', html, re.I)
-    if m:
-        result["memory_limit"] = m.group(1) + "MB"
+        result = {}
 
-    # Description: text with image placeholders; image metadata is stored separately.
-    desc = cf_result.get("text", "")
-    result["description"] = desc
-    result["images"] = images if isinstance(images, list) else []
-    result["has_images"] = bool(result["images"])
+        # Problem name (from <div class="title">)
+        m = re.search(r'<div class="title">([^<]+)</div>', html)
+        if m:
+            result["name"] = m.group(1).strip()
 
-    # Extract Input spec from raw HTML
-    inp_m = re.search(
-        r'<div class="section-title">Input</div>\s*(.*?)(?=<div class="section-title"|</div>\s*<script)',
-        html,
-        re.DOTALL,
-    )
-    if inp_m:
-        inp = re.sub(r'<[^>]+>', '', inp_m.group(1))
-        inp = re.sub(r'\s+', ' ', inp).strip()
-        inp = re.sub(r'\$\$\$|\$\$|\$', '', inp)
-        result["input"] = inp
+        # Time/memory limits
+        m = re.search(r"(\d+\.?\d*)\s*seconds?\b", html, re.I)
+        if m:
+            result["time_limit"] = m.group(1) + "s"
+        m = re.search(r"(\d+)\s*megabytes?\b", html, re.I)
+        if m:
+            result["memory_limit"] = m.group(1) + "MB"
 
-    # Extract samples from <pre> blocks in raw HTML
-    ps_m = re.search(
-        r'<div class="problem-statement"[^>]*>([\s\S]*?)</div>\s*<script',
-        html,
-    )
-    if ps_m:
-        pres = re.findall(r'<pre>([\s\S]*?)</pre>', ps_m.group(1))
-        samples = []
-        for i in range(0, len(pres) - 1, 2):
-            samples.append({
-                "input": _normalize_sample_block(pres[i]),
-                "output": _normalize_sample_block(pres[i + 1]),
-            })
+        # Description: text with image placeholders; image metadata is stored separately.
+        desc = cf_result.get("text", "")
+        result["description"] = desc
+        result["images"] = images if isinstance(images, list) else []
+        result["has_images"] = bool(result["images"])
+
+        # Extract Input spec from raw HTML
+        inp_m = re.search(
+            r'<div class="section-title">Input</div>\s*(.*?)(?=<div class="section-title"|</div>\s*<script)',
+            html,
+            re.DOTALL,
+        )
+        if inp_m:
+            inp = re.sub(r"<[^>]+>", "", inp_m.group(1))
+            inp = re.sub(r"\s+", " ", inp).strip()
+            inp = re.sub(r"\$\$\$|\$\$|\$", "", inp)
+            result["input"] = inp
+
+        # Extract samples from the stable .sample-test container structure instead
+        # of bare <pre> tags: CF templates vary (pre with/without id, multi-line
+        # samples rendered as test-example-line divs), but the
+        # sample-test / input / output class hierarchy is stable across versions.
+        # The container is unique per page, so this deliberately searches the whole
+        # document rather than the (also template-varying) problem-statement div.
+        samples = _extract_samples(html)
         if samples:
             result["samples"] = samples
 
-    # Extract Note
-    if ps_m:
-        note_m = re.search(
-            r'<div class="section-title">Note</div>([\s\S]*?)(?=<div class="section-title"|$)',
-            ps_m.group(1),
-            re.DOTALL,
-        )
-        if note_m:
-            note = re.sub(r'<[^>]+>', '', note_m.group(1))
-            note = re.sub(r'\s+', ' ', note).strip()
-            note = re.sub(r'\$\$\$|\$\$|\$', '', note)
-            result["notes"] = note
+        # Extract Note (from the statement container when available; Notes are
+        # best-effort and their absence does not block caching).
+        ps_html = cf_statement.extract_problem_statement(html)
+        if ps_html:
+            note_m = re.search(
+                r'<div class="section-title">Note</div>([\s\S]*?)(?=<div class="section-title"|$)',
+                ps_html,
+                re.DOTALL,
+            )
+            if note_m:
+                note = re.sub(r"<[^>]+>", "", note_m.group(1))
+                note = re.sub(r"\s+", " ", note).strip()
+                note = re.sub(r"\$\$\$|\$\$|\$", "", note)
+                result["notes"] = note
 
-    # Sanity: reject if description contains raw image URLs
-    if re.search(r'https?://\S+\.(png|jpg|jpeg|gif)', desc, re.I):
-        print(f"Warning: {pid} contains image URL in rendered text, skipping", file=sys.stderr)
-        return None
+        # Sanity: reject if description contains raw image URLs
+        if re.search(r"https?://\S+\.(png|jpg|jpeg|gif)", desc, re.I):
+            print(f"Warning: {pid} contains image URL in rendered text, skipping", file=sys.stderr)
+            return None
+
+        if samples or attempt == 1:
+            break
+        if not _SAMPLE_TEST_RE.search(html):
+            # Page genuinely has no sample container — not a template glitch.
+            break
+        print(f"[{pid}] statement usable but no samples extracted; retrying fetch", file=sys.stderr)
 
     # Cache and return
     result["_vl_processed"] = True

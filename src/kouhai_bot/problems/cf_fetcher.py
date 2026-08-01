@@ -45,7 +45,8 @@ _CF_CONTENT_RE = re.compile(
 )
 _STRONG_CHALLENGE_RE = re.compile(
     r"_cf_chl_opt|cf-browser-verify|"
-    r"<title[^>]*>\s*just\s+a\s+moment|performing\s+security\s+verification",
+    r"<title[^>]*>\s*just\s+a\s+moment|performing\s+security\s+verification|"
+    r"browser\s+is\s+being\s+checked",
     re.I,
 )
 _CHALLENGE_ASSET_RE = re.compile(r"(?:cdn-cgi/)?challenge-platform", re.I)

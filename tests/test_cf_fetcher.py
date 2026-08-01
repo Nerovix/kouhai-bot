@@ -115,6 +115,11 @@ class _FakePage:
         "<div id='cf-browser-verify'>Checking your browser</div>",
         "<div class='ttypography'>Tutorial is loading...</div>",
         "<div>Tutorial is loading</div>",
+        (
+            "<style>p{height:100vh}</style>"
+            "<p>Please wait. Your browser is being checked. It may take a few"
+            " seconds...</p><script>var _0x3e09e3=_0x4bf8;</script>"
+        ),
     ],
 )
 def test_content_valid_rejects_unusable_responses(body):

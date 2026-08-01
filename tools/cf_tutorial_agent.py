@@ -203,6 +203,10 @@ def collect_blog_documents(
     problem_title = extract_problem_title(problem_html)
     all_blog_urls = extract_blog_links(problem_html, problem_url)
     if not all_blog_urls:
+        if not content_valid(problem_html):
+            # Unusable page (challenge / placeholder) — retryable work, never a
+            # terminal "no editorial" verdict.
+            raise AgentIncomplete("problem_page_invalid_content")
         raise AgentNoMatch("problem_page_has_no_blog_entry_links")
     remaining_blog_urls = [
         url for url in all_blog_urls if url not in excluded_tutorial_urls

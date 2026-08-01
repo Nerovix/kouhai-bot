@@ -57,6 +57,45 @@ def test_extract_blog_links_prefers_tutorial_text():
     ]
 
 
+def test_collect_challenge_page_is_incomplete_not_no_match():
+    """A Cloudflare 'browser is being checked' page must stay retryable, never
+    become a terminal no-editorial verdict."""
+    challenge_page = (
+        "<style>p{height:100vh}</style>"
+        "<p>Please wait. Your browser is being checked. It may take a few"
+        " seconds...</p><script>var _0x3e09e3=_0x4bf8;</script>"
+    )
+
+    def fake_fetch(url, **_kwargs):
+        return challenge_page
+
+    with patch("cf_tutorial_agent.fetch_html", side_effect=fake_fetch):
+        with pytest.raises(agent.AgentIncomplete, match="problem_page_invalid_content"):
+            agent.collect_blog_documents(
+                pid="1000B",
+                fetcher="http",
+                pw_wait_ms=100,
+                blog_limit=2,
+            )
+
+
+def test_collect_valid_page_without_links_is_no_match():
+    """A valid problem page with genuinely no blog links stays terminal."""
+    valid_page = "<div class='problem-statement'>A real statement without links.</div>"
+
+    def fake_fetch(url, **_kwargs):
+        return valid_page
+
+    with patch("cf_tutorial_agent.fetch_html", side_effect=fake_fetch):
+        with pytest.raises(agent.AgentNoMatch, match="problem_page_has_no_blog_entry_links"):
+            agent.collect_blog_documents(
+                pid="1000B",
+                fetcher="http",
+                pw_wait_ms=100,
+                blog_limit=2,
+            )
+
+
 def test_collect_blog_documents_does_not_refetch_rejected_url():
     problem_url = "https://codeforces.com/problemset/problem/1000/B"
     rejected_url = "https://codeforces.com/blog/entry/2"

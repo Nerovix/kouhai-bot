@@ -46,7 +46,12 @@ NapCat (QQ) ──WS──> worker.py
   `content_valid()` helper is the shared usability gate. Normal Codeforces pages may
   contain an injected `challenge-platform` asset, so that marker is only treated as a
   challenge when no problem/blog content container is present; strong challenge-page
-  markers remain invalid. The Playwright path uses the async API, derives its user agent
+  markers remain invalid. The `browser is being checked` interstitial (a Cloudflare
+  JS-challenge variant that returns HTTP 200 with no content container) is treated as
+  a strong challenge marker too. In `tools/cf_tutorial_agent.py`, a problem page with
+  no blog links is only a terminal no-editorial verdict when `content_valid()` passes;
+  an unusable page (challenge/placeholder) raises `AgentIncomplete` so prefetch stays
+  retryable instead of writing a permanent `no_editorial` marker. The Playwright path uses the async API, derives its user agent
   from the bundled Chromium major version, and keeps synchronous compatibility callers
   safe when an asyncio loop is already running. `picker.fetch_statement()`
   fetches each uncached statement once and passes that HTML into

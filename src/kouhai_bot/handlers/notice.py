@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+
 from ..config import get_config
 from ..napcat.client import send_group_poke
 
+logger = logging.getLogger("kouhai-bot.notice")
+
 
 async def handle_notice_event(event: dict) -> None:
-    """Poke back when the bot is nudged and post a new problem when eligible."""
+    """Poke back when nudged; reshow the current problem if unsolved, else post a new one."""
     cfg = get_config()
     if event.get("notice_type") != "notify" or event.get("sub_type") != "poke":
         return
@@ -30,6 +34,16 @@ async def handle_notice_event(event: dict) -> None:
 
     # Keep command discovery/import timing unchanged until a relevant poke arrives.
     from .cmd import newproblem
+
+    if newproblem._has_unsolved_problem(group_id):
+        # Current problem not solved yet: show it (same effect as /pb).
+        from .cmd.stubs import resend_current_problem_group
+
+        try:
+            await resend_current_problem_group(group_id, {})
+        except Exception:
+            logger.exception("[group_%s] poke problem resend failed", group_id)
+        return
 
     await newproblem.enqueue_new_problem(
         group_id,

@@ -151,14 +151,19 @@ def test_command_post_exception_is_not_swallowed(monkeypatch):
     assert GROUP_ID not in newproblem._cooldowns
 
 
-def test_bot_poke_only_pokes_back_when_problem_is_unsolved(monkeypatch):
+def test_bot_poke_resends_problem_when_unsolved(monkeypatch):
     newproblem = _reset_newproblem_runtime()
     pokes = []
     posts = []
+    resends = []
 
     async def fake_poke(group_id, user_id):
         pokes.append((group_id, user_id))
         return True
+
+    async def fake_resend(group_id, sender):
+        resends.append((group_id, sender))
+        return None
 
     async def fake_post(*args, **kwargs):
         posts.append((args, kwargs))
@@ -166,12 +171,17 @@ def test_bot_poke_only_pokes_back_when_problem_is_unsolved(monkeypatch):
 
     monkeypatch.setattr("kouhai_bot.handlers.notice.send_group_poke", fake_poke)
     monkeypatch.setattr(newproblem, "_has_unsolved_problem", lambda _gid: True)
+    monkeypatch.setattr(
+        "kouhai_bot.handlers.cmd.stubs.resend_current_problem_group", fake_resend
+    )
     monkeypatch.setattr(newproblem, "_post_new_problem_locked", fake_post)
 
     asyncio.run(process_event(_poke_event(), spawn_handlers=False))
 
     assert pokes == [(GROUP_ID, USER_ID)]
+    assert resends == [(GROUP_ID, {})]
     assert posts == []
+    assert GROUP_ID not in newproblem._cooldowns
 
 
 def test_bot_poke_only_pokes_back_during_cooldown(monkeypatch):
@@ -263,6 +273,33 @@ def test_poke_post_failure_does_not_escape_detached_task(monkeypatch, caplog):
     assert GROUP_ID not in newproblem._newproblem_active
     assert not newproblem._newproblem_lock(GROUP_ID).locked()
     assert GROUP_ID not in newproblem._cooldowns
+
+
+def test_poke_resend_failure_does_not_escape_detached_task(monkeypatch, caplog):
+    newproblem = _reset_newproblem_runtime()
+    pokes = []
+
+    async def fake_poke(_group_id, _user_id):
+        pokes.append(_group_id)
+        return True
+
+    async def failing_resend(*_args, **_kwargs):
+        raise RuntimeError("resend failed")
+
+    async def run():
+        task = await process_event(_poke_event(), spawn_handlers=True)
+        assert task is not None
+        await task
+
+    monkeypatch.setattr("kouhai_bot.handlers.notice.send_group_poke", fake_poke)
+    monkeypatch.setattr(newproblem, "_has_unsolved_problem", lambda _gid: True)
+    monkeypatch.setattr(
+        "kouhai_bot.handlers.cmd.stubs.resend_current_problem_group", failing_resend
+    )
+
+    asyncio.run(run())
+
+    assert "poke problem resend failed" in caplog.text
 
 
 def test_concurrent_pokes_start_only_one_refresh(monkeypatch):

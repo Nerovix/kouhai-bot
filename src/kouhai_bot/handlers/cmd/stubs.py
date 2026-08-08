@@ -80,6 +80,15 @@ async def handle_problem(group_id: int, user_id: int, sender: dict,
             ))
         return
 
+    await resend_current_problem_group(group_id, sender)
+
+
+async def resend_current_problem_group(group_id: int, sender: dict) -> None:
+    """Resend today's problem card to the group (shared by /pb and poke).
+
+    Replays the original merged-forward card from daily_msg.json when
+    available; falls back to regenerating the problem text otherwise.
+    """
     from ...config import get_config
     from ...napcat.client import send_group_forward_msg
     from ..shared import save_problem_card_ref

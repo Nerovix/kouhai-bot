@@ -35,23 +35,25 @@ async def handle_notice_event(event: dict) -> None:
     # Keep command discovery/import timing unchanged until a relevant poke arrives.
     from .cmd import newproblem
 
-    if newproblem._has_unsolved_problem(group_id):
-        # Current problem not solved yet: show it (same effect as /pb).
-        from .cmd.stubs import resend_current_problem_group
+    try:
+        if newproblem.has_unsolved_problem(group_id):
+            # Current problem not solved yet: show it (same effect as /pb).
+            from .cmd.stubs import resend_current_problem_group
 
-        try:
-            await resend_current_problem_group(group_id, {})
-        except Exception:
-            logger.exception("[group_%s] poke problem resend failed", group_id)
-        return
+            await resend_current_problem_group(group_id, {"user_id": user_id})
+            return
 
-    await newproblem.enqueue_new_problem(
-        group_id,
-        user_id,
-        None,
-        "",
-        command="poke",
-        force=False,
-        quiet=True,
-        prefix="戳一戳刷新🌟",
-    )
+        await newproblem.enqueue_new_problem(
+            group_id,
+            user_id,
+            None,
+            "",
+            command="poke",
+            force=False,
+            quiet=True,
+            prefix="戳一戳刷新🌟",
+        )
+    except Exception:
+        # Poke handlers run as bare detached tasks with no outer wrapper
+        # (handlers/__init__.py), so swallow and log everything past the poke-back.
+        logger.exception("[group_%s] poke handling failed", group_id)

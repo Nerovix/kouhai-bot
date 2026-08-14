@@ -71,7 +71,7 @@ def test_bot_poke_is_returned_and_posts_when_eligible(monkeypatch):
         return True
 
     monkeypatch.setattr("kouhai_bot.handlers.notice.send_group_poke", fake_poke)
-    monkeypatch.setattr(newproblem, "_has_unsolved_problem", lambda _gid: False)
+    monkeypatch.setattr(newproblem, "has_unsolved_problem", lambda _gid: False)
     monkeypatch.setattr(newproblem, "_post_new_problem_locked", fake_post)
 
     asyncio.run(process_event(_poke_event(), spawn_handlers=False))
@@ -113,7 +113,7 @@ def test_quiet_poke_picker_failure_sends_no_group_message(monkeypatch, tmp_path)
     monkeypatch.setattr("kouhai_bot.handlers.notice.get_config", lambda: cfg)
     monkeypatch.setattr(newproblem, "get_config", lambda: cfg)
     monkeypatch.setattr("kouhai_bot.handlers.notice.send_group_poke", fake_poke)
-    monkeypatch.setattr(newproblem, "_has_unsolved_problem", lambda _gid: False)
+    monkeypatch.setattr(newproblem, "has_unsolved_problem", lambda _gid: False)
     monkeypatch.setattr(newproblem, "send_group_msg", fake_send_group_msg)
     monkeypatch.setattr(
         newproblem,
@@ -134,7 +134,7 @@ def test_command_post_exception_is_not_swallowed(monkeypatch):
     async def failing_post(*_args, **_kwargs):
         raise RuntimeError("posting failed")
 
-    monkeypatch.setattr(newproblem, "_has_unsolved_problem", lambda _gid: False)
+    monkeypatch.setattr(newproblem, "has_unsolved_problem", lambda _gid: False)
     monkeypatch.setattr(newproblem, "_post_new_problem_locked", failing_post)
 
     with pytest.raises(RuntimeError, match="posting failed"):
@@ -151,27 +151,37 @@ def test_command_post_exception_is_not_swallowed(monkeypatch):
     assert GROUP_ID not in newproblem._cooldowns
 
 
-def test_bot_poke_only_pokes_back_when_problem_is_unsolved(monkeypatch):
+def test_bot_poke_resends_problem_when_unsolved(monkeypatch):
     newproblem = _reset_newproblem_runtime()
     pokes = []
     posts = []
+    resends = []
 
     async def fake_poke(group_id, user_id):
         pokes.append((group_id, user_id))
         return True
+
+    async def fake_resend(group_id, sender):
+        resends.append((group_id, sender))
+        return None
 
     async def fake_post(*args, **kwargs):
         posts.append((args, kwargs))
         return True
 
     monkeypatch.setattr("kouhai_bot.handlers.notice.send_group_poke", fake_poke)
-    monkeypatch.setattr(newproblem, "_has_unsolved_problem", lambda _gid: True)
+    monkeypatch.setattr(newproblem, "has_unsolved_problem", lambda _gid: True)
+    monkeypatch.setattr(
+        "kouhai_bot.handlers.cmd.stubs.resend_current_problem_group", fake_resend
+    )
     monkeypatch.setattr(newproblem, "_post_new_problem_locked", fake_post)
 
     asyncio.run(process_event(_poke_event(), spawn_handlers=False))
 
     assert pokes == [(GROUP_ID, USER_ID)]
+    assert resends == [(GROUP_ID, {"user_id": USER_ID})]
     assert posts == []
+    assert GROUP_ID not in newproblem._cooldowns
 
 
 def test_bot_poke_only_pokes_back_during_cooldown(monkeypatch):
@@ -189,7 +199,7 @@ def test_bot_poke_only_pokes_back_during_cooldown(monkeypatch):
         return True
 
     monkeypatch.setattr("kouhai_bot.handlers.notice.send_group_poke", fake_poke)
-    monkeypatch.setattr(newproblem, "_has_unsolved_problem", lambda _gid: False)
+    monkeypatch.setattr(newproblem, "has_unsolved_problem", lambda _gid: False)
     monkeypatch.setattr(newproblem, "_post_new_problem_locked", fake_post)
     monkeypatch.setattr("kouhai_bot.handlers.cmd.newproblem.time.monotonic", lambda: 200.0)
 
@@ -254,7 +264,7 @@ def test_poke_post_failure_does_not_escape_detached_task(monkeypatch, caplog):
         await task
 
     monkeypatch.setattr("kouhai_bot.handlers.notice.send_group_poke", fake_poke)
-    monkeypatch.setattr(newproblem, "_has_unsolved_problem", lambda _gid: False)
+    monkeypatch.setattr(newproblem, "has_unsolved_problem", lambda _gid: False)
     monkeypatch.setattr(newproblem, "_post_new_problem_locked", failing_post)
 
     asyncio.run(run())
@@ -263,6 +273,95 @@ def test_poke_post_failure_does_not_escape_detached_task(monkeypatch, caplog):
     assert GROUP_ID not in newproblem._newproblem_active
     assert not newproblem._newproblem_lock(GROUP_ID).locked()
     assert GROUP_ID not in newproblem._cooldowns
+
+
+def test_poke_resend_failure_does_not_escape_detached_task(monkeypatch, caplog):
+    newproblem = _reset_newproblem_runtime()
+    pokes = []
+
+    async def fake_poke(_group_id, _user_id):
+        pokes.append(_group_id)
+        return True
+
+    async def failing_resend(*_args, **_kwargs):
+        raise RuntimeError("resend failed")
+
+    async def run():
+        task = await process_event(_poke_event(), spawn_handlers=True)
+        assert task is not None
+        await task
+
+    monkeypatch.setattr("kouhai_bot.handlers.notice.send_group_poke", fake_poke)
+    monkeypatch.setattr(newproblem, "has_unsolved_problem", lambda _gid: True)
+    monkeypatch.setattr(
+        "kouhai_bot.handlers.cmd.stubs.resend_current_problem_group", failing_resend
+    )
+
+    asyncio.run(run())
+
+    assert "poke handling failed" in caplog.text
+
+
+def test_poke_resend_ignores_cooldown_when_unsolved(monkeypatch):
+    newproblem = _reset_newproblem_runtime()
+    pokes = []
+    resends = []
+    posts = []
+    newproblem._cooldowns[GROUP_ID] = 100.0
+
+    async def fake_poke(group_id, user_id):
+        pokes.append((group_id, user_id))
+        return True
+
+    async def fake_resend(group_id, sender):
+        resends.append((group_id, sender))
+        return None
+
+    async def fake_post(*args, **kwargs):
+        posts.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr("kouhai_bot.handlers.notice.send_group_poke", fake_poke)
+    monkeypatch.setattr(newproblem, "has_unsolved_problem", lambda _gid: True)
+    monkeypatch.setattr(
+        "kouhai_bot.handlers.cmd.stubs.resend_current_problem_group", fake_resend
+    )
+    monkeypatch.setattr(newproblem, "_post_new_problem_locked", fake_post)
+
+    asyncio.run(process_event(_poke_event(), spawn_handlers=False))
+
+    # Cooldown only gates the /np refresh path, not the /pb resend.
+    assert pokes == [(GROUP_ID, USER_ID)]
+    assert resends == [(GROUP_ID, {"user_id": USER_ID})]
+    assert posts == []
+    assert newproblem._cooldowns[GROUP_ID] == 100.0
+
+
+def test_poke_predicate_failure_does_not_escape_detached_task(monkeypatch, caplog):
+    _reset_newproblem_runtime()
+    pokes = []
+
+    async def fake_poke(_group_id, _user_id):
+        pokes.append(_group_id)
+        return True
+
+    def failing_predicate(_gid):
+        raise RuntimeError("state load failed")
+
+    async def run():
+        task = await process_event(_poke_event(), spawn_handlers=True)
+        assert task is not None
+        await task
+
+    monkeypatch.setattr("kouhai_bot.handlers.notice.send_group_poke", fake_poke)
+    monkeypatch.setattr(
+        "kouhai_bot.handlers.cmd.newproblem.has_unsolved_problem", failing_predicate
+    )
+
+    asyncio.run(run())
+
+    assert pokes == [GROUP_ID]
+    assert "poke handling failed" in caplog.text
 
 
 def test_concurrent_pokes_start_only_one_refresh(monkeypatch):
@@ -290,7 +389,7 @@ def test_concurrent_pokes_start_only_one_refresh(monkeypatch):
         await asyncio.wait_for(first, timeout=1.0)
 
     monkeypatch.setattr("kouhai_bot.handlers.notice.send_group_poke", fake_poke)
-    monkeypatch.setattr(newproblem, "_has_unsolved_problem", lambda _gid: False)
+    monkeypatch.setattr(newproblem, "has_unsolved_problem", lambda _gid: False)
     monkeypatch.setattr(newproblem, "_post_new_problem_locked", fake_post)
 
     asyncio.run(run())

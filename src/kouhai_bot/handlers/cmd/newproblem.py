@@ -54,7 +54,7 @@ _newproblem_locks: dict[int, asyncio.Lock] = {}
 _newproblem_active: dict[int, dict] = {}
 
 
-def _has_unsolved_problem(group_id: int) -> bool:
+def has_unsolved_problem(group_id: int) -> bool:
     problem = get_today_problem(group_id)
     return bool(problem) and not is_already_solved(group_id)
 
@@ -150,7 +150,7 @@ async def enqueue_new_problem(
                 ))
             return False
 
-        if not force and _has_unsolved_problem(group_id):
+        if not force and has_unsolved_problem(group_id):
             if not quiet:
                 await send_group_msg(group_id, build_plain_message(
                     f"@{nickname} 当前题目还没有人解出来呢～不能直接刷题哦。\n"

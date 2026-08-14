@@ -33,6 +33,7 @@ NapCat (QQ) ──WS──> worker.py
 
 - **Command auto-discovery**: Each command in `handlers/cmd/*.py` calls `register()` at module load. The `registry.discover_commands()` scans with `pkgutil.iter_modules`. Adding a new command = create a `.py` file with a `register()` function.
 - **Limited aliases**: Only six short aliases are supported: `/newproblem`→`/np`, `/problem`→`/pb`, `/submit`→`/sbm`, `/review`→`/rv`, `/clarify`→`/clrf`, `/setproblem`→`/sp`. Old aliases such as `/sb`, `/排名`, and Chinese aliases remain unsupported. New commands default to `aliases=[]` unless explicitly approved.
+- **Poke (拍一拍) routing**: `handlers/notice.py` always pokes back, then branches on solve state — if the current problem is **unsolved**, the poke resends the current problem card (same effect as `/pb`, via `stubs.resend_current_problem_group`, no cooldown); if **solved** (or no current problem), it quietly refreshes via `enqueue_new_problem(command="poke", force=False, quiet=True)`.
 - **Help auto-generation**: `handlers/cmd/help.py` reads `registry.all_commands()` and builds the help text dynamically. Descriptions must match old bridge.py wording.
   `usage` field = args suffix in /help display (e.g. `usage="你的做法"` → `/submit 你的做法`). Group help hides private-only details for `/setproblem`, `/sync`, and `/testcd` and only briefly mentions private judge; private help lists the private-judge command set.
   Group and private help are both delivered as merged-forward cards, with direct text

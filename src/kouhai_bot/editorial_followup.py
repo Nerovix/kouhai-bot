@@ -16,6 +16,7 @@ from .config import get_config
 from .napcat.client import (
     build_plain_message,
     send_group_forward_msg,
+    send_private_forward_msg,
     send_private_msg,
 )
 from .tutorials import (
@@ -250,6 +251,15 @@ def schedule_post_solve_editorial_followup(group_id: int, pid: str) -> None:
     _track_task(task)
 
 
+def schedule_private_post_solve_editorial_followup(user_id: int, pid: str) -> None:
+    """Fire-and-forget deliver the editorial to a private-judge user on AC."""
+    task = asyncio.create_task(
+        run_private_post_solve_editorial_followup(user_id, pid),
+        name=f"private_editorial_deliver_{user_id}_{pid}",
+    )
+    _track_task(task)
+
+
 async def run_post_solve_editorial_followup(group_id: int, pid: str) -> None:
     started = time.monotonic()
     try:
@@ -304,46 +314,103 @@ async def run_post_solve_editorial_followup(group_id: int, pid: str) -> None:
         )
 
 
-async def deliver_official_tutorial_forward(
-    group_id: int,
+async def run_private_post_solve_editorial_followup(user_id: int, pid: str) -> None:
+    started = time.monotonic()
+    try:
+        editorial = get_verified_official_editorial(pid)
+        if editorial:
+            await deliver_official_tutorial_forward_private(user_id, pid, editorial)
+            logger.info(
+                "[user_%s] editorial delivered from cache for %s in %.1fs",
+                user_id,
+                pid,
+                time.monotonic() - started,
+            )
+            return
+        if is_no_official_editorial(pid):
+            logger.info(
+                "[user_%s] no official editorial for %s, skipping delivery",
+                user_id,
+                pid,
+            )
+            return
+
+        await _await_prefetch_if_running(pid)
+        if is_no_official_editorial(pid):
+            logger.info(
+                "[user_%s] no official editorial for %s, skipping delivery",
+                user_id,
+                pid,
+            )
+            return
+        editorial = get_verified_official_editorial(pid)
+        if not editorial:
+            logger.info(
+                "[user_%s] editorial for %s remains incomplete, skipping delivery",
+                user_id,
+                pid,
+            )
+            return
+        await deliver_official_tutorial_forward_private(user_id, pid, editorial)
+        logger.info(
+            "[user_%s] editorial delivered for %s in %.1fs",
+            user_id,
+            pid,
+            time.monotonic() - started,
+        )
+    except Exception as e:
+        logger.warning(
+            "[user_%s] post-solve editorial delivery failed for %s: %s",
+            user_id,
+            pid,
+            e,
+            exc_info=True,
+        )
+
+
+async def _prepare_editorial_forward(
     pid: str,
     editorial: OfficialEditorial,
-) -> None:
-    """Deliver one already verified and cached Chinese editorial."""
+) -> list[str]:
+    """Verify the cached editorial and self-send its chunks to the bot itself.
+
+    Returns the node ids ready to be forwarded (group or private), or an
+    empty list when the editorial is not deliverable (unverified, missing
+    translation, or self-send failure).
+    """
     verified_editorial = get_verified_official_editorial(pid)
     if verified_editorial is None:
-        logger.warning(
-            "[group_%s] refused unverified tutorial delivery for %s",
-            group_id,
-            pid,
-        )
-        return
-    editorial = verified_editorial
+        return []
     zh_text = load_cached_editorial_zh(pid)
     if len(zh_text) < MIN_EDITORIAL_LEN:
-        logger.warning(
-            "[group_%s] verified tutorial translation missing for %s",
-            group_id,
-            pid,
-        )
-        return
+        return []
 
     cfg = get_config()
     header = f"📖 {pid} 官方题解"
-    if editorial.tutorial_url:
-        header = f"{header}\n来源: {editorial.tutorial_url}"
+    if verified_editorial.tutorial_url:
+        header = f"{header}\n来源: {verified_editorial.tutorial_url}"
     payload = f"{header}\n\n{zh_text}"
     chunks = _chunk_text(payload, _TUTORIAL_FORWARD_CHUNK_SIZE)
     node_ids: list[str] = []
     for chunk in chunks:
         self_resp = await send_private_msg(cfg.bot_qq, build_plain_message(chunk))
         if not self_resp:
-            node_ids = []
-            break
+            return []
         node_ids.append(str(self_resp))
+    return node_ids
+
+
+async def deliver_official_tutorial_forward(
+    group_id: int,
+    pid: str,
+    editorial: OfficialEditorial,
+) -> None:
+    """Deliver one already verified and cached Chinese editorial to a group."""
+    node_ids = await _prepare_editorial_forward(pid, editorial)
     if not node_ids:
         logger.warning(
-            "[group_%s] failed to self-send official tutorial for %s",
+            "[group_%s] tutorial delivery skipped for %s "
+            "(unverified/missing translation/self-send failed)",
             group_id,
             pid,
         )
@@ -357,5 +424,33 @@ async def deliver_official_tutorial_forward(
         logger.warning(
             "[group_%s] failed to forward official tutorial for %s",
             group_id,
+            pid,
+        )
+
+
+async def deliver_official_tutorial_forward_private(
+    user_id: int,
+    pid: str,
+    editorial: OfficialEditorial,
+) -> None:
+    """Deliver one already verified and cached Chinese editorial to a user."""
+    node_ids = await _prepare_editorial_forward(pid, editorial)
+    if not node_ids:
+        logger.warning(
+            "[user_%s] tutorial delivery skipped for %s "
+            "(unverified/missing translation/self-send failed)",
+            user_id,
+            pid,
+        )
+        return
+    await asyncio.sleep(0.5)
+    fwd_resp = await send_private_forward_msg(
+        user_id,
+        [{"type": "node", "data": {"id": node_id}} for node_id in node_ids],
+    )
+    if not fwd_resp:
+        logger.warning(
+            "[user_%s] failed to forward official tutorial for %s",
+            user_id,
             pid,
         )

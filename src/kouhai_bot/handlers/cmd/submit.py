@@ -56,7 +56,10 @@ from ...user_groups import (
     settle_dynamic_submit_wait_for_problem,
 )
 from ...curfew import is_curfew_active, format_curfew_message
-from ...editorial_followup import schedule_post_solve_editorial_followup
+from ...editorial_followup import (
+    schedule_post_solve_editorial_followup,
+    schedule_private_post_solve_editorial_followup,
+)
 from ...private_judge import (
     GROUP_SCOPE,
     PRIVATE_SCOPE,
@@ -1064,6 +1067,7 @@ class GroupCoordinator:
         return f"本题来自 {self._problem_label_from_snapshot(req, pid)}✨"
 
     async def _send_private_success(self, req: PendingRequest, pid: str, model_tag: str = "") -> None:
+        first_solve = not is_private_solved(req.user_id, pid)
         mark_private_solved(req.user_id, pid, source="private")
         problem_label = self._problem_label_from_snapshot(req, pid)
         current_pid = ""
@@ -1081,6 +1085,8 @@ class GroupCoordinator:
             text = text.rstrip() + model_tag
         self._log_finished(req, "correct", problem=pid, extra={"scope": PRIVATE_SCOPE})
         await _send_req_plain(req, text)
+        if first_solve:
+            schedule_private_post_solve_editorial_followup(req.user_id, pid)
 
     async def _send_scoreboard_success(self, req: PendingRequest, pid: str, model_tag: str = "") -> None:
         async with self.lock:

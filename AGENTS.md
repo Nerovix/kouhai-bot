@@ -1291,4 +1291,9 @@ When making changes, verify against old bridge.py:
     omits code; review uses English editorial in LLM context only, not user-visible spoiler
 13. **Private judge**: private commands are service-group-member only, private history is
     independent, `/sync` aborts on empty source, and private AC never scores unless a
-    normal user syncs the current group problem back to the group before it is solved
+    normal user syncs the current group problem back to the group before it is solved.
+    **Private AC does deliver the official editorial** (PR #84): `_send_private_success()`
+    calls `schedule_private_post_solve_editorial_followup(user_id, pid)`, reusing the
+    group path's cache-check/await-prefetch logic; the cached Chinese editorial is
+    forwarded to the user via `send_private_forward_msg` (same forward-card format).
+    Shared chunking/self-send lives in `_prepare_editorial_forward()`.

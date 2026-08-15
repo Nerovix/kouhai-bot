@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -35,12 +36,19 @@ from scrape_cf_tutorial import fetch_html
 from scrape_cf_tutorial import html_to_markdownish
 from scrape_cf_tutorial import parse_pid
 
+logger = logging.getLogger("cf_tutorial_agent")
+
 
 DEFAULT_DEADLINE_SEC = 150
 DEFAULT_CANDIDATE_LIMIT = 3
 DEFAULT_CONFIDENCE_THRESHOLD = 0.75
 DEFAULT_SELECTOR_TIMEOUT_SEC = 40
 DEFAULT_LLM_TEXT_LIMIT = 200000
+
+_SIBLING_CACHE_FILENAME = "cf_problemset_cache.json"
+_SIBLING_CACHE_TTL_SEC = 7 * 24 * 3600
+_CF_API_URL = "https://codeforces.com/api/problemset.problems"
+_CF_API_TIMEOUT_SEC = 15.0
 
 
 class AgentNoMatch(RuntimeError):
@@ -164,6 +172,90 @@ def extract_blog_links(problem_html: str, base_url: str, *, limit: int = 0) -> l
     return urls
 
 
+def fetch_sibling_problem_codes(
+    pid: str,
+    title: str,
+    *,
+    cache_dir: Path | str | None = None,
+) -> list[str]:
+    """Return problem codes (e.g. "1099E") sharing the same title as `pid`.
+
+    Div1/Div2 mirrors of the same problem carry different codes but the same
+    name (e.g. 1098B and 1099E are both "Nice table"). The full problemset is
+    fetched on demand from the Codeforces API (direct connection, no proxy)
+    and cached for a bounded TTL. Any failure — network, API, parse, stale
+    cache — degrades to an empty list, never an exception; the caller then
+    relies on title matching in the LLM prompt alone.
+    """
+    title = (title or "").strip()
+    if not title:
+        return []
+    cache_path = (
+        Path(cache_dir) / _SIBLING_CACHE_FILENAME
+        if cache_dir is not None
+        else Path(_SIBLING_CACHE_FILENAME)
+    )
+    problems = _load_problemset_cache(cache_path)
+    if problems is None:
+        try:
+            problems = _fetch_problemset(cache_path)
+        except Exception as exc:
+            logger.warning(
+                "problemset fetch failed, sibling codes unavailable for %s: %s",
+                pid,
+                exc,
+            )
+            return []
+    codes: list[str] = []
+    for prob in problems:
+        if str(prob.get("name") or "").strip() != title:
+            continue
+        code = f"{prob.get('contestId')}{prob.get('index')}"
+        if code and code != pid and code not in codes:
+            codes.append(code)
+    return codes
+
+
+def _load_problemset_cache(cache_path: Path) -> list[dict] | None:
+    """Return the cached problemset when fresh, else None."""
+    try:
+        if not cache_path.is_file():
+            return None
+        if time.time() - cache_path.stat().st_mtime > _SIBLING_CACHE_TTL_SEC:
+            return None
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        problems = data.get("result", {}).get("problems", [])
+        return problems if isinstance(problems, list) else None
+    except Exception:
+        return None
+
+
+def _fetch_problemset(cache_path: Path) -> list[dict]:
+    """Fetch the full problemset from the CF API and persist it."""
+    import requests
+
+    session = requests.Session()
+    session.trust_env = False  # direct connection: ignore http(s)/socks proxies
+    resp = session.get(
+        _CF_API_URL,
+        timeout=_CF_API_TIMEOUT_SEC,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    problems = data.get("result", {}).get("problems", [])
+    if not isinstance(problems, list):
+        raise ValueError("unexpected problemset payload")
+    try:
+        cache_path.write_text(
+            json.dumps({"result": {"problems": problems}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    return problems
+
+
 def _section_from_text(label: str, title: str, text: str) -> Section:
     code_blocks = [
         code.strip()
@@ -273,10 +365,12 @@ def _build_extractor_messages(
     problem_text: str,
     blog: BlogDocument,
     llm_text_limit: int,
+    sibling_codes: list[str] | None = None,
 ) -> list[dict[str, str]]:
     payload = {
         "pid": pid,
         "problem_title": problem_title,
+        "problem_sibling_codes": sibling_codes or [],
         "problem": problem_text,
         "blog": {
             "url": blog.tutorial_url,
@@ -292,16 +386,22 @@ def _build_extractor_messages(
                 "Codeforces blog 的主体全文。你的任务不是解题，也不是总结，而是从 blog 主体中"
                 "找出这道题对应的官方题解/教程正文。\n"
                 "只输出 JSON 对象。匹配成功时输出："
-                "{\"match\":true,\"section_title\":\"...\","
-                "\"start_text\":\"...\",\"end_text\":\"...\","
-                "\"confidence\":0.0到1.0,\"reason\":\"...\"}。"
-                "匹配失败时输出：{\"match\":false,\"reason\":\"...\"}。\n"
+                '{"match":true,"section_title":"...",'
+                '"start_text":"...","end_text":"...",'
+                '"confidence":0.0到1.0,"reason":"..."}。'
+                '匹配失败时输出：{"match":false,"reason":"..."}。\n'
                 "要求：start_text 和 end_text 必须是从 blog.body 原文中逐字复制的短片段，"
                 "用于标记本题题解正文的开始和结束，且尽量选择唯一、不易混淆的片段；"
                 "不要输出完整题解正文，不要编写新题解，"
                 "不要补全缺失公式，不要夹带其他题目的题解、公告、作者信息、评论或标签。"
                 "如果 blog 中有多题题解，必须用题号、标题、题意、输入输出、变量和算法对象共同判断。"
-                "如果只有占位、公告、榜单、代码片段或无法确认是本题，必须 match=false。"
+                "如果只有占位、公告、榜单、代码片段或无法确认是本题，必须 match=false。\n"
+                "重要：同一场比赛的 Div1/Div2 可能使用不同题号（例如 1098B 与 1099E 是"
+                "同一道题 \"Nice table\"）。problem_sibling_codes 列出与本题同名的题号，"
+                "它们可能对应同一道题。判定规则：段落标题中的题目名称与本题名称相同，"
+                "且题意/输入输出格式吻合 → 即使题号不同也视为匹配；"
+                "仅名称或题号相同但题意不符，或任何无法确认的情况 → 必须 match=false。"
+                "宁可漏爬，不可爬错。"
             ),
         },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -346,6 +446,7 @@ async def extract_editorial_from_blog(
     blog: BlogDocument,
     timeout: int,
     llm_text_limit: int,
+    sibling_codes: list[str] | None = None,
 ) -> tuple[EditorialCandidate, float, str]:
     result = await chat_completion(
         _build_extractor_messages(
@@ -354,6 +455,7 @@ async def extract_editorial_from_blog(
             problem_text=problem_text,
             blog=blog,
             llm_text_limit=llm_text_limit,
+            sibling_codes=sibling_codes,
         ),
         task="summary",
         temperature=0.0,
@@ -473,6 +575,19 @@ async def run_agent_for_pid(
         confidence = 0.0
         reason = ""
         effective_problem_title = problem_title or str(stmt.get("name") or "")
+        sibling_codes = await asyncio.to_thread(
+            fetch_sibling_problem_codes,
+            pid,
+            effective_problem_title,
+            cache_dir=statements_dir.parent,
+        )
+        if sibling_codes:
+            logger.info(
+                "sibling problem codes for %s (%s): %s",
+                pid,
+                effective_problem_title,
+                ", ".join(sibling_codes),
+            )
         for blog in blogs:
             try:
                 candidate, candidate_confidence, candidate_reason = await extract_editorial_from_blog(
@@ -482,6 +597,7 @@ async def run_agent_for_pid(
                     blog=blog,
                     timeout=selector_timeout_sec,
                     llm_text_limit=llm_text_limit,
+                    sibling_codes=sibling_codes,
                 )
             except AgentIncomplete as exc:
                 incomplete_failures.append(f"{blog.blog_id}:{exc}")

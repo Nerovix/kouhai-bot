@@ -577,3 +577,114 @@ def test_extractor_disables_reasoning_effort(monkeypatch):
     assert selected.candidate_id == "b1"
     assert confidence == 0.9
     assert calls[0]["send_reasoning_effort"] is False
+
+
+# ---------------------------------------------------------------------------
+# Div1/Div2 sibling problem codes
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_sibling_codes_returns_same_title_codes_excluding_self(tmp_path, monkeypatch):
+    problems = [
+        {"contestId": 1098, "index": "B", "name": "Nice table"},
+        {"contestId": 1099, "index": "E", "name": "Nice table"},
+        {"contestId": 1099, "index": "D", "name": "Sum in the tree"},
+        {"contestId": 1098, "index": "C", "name": "Construct a tree"},
+    ]
+    monkeypatch.setattr(
+        agent, "_fetch_problemset", lambda cache_path: problems
+    )
+
+    codes = agent.fetch_sibling_problem_codes(
+        "1098B", "Nice table", cache_dir=tmp_path
+    )
+    assert codes == ["1099E"]
+
+
+def test_fetch_sibling_codes_deduplicates(tmp_path, monkeypatch):
+    problems = [
+        {"contestId": 1099, "index": "E", "name": "Nice table"},
+        {"contestId": 1099, "index": "E", "name": "Nice table"},
+    ]
+    monkeypatch.setattr(agent, "_fetch_problemset", lambda cache_path: problems)
+
+    codes = agent.fetch_sibling_problem_codes(
+        "1098B", "Nice table", cache_dir=tmp_path
+    )
+    assert codes == ["1099E"]
+
+
+def test_fetch_sibling_codes_api_failure_returns_empty(tmp_path, monkeypatch):
+    def boom(_cache_path):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(agent, "_fetch_problemset", boom)
+
+    codes = agent.fetch_sibling_problem_codes(
+        "1098B", "Nice table", cache_dir=tmp_path
+    )
+    assert codes == []
+
+
+def test_fetch_sibling_codes_uses_fresh_cache_without_refetch(tmp_path, monkeypatch):
+    problems = [{"contestId": 1099, "index": "E", "name": "Nice table"}]
+    (tmp_path / agent._SIBLING_CACHE_FILENAME).write_text(
+        json.dumps({"result": {"problems": problems}}), encoding="utf-8"
+    )
+
+    def boom(_cache_path):
+        raise AssertionError("must not refetch when cache is fresh")
+
+    monkeypatch.setattr(agent, "_fetch_problemset", boom)
+
+    codes = agent.fetch_sibling_problem_codes(
+        "1098B", "Nice table", cache_dir=tmp_path
+    )
+    assert codes == ["1099E"]
+
+
+def test_fetch_sibling_codes_empty_title_returns_empty(tmp_path):
+    assert agent.fetch_sibling_problem_codes("1098B", "", cache_dir=tmp_path) == []
+    assert agent.fetch_sibling_problem_codes("1098B", "   ", cache_dir=tmp_path) == []
+
+
+def test_extractor_messages_include_sibling_codes_and_rule():
+    blog = agent.BlogDocument(
+        blog_id="b1",
+        tutorial_url="https://codeforces.com/blog/entry/64331",
+        tutorial_title="Editorial",
+        body="### E. Nice table\nsome solution text here\n",
+    )
+
+    messages = agent._build_extractor_messages(
+        pid="1098B",
+        problem_title="Nice table",
+        problem_text="statement",
+        blog=blog,
+        llm_text_limit=1000,
+        sibling_codes=["1099E"],
+    )
+    payload = json.loads(messages[1]["content"])
+    assert payload["problem_sibling_codes"] == ["1099E"]
+    system_prompt = messages[0]["content"]
+    assert "1098B 与 1099E" in system_prompt
+    assert "宁可漏爬，不可爬错" in system_prompt
+
+
+def test_extractor_messages_default_empty_sibling_codes():
+    from kouhai_bot.handlers.shared import parse_json_with_llm_repair
+
+    messages = agent._build_extractor_messages(
+        pid="1098B",
+        problem_title="Nice table",
+        problem_text="statement",
+        blog=agent.BlogDocument(
+            blog_id="b1",
+            tutorial_url="https://codeforces.com/blog/entry/1",
+            tutorial_title="T",
+            body="body",
+        ),
+        llm_text_limit=1000,
+    )
+    payload = json.loads(messages[1]["content"])
+    assert payload["problem_sibling_codes"] == []

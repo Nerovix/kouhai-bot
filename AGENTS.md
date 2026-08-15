@@ -67,6 +67,16 @@ NapCat (QQ) ──WS──> worker.py
   `problem-statement` block itself is located by div-depth counting since the
   `</div><script` terminator is not present in every template variant.
 - **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before image metadata via `_images_collected`. Stale caches with images are re-fetched so image metadata is available for multimodal tasks.
+- **Editorial extraction matches Div1/Div2 mirror codes by title**: CF
+  mirrors of the same problem carry different codes but the same name (e.g.
+  `1098B` and `1099E` are both "Nice table"). `tools/cf_tutorial_agent.py`
+  queries `codeforces.com/api/problemset.problems` on demand (direct, no
+  proxy; 7-day cached under the data dir as `cf_problemset_cache.json`) and
+  injects same-title sibling codes into the extractor prompt
+  (`problem_sibling_codes`). Matching requires same title AND matching
+  statement/IO format; anything uncertain must be `match=false` — never risk
+  attaching the wrong editorial (judge correctness depends on it). Any API
+  failure degrades to an empty sibling list (prompt-only title matching).
 - **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
 - **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection,
   dispatches commands, and owns the scheduler, next-problem prefetch loop, and

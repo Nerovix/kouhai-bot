@@ -1931,6 +1931,9 @@ async def check_contests_for_group(group_id: int) -> None:
             continue
         if c.get("type") not in ("CF", "ICPC"):
             continue
+        name = str(c.get("name", ""))
+        if any(keyword in name.lower() for keyword in ("unrated", "mirror", "april fools", "kotlin", "practice")):
+            continue
         start = datetime.fromtimestamp(c["startTimeSeconds"], tz=TZ)
         if start <= cutoff:
             upcoming.append((start, c, phase))

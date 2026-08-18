@@ -334,6 +334,17 @@ def test_contest_check_includes_rated_cf_contest_within_24_hours():
     assert "Rated CF" in message
 
 
+def test_contest_check_includes_normal_rated_cf_contest_within_24_hours():
+    now = int(time.time())
+    sent = _run_contest_check([
+        _contest(name="Codeforces Round 2000 (Div. 1)", contest_type="CF", start_time_seconds=now + 3600),
+    ])
+
+    assert sent.await_count == 1
+    message = sent.await_args.args[1][1]["data"]["text"]
+    assert "Codeforces Round 2000 (Div. 1)" in message
+
+
 def test_contest_check_includes_rated_icpc_contest_within_24_hours():
     now = int(time.time())
     sent = _run_contest_check([
@@ -343,6 +354,33 @@ def test_contest_check_includes_rated_icpc_contest_within_24_hours():
     assert sent.await_count == 1
     message = sent.await_args.args[1][1]["data"]["text"]
     assert "Rated ICPC" in message
+
+
+def test_contest_check_excludes_cf_contest_named_unrated():
+    now = int(time.time())
+    sent = _run_contest_check([
+        _contest(name="Codeforces Round 1092 (Unrated)", contest_type="CF", start_time_seconds=now + 3600),
+    ])
+
+    assert sent.await_count == 0
+
+
+def test_contest_check_excludes_icpc_contest_named_mirror():
+    now = int(time.time())
+    sent = _run_contest_check([
+        _contest(name="2026 ICPC Asia Pacific Championship - Online Mirror", contest_type="ICPC", start_time_seconds=now + 3600),
+    ])
+
+    assert sent.await_count == 0
+
+
+def test_contest_check_excludes_kotlin_heroes_contest():
+    now = int(time.time())
+    sent = _run_contest_check([
+        _contest(name="Kotlin Heroes: Episode 14", contest_type="ICPC", start_time_seconds=now + 3600),
+    ])
+
+    assert sent.await_count == 0
 
 
 def test_contest_check_excludes_ioi_contest_within_24_hours():

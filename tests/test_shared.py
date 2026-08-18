@@ -356,6 +356,29 @@ def test_contest_check_includes_rated_icpc_contest_within_24_hours():
     assert "Rated ICPC" in message
 
 
+def test_contest_check_skips_missing_name_without_dropping_other_contests():
+    now = int(time.time())
+    missing_name = _contest(name="unused", contest_type="CF", start_time_seconds=now + 1800)
+    missing_name.pop("name")
+    sent = _run_contest_check([
+        missing_name,
+        _contest(name="Rated CF", contest_type="CF", start_time_seconds=now + 3600),
+    ])
+
+    assert sent.await_count == 1
+    message = sent.await_args.args[1][1]["data"]["text"]
+    assert "Rated CF" in message
+
+
+def test_contest_check_skips_blank_name():
+    now = int(time.time())
+    sent = _run_contest_check([
+        _contest(name="   ", contest_type="CF", start_time_seconds=now + 3600),
+    ])
+
+    assert sent.await_count == 0
+
+
 def test_contest_check_excludes_cf_contest_named_unrated():
     now = int(time.time())
     sent = _run_contest_check([

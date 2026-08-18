@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -23,6 +24,7 @@ from kouhai_bot.handlers.shared import (
     call_chat_completion,
     get_judge_prompt,
     call_chat_completion_result,
+    check_contests_for_group,
     doublecheck_problem_summary,
     get_problem_summary,
     judge_submission,
@@ -297,6 +299,77 @@ def _openai_cfg(**overrides):
     for key, value in overrides.items():
         setattr(cfg, key, value)
     return cfg
+
+
+def _contest(*, name, contest_type, start_time_seconds):
+    return {
+        "name": name,
+        "type": contest_type,
+        "phase": "BEFORE",
+        "startTimeSeconds": start_time_seconds,
+        "durationSeconds": 7200,
+    }
+
+
+def _run_contest_check(contests):
+    response = _DummyResponse(
+        json_data={"status": "OK", "result": contests},
+    )
+    sent = AsyncMock()
+    with patch("aiohttp.ClientSession.get", return_value=response), \
+            patch("kouhai_bot.napcat.client.send_group_msg", sent), \
+            patch("asyncio.sleep", new=AsyncMock()):
+        asyncio.run(check_contests_for_group(123))
+    return sent
+
+
+def test_contest_check_includes_rated_cf_contest_within_24_hours():
+    now = int(time.time())
+    sent = _run_contest_check([
+        _contest(name="Rated CF", contest_type="CF", start_time_seconds=now + 3600),
+    ])
+
+    assert sent.await_count == 1
+    message = sent.await_args.args[1][1]["data"]["text"]
+    assert "Rated CF" in message
+
+
+def test_contest_check_includes_rated_icpc_contest_within_24_hours():
+    now = int(time.time())
+    sent = _run_contest_check([
+        _contest(name="Rated ICPC", contest_type="ICPC", start_time_seconds=now + 3600),
+    ])
+
+    assert sent.await_count == 1
+    message = sent.await_args.args[1][1]["data"]["text"]
+    assert "Rated ICPC" in message
+
+
+def test_contest_check_excludes_ioi_contest_within_24_hours():
+    now = int(time.time())
+    sent = _run_contest_check([
+        _contest(name="Huawei Challenge", contest_type="IOI", start_time_seconds=now + 3600),
+    ])
+
+    assert sent.await_count == 0
+
+
+def test_contest_check_excludes_other_contest_within_24_hours():
+    now = int(time.time())
+    sent = _run_contest_check([
+        _contest(name="Other Challenge", contest_type="Other", start_time_seconds=now + 3600),
+    ])
+
+    assert sent.await_count == 0
+
+
+def test_contest_check_excludes_rated_contests_beyond_24_hours():
+    now = int(time.time())
+    sent = _run_contest_check([
+        _contest(name="Tomorrow CF", contest_type="CF", start_time_seconds=now + 25 * 3600),
+    ])
+
+    assert sent.await_count == 0
 
 
 def test_provider_model_for_uses_provider_model_and_explicit_override():

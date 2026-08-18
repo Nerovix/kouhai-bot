@@ -1929,6 +1929,8 @@ async def check_contests_for_group(group_id: int) -> None:
         phase = c.get("phase", "")
         if phase not in ("BEFORE", "CODING"):
             continue
+        if c.get("type") not in ("CF", "ICPC"):
+            continue
         start = datetime.fromtimestamp(c["startTimeSeconds"], tz=TZ)
         if start <= cutoff:
             upcoming.append((start, c, phase))

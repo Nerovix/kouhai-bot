@@ -1929,17 +1929,23 @@ async def check_contests_for_group(group_id: int) -> None:
         phase = c.get("phase", "")
         if phase not in ("BEFORE", "CODING"):
             continue
+        if c.get("type") not in ("CF", "ICPC"):
+            continue
+        name = c.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if any(keyword in name.lower() for keyword in ("unrated", "mirror", "april fools", "kotlin", "practice")):
+            continue
         start = datetime.fromtimestamp(c["startTimeSeconds"], tz=TZ)
         if start <= cutoff:
-            upcoming.append((start, c, phase))
+            upcoming.append((start, c, phase, name))
 
     if not upcoming:
         return
 
     upcoming.sort(key=lambda x: x[0])
     lines = ["🏆 Codeforces 比赛提醒！"]
-    for start, c, phase in upcoming:
-        name = c["name"]
+    for start, c, phase, name in upcoming:
         dur_h = c["durationSeconds"] // 3600
         dur_m = (c["durationSeconds"] % 3600) // 60
         dur_str = f"{dur_h}h" if dur_m == 0 else f"{dur_h}h{dur_m}m"

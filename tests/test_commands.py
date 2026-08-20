@@ -4636,7 +4636,72 @@ def test_private_setproblem_invalid_rating_range_shows_format_hint():
     print("✅ private setproblem: invalid rating range shows format hint")
 
 
-def test_private_setproblem_plain_digits_stays_on_problem_ref_path():
+def test_private_setproblem_plain_digits_picks_exact_rating_and_sends_card():
+    _reset_state()
+    problem = {
+        "today": "2500A",
+        "contestId": 2500,
+        "index": "A",
+        "name": "Exact Rating Problem",
+        "rating": 2500,
+        "tags": ["math"],
+    }
+
+    with _all_patches(), \
+        patch(
+            "kouhai_bot.handlers.cmd.setproblem.resolve_random_problem",
+            return_value=problem,
+        ) as random_resolve, \
+        patch(
+            "kouhai_bot.handlers.cmd.setproblem.send_problem_card_private",
+            new=AsyncMock(return_value=True),
+        ) as send_card, \
+        patch("kouhai_bot.handlers.cmd.setproblem.resolve_problem_by_pid") as resolve:
+        from kouhai_bot.handlers.cmd.setproblem import handle
+
+        asyncio.run(handle(**_kwargs(_make_private_event("/sp 2500"))))
+
+    resolve.assert_not_called()
+    random_resolve.assert_called_once_with(GID, (2500, 2500))
+    send_card.assert_awaited_once()
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "正在按 2500 难度随机挑题" in private_text, private_text
+    _cleanup()
+    print("✅ private setproblem: plain digits pick exact rating and send problem")
+
+
+def test_private_setproblem_equal_rating_range_uses_exact_rating_message():
+    _reset_state()
+    problem = {
+        "today": "2500A",
+        "contestId": 2500,
+        "index": "A",
+        "name": "Exact Range Problem",
+        "rating": 2500,
+        "tags": ["math"],
+    }
+
+    with _all_patches(), \
+        patch(
+            "kouhai_bot.handlers.cmd.setproblem.resolve_random_problem",
+            return_value=problem,
+        ) as random_resolve, \
+        patch(
+            "kouhai_bot.handlers.cmd.setproblem.send_problem_card_private",
+            new=AsyncMock(return_value=True),
+        ):
+        from kouhai_bot.handlers.cmd.setproblem import handle
+
+        asyncio.run(handle(**_kwargs(_make_private_event("/sp 2500-2500"))))
+
+    random_resolve.assert_called_once_with(GID, (2500, 2500))
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "正在按 2500 难度随机挑题" in private_text, private_text
+    assert "正在按 2500-2500 难度随机挑题" not in private_text, private_text
+    _cleanup()
+
+
+def test_private_setproblem_two_digit_hint_mentions_exact_and_range_forms():
     _reset_state()
 
     with _all_patches(), \
@@ -4644,14 +4709,13 @@ def test_private_setproblem_plain_digits_stays_on_problem_ref_path():
         patch("kouhai_bot.handlers.cmd.setproblem.resolve_problem_by_pid") as resolve:
         from kouhai_bot.handlers.cmd.setproblem import handle
 
-        asyncio.run(handle(**_kwargs(_make_private_event("/sp 2500"))))
+        asyncio.run(handle(**_kwargs(_make_private_event("/sp 25"))))
 
     resolve.assert_not_called()
     random_resolve.assert_not_called()
     private_text = "\n".join(_last_text_item(item) for item in _private_sent)
-    assert "如果你是想按难度随机选题" in private_text, private_text
+    assert "可以发 /sp 2500 或 /sp 2500-2600～" in private_text, private_text
     _cleanup()
-    print("✅ private setproblem: plain digits use problem-ref path")
 
 
 def test_resolve_problem_by_pid_revalidates_cached_statement():

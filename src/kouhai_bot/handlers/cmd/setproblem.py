@@ -31,6 +31,7 @@ from ..shared import get_problem_card_ref_pid, get_today_problem
 logger = logging.getLogger("kouhai-bot.cmd.setproblem")
 
 _RANDOM_ARGS = {"random", "rand", "r"}
+_RATING_EXACT_RE = re.compile(r"^\d{3,4}$")
 _RATING_RANGE_RE = re.compile(r"^(\d{3,4})-(\d{3,4})$")
 _RATING_RANGE_SHAPE_RE = re.compile(r"^\d+-\d+$")
 _UNKNOWN_CARD_REPLY = (
@@ -112,8 +113,11 @@ async def handle(group_id: int, user_id: int, sender: dict,
                 "随机题目暂时拉不到，可能是 Codeforces 或题面缓存不太稳定，稍后再试试？"
             ))
             return
-    elif _RATING_RANGE_SHAPE_RE.fullmatch(arg):
-        rating_range = _parse_rating_range(arg)
+    elif _RATING_EXACT_RE.fullmatch(arg) or _RATING_RANGE_SHAPE_RE.fullmatch(arg):
+        if _RATING_EXACT_RE.fullmatch(arg):
+            rating_range = (int(arg), int(arg))
+        else:
+            rating_range = _parse_rating_range(arg)
         if rating_range is None:
             await send_private_msg(user_id, build_plain_message(
                 "难度范围格式是 两个3~4位数字、中间用减号，比如 /sp 2500-2600～"
@@ -125,8 +129,13 @@ async def handle(group_id: int, user_id: int, sender: dict,
                 "范围好像写反啦～应该是小的在前，比如 /sp 2500-2600 而不是 /sp 2600-2500。"
             ))
             return
+        rating_label = (
+            str(min_rating)
+            if min_rating == max_rating
+            else f"{min_rating}-{max_rating}"
+        )
         await send_private_msg(user_id, build_plain_message(
-            f"正在按 {min_rating}-{max_rating} 难度随机挑题，稍等一下～"
+            f"正在按 {rating_label} 难度随机挑题，稍等一下～"
         ))
         try:
             problem = await asyncio.to_thread(
@@ -167,8 +176,8 @@ async def handle(group_id: int, user_id: int, sender: dict,
         parsed = parse_problem_ref(arg)
         if not parsed:
             extra_hint = ""
-            if re.fullmatch(r"\d+", arg):
-                extra_hint = "\n如果你是想按难度随机选题，格式是 /sp 2500-2600（难度范围）～"
+            if re.fullmatch(r"\d{1,2}", arg):
+                extra_hint = "\n如果你是想按难度随机选题，可以发 /sp 2500 或 /sp 2500-2600～"
             await send_private_msg(user_id, build_plain_message(
                 "我没认出这道题～可以发 CF2234B、2234B、Codeforces 题目链接，"
                 "或者 /contest/2233/problem/F 这样的路径。" + extra_hint

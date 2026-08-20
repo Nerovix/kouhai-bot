@@ -3003,7 +3003,7 @@ def test_private_help_only_shows_private_judge_commands():
         seg.get("data", {}).get("text", "")
         for seg in msg if isinstance(seg, dict) and seg.get("type") == "text"
     )
-    assert "/setproblem(/sp) [题号|链接|random] — 设置 private judge 当前题" in text, text
+    assert "/setproblem(/sp) [题号|链接|random|难度范围] — 设置 private judge 当前题" in text, text
     assert "/sync — 在群聊和 private judge 间同步当前群题记录" in text, text
     assert "/testcd — 查看当前群题提交 CD" in text, text
     assert "/newproblem(/np)" not in text, text
@@ -4572,6 +4572,88 @@ def test_private_setproblem_explicit_arg_wins_over_referenced_card():
     print("✅ private setproblem: explicit arg wins over referenced card")
 
 
+def test_private_setproblem_rating_range_picks_problem_and_sends_card():
+    _reset_state()
+    problem = {
+        "today": "1234C",
+        "contestId": 1234,
+        "index": "C",
+        "name": "Range Problem",
+        "rating": 2550,
+        "tags": ["dp"],
+    }
+
+    with _all_patches(), \
+        patch(
+            "kouhai_bot.handlers.cmd.setproblem.resolve_random_problem",
+            return_value=problem,
+        ) as resolve, \
+        patch(
+            "kouhai_bot.handlers.cmd.setproblem.send_problem_card_private",
+            new=AsyncMock(return_value=True),
+        ) as send_card:
+        from kouhai_bot.handlers.cmd.setproblem import handle
+
+        asyncio.run(handle(**_kwargs(_make_private_event("/sp 2500-2600"))))
+
+    resolve.assert_called_once_with(GID, (2500, 2600))
+    send_card.assert_awaited_once()
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "正在按 2500-2600 难度随机挑题" in private_text, private_text
+    _cleanup()
+    print("✅ private setproblem: rating range picks and sends problem")
+
+
+def test_private_setproblem_reversed_rating_range_is_rejected():
+    _reset_state()
+
+    with _all_patches(), \
+        patch("kouhai_bot.handlers.cmd.setproblem.resolve_random_problem") as resolve:
+        from kouhai_bot.handlers.cmd.setproblem import handle
+
+        asyncio.run(handle(**_kwargs(_make_private_event("/sp 2600-2500"))))
+
+    resolve.assert_not_called()
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "范围好像写反啦" in private_text, private_text
+    _cleanup()
+    print("✅ private setproblem: reversed rating range is rejected")
+
+
+def test_private_setproblem_invalid_rating_range_shows_format_hint():
+    _reset_state()
+
+    with _all_patches(), \
+        patch("kouhai_bot.handlers.cmd.setproblem.resolve_random_problem") as resolve:
+        from kouhai_bot.handlers.cmd.setproblem import handle
+
+        asyncio.run(handle(**_kwargs(_make_private_event("/sp 2500-26000"))))
+
+    resolve.assert_not_called()
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "难度范围格式是 两个3~4位数字" in private_text, private_text
+    _cleanup()
+    print("✅ private setproblem: invalid rating range shows format hint")
+
+
+def test_private_setproblem_plain_digits_stays_on_problem_ref_path():
+    _reset_state()
+
+    with _all_patches(), \
+        patch("kouhai_bot.handlers.cmd.setproblem.resolve_random_problem") as random_resolve, \
+        patch("kouhai_bot.handlers.cmd.setproblem.resolve_problem_by_pid") as resolve:
+        from kouhai_bot.handlers.cmd.setproblem import handle
+
+        asyncio.run(handle(**_kwargs(_make_private_event("/sp 2500"))))
+
+    resolve.assert_not_called()
+    random_resolve.assert_not_called()
+    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
+    assert "如果你是想按难度随机选题" in private_text, private_text
+    _cleanup()
+    print("✅ private setproblem: plain digits use problem-ref path")
+
+
 def test_resolve_problem_by_pid_revalidates_cached_statement():
     _reset_state()
     _write_statement(PID, {
@@ -4626,6 +4708,28 @@ def test_resolve_random_problem_revalidates_cached_statement():
     assert state["today"] == PID, state
     _cleanup()
     print("✅ private setproblem random: revalidates cached statements")
+
+
+def test_resolve_random_problem_honors_explicit_rating_range():
+    _reset_state()
+    candidates = [
+        {"contestId": 1, "index": "A", "name": "Low", "rating": 1800, "tags": []},
+        {"contestId": 2, "index": "A", "name": "Mid", "rating": 2400, "tags": []},
+        {"contestId": 3, "index": "A", "name": "High", "rating": 2600, "tags": []},
+        {"contestId": 4, "index": "A", "name": "Top", "rating": 3000, "tags": []},
+    ]
+
+    with _all_patches(), \
+        patch("kouhai_bot.private_judge._fetch_problemset", return_value=candidates), \
+        patch("kouhai_bot.private_judge.random.shuffle", lambda items: None), \
+        patch("kouhai_bot.private_judge._ensure_statement", return_value={"name": "validated"}):
+        from kouhai_bot.private_judge import resolve_random_problem
+
+        state = resolve_random_problem(GID, (2500, 3000))
+
+    assert 2500 <= int(state["rating"]) <= 3000, state
+    _cleanup()
+    print("✅ private setproblem random: explicit rating range filters candidates")
 
 
 def test_private_setproblem_non_formula_image_hint():

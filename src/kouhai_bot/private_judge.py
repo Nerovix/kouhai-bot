@@ -459,10 +459,17 @@ def resolve_problem_by_pid(pid: str) -> dict:
     return state
 
 
-def resolve_random_problem(group_id: int) -> dict:
+def resolve_random_problem(
+    group_id: int,
+    rating_range: tuple[int, int] | None = None,
+) -> dict:
     from .problem_preparation import effective_rating_range
 
-    min_rating, max_rating = effective_rating_range(group_id)
+    min_rating, max_rating = (
+        rating_range
+        if rating_range is not None
+        else effective_rating_range(group_id)
+    )
     candidates: list[dict] = []
     for item in _fetch_problemset():
         if not isinstance(item, dict):

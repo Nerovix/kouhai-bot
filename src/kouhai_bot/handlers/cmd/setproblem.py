@@ -31,6 +31,9 @@ from ..shared import get_problem_card_ref_pid, get_today_problem
 logger = logging.getLogger("kouhai-bot.cmd.setproblem")
 
 _RANDOM_ARGS = {"random", "rand", "r"}
+_RATING_EXACT_RE = re.compile(r"^\d{3,4}$")
+_RATING_RANGE_RE = re.compile(r"^(\d{3,4})-(\d{3,4})$")
+_RATING_RANGE_SHAPE_RE = re.compile(r"^\d+-\d+$")
 _UNKNOWN_CARD_REPLY = (
     "这条引用我认不出对应哪道题哦，可能不是题目卡片，"
     "也可能卡片太久了～你可以直接发 /sp 当前群题、/sp random，或者发 CF 题号/链接。"
@@ -43,6 +46,13 @@ def _strip_command(raw_text: str) -> str:
     if not match:
         return ""
     return text[match.end():].strip()
+
+
+def _parse_rating_range(arg: str) -> tuple[int, int] | None:
+    match = _RATING_RANGE_RE.fullmatch(str(arg or ""))
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def _reply_to_message_id(segments: list) -> str:
@@ -103,12 +113,74 @@ async def handle(group_id: int, user_id: int, sender: dict,
                 "随机题目暂时拉不到，可能是 Codeforces 或题面缓存不太稳定，稍后再试试？"
             ))
             return
+    elif _RATING_EXACT_RE.fullmatch(arg) or _RATING_RANGE_SHAPE_RE.fullmatch(arg):
+        if _RATING_EXACT_RE.fullmatch(arg):
+            rating_range = (int(arg), int(arg))
+        else:
+            rating_range = _parse_rating_range(arg)
+        if rating_range is None:
+            await send_private_msg(user_id, build_plain_message(
+                "难度范围格式是 两个3~4位数字、中间用减号，比如 /sp 2500-2600～"
+            ))
+            return
+        min_rating, max_rating = rating_range
+        if min_rating > max_rating:
+            await send_private_msg(user_id, build_plain_message(
+                "范围好像写反啦～应该是小的在前，比如 /sp 2500-2600 而不是 /sp 2600-2500。"
+            ))
+            return
+        rating_label = (
+            str(min_rating)
+            if min_rating == max_rating
+            else f"{min_rating}-{max_rating}"
+        )
+        await send_private_msg(user_id, build_plain_message(
+            f"正在按 {rating_label} 难度随机挑题，稍等一下～"
+        ))
+        try:
+            problem = await asyncio.to_thread(
+                resolve_random_problem,
+                group_id,
+                (min_rating, max_rating),
+            )
+        except RuntimeError as e:
+            if "no random candidates" in str(e):
+                await send_private_msg(user_id, build_plain_message(
+                    "这个难度区间暂时没挑到合适的题（可能题目太少或题面缓存问题），换个范围试试？比如 /sp 2000-2500"
+                ))
+            else:
+                logger.warning(
+                    "private rating-range random problem failed for %s-%s: %s",
+                    min_rating,
+                    max_rating,
+                    e,
+                    exc_info=True,
+                )
+                await send_private_msg(user_id, build_plain_message(
+                    "随机题目暂时拉不到，可能是 Codeforces 或题面缓存不太稳定，稍后再试试？"
+                ))
+            return
+        except Exception as e:
+            logger.warning(
+                "private rating-range random problem failed for %s-%s: %s",
+                min_rating,
+                max_rating,
+                e,
+                exc_info=True,
+            )
+            await send_private_msg(user_id, build_plain_message(
+                "随机题目暂时拉不到，可能是 Codeforces 或题面缓存不太稳定，稍后再试试？"
+            ))
+            return
     else:
         parsed = parse_problem_ref(arg)
         if not parsed:
+            extra_hint = ""
+            if re.fullmatch(r"\d{1,2}", arg):
+                extra_hint = "\n如果你是想按难度随机选题，可以发 /sp 2500 或 /sp 2500-2600～"
             await send_private_msg(user_id, build_plain_message(
                 "我没认出这道题～可以发 CF2234B、2234B、Codeforces 题目链接，"
-                "或者 /contest/2233/problem/F 这样的路径。"
+                "或者 /contest/2233/problem/F 这样的路径。" + extra_hint
             ))
             return
         pid = problem_id_from_ref(*parsed)
@@ -180,8 +252,8 @@ def register() -> None:
     registry.register(CommandDef(
         name="setproblem",
         aliases=["sp"],
-        description="设置 private judge 当前题（题号/链接/random；空参数或引用题目卡片）",
-        usage="[题号|链接|random]",
+        description="设置 private judge 当前题（题号/链接/random/2500-2600 按难度选题；空参数或引用题目卡片）",
+        usage="[题号|链接|random|难度范围]",
         handler=handle,
         cooldown=3,
     ))

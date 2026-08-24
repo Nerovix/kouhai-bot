@@ -197,16 +197,31 @@ def test_tex_script_literal_inequality_survives():
         '<nobr aria-hidden="true"><span class="math">a &lt; b</span></nobr>'
         '<span class="MJX_Assistive_MathML"><math><mi>a</mi><mo>&lt;</mo><mi>b</mi></math></span>'
         "</span>"
-        '<script type="math/tex">a &lt; b</script>'
+        # literal '<' is legal raw text inside <script>
+        '<script type="math/tex">a < b</script>'
         "<p>then tail</p>"
     )
     out = fetcher.normalize_mathjax(html)
     stripped = re.sub(r"<[^>]+>", "", out)
-    # html_to_text unescapes back to a real '<'
-    assert "a < b" in fetcher.html_to_text(html)
-    # notes path (no unescape) shows the reference, like the $$$ markup path
+    # the literal '<' was escaped, so tag-stripping must not eat it
     assert "a &lt; b" in stripped
     assert "then tail" in stripped
+    # html_to_text unescapes back to a real '<'
+    assert "a < b" in fetcher.html_to_text(html)
+
+
+def test_tex_script_preencoded_entity_not_double_escaped():
+    """A TeX source that already contains '&lt;' must not become '&amp;lt;'."""
+    html = (
+        '<span class="MathJax_Preview"></span>'
+        '<script type="math/tex">x &lt; y &gt; z</script>'
+        "<p>tail</p>"
+    )
+    out = fetcher.normalize_mathjax(html)
+    stripped = re.sub(r"<[^>]+>", "", out)
+    assert "&amp;lt;" not in stripped
+    assert "x &lt; y &gt; z" in stripped
+    assert "x < y > z" in fetcher.html_to_text(html)
 
 
 def test_mathjax_v3_utext_not_duplicated():

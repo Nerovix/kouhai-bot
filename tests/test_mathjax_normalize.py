@@ -188,6 +188,47 @@ def test_plain_script_page_untouched():
     assert fetcher.normalize_mathjax(html) == html
 
 
+def test_tex_script_literal_inequality_survives():
+    """Script bodies are raw text, so a literal '<' inside math/tex must be
+    escaped before tag-stripping or the inequality is deleted."""
+    html = (
+        '<span class="MathJax_Preview"></span>'
+        '<span class="MathJax" id="MathJax-Element-90-Frame">'
+        '<nobr aria-hidden="true"><span class="math">a &lt; b</span></nobr>'
+        '<span class="MJX_Assistive_MathML"><math><mi>a</mi><mo>&lt;</mo><mi>b</mi></math></span>'
+        "</span>"
+        '<script type="math/tex">a &lt; b</script>'
+        "<p>then tail</p>"
+    )
+    out = fetcher.normalize_mathjax(html)
+    stripped = re.sub(r"<[^>]+>", "", out)
+    # html_to_text unescapes back to a real '<'
+    assert "a < b" in fetcher.html_to_text(html)
+    # notes path (no unescape) shows the reference, like the $$$ markup path
+    assert "a &lt; b" in stripped
+    assert "then tail" in stripped
+
+
+def test_mathjax_v3_utext_not_duplicated():
+    """v3 visible subtree (mjx-math, incl. mjx-utext real text) is skipped;
+    only the assistive MathML copy survives."""
+    html = (
+        "<p>value is </p>"
+        '<mjx-container class="MathJax" jax="CHTML" display="false">'
+        '<mjx-math class="MJX-TEX" aria-hidden="true">'
+        '<mjx-utext variant="normal">世界</mjx-utext>'
+        "</mjx-math>"
+        '<mjx-assistive-mml unselectable="on"><math xmlns="http://www.w3.org/1998/Math/MathML">'
+        "<mtext>hello 世界</mtext></math></mjx-assistive-mml>"
+        "</mjx-container>"
+        "<p>.</p>"
+    )
+    out = fetcher.normalize_mathjax(html)
+    text = re.sub(r"<[^>]+>", "", out)
+    assert text.count("世界") == 1
+    assert "hello 世界" in text
+
+
 def test_picker_notes_extraction_no_duplication():
     """End-to-end: the picker's Note extraction yields clean digits."""
     from kouhai_bot.problems import picker

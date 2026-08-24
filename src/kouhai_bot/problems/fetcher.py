@@ -374,7 +374,7 @@ class _MathJaxNormalizer(HTMLParser):
     drops the rendered duplicates.
     """
 
-    _SKIP_TAGS = frozenset({"nobr"})
+    _SKIP_TAGS = frozenset({"nobr", "mjx-math"})
     _SKIP_CLASS_TOKENS = ("MathJax_Preview", "MJX_Assistive_MathML")
     # HTML void elements have no end tag; they must not bump the skip depth.
     _VOID_TAGS = frozenset(
@@ -435,6 +435,13 @@ class _MathJaxNormalizer(HTMLParser):
         # drop the body of any other script tag.
         if self._in_any_script and not self._in_tex_script:
             return
+        if self._in_tex_script:
+            # Script bodies are raw text: a literal '<' would be mistaken for
+            # markup by the later tag-stripping regex and delete the
+            # inequality (e.g. "a < b" -> "a"). Escape it; html.unescape()
+            # (or the raw-text path, which already shows &lt; like the
+            # unrendered-page path) restores it.
+            data = data.replace("<", "&lt;").replace(">", "&gt;")
         self.parts.append(data)
 
     def handle_entityref(self, name):

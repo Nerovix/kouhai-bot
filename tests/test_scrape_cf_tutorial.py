@@ -132,3 +132,44 @@ def test_auto_mode_uses_m1_mirror_before_playwright_after_primary_403(monkeypatc
         ("https://m1.codeforces.com/blog/entry/123?locale=en", "http", 7000),
         ("https://codeforces.com/blog/entry/123?locale=en", "playwright", 7000),
     ]
+
+
+def _mathjax_formula(tex: str, rendered: str, element_id: int) -> str:
+    """One MathJax v2 formula exactly as served on rendered CF blog pages."""
+    return (
+        '<span class="MathJax_Preview" style="color: inherit;"></span>'
+        f'<span class="MathJax" id="MathJax-Element-{element_id}-Frame" tabindex="0" '
+        f'data-mathml="&lt;math&gt;&lt;mn&gt;{rendered}&lt;/mn&gt;&lt;/math&gt;" '
+        'role="presentation" style="position: relative;">'
+        '<nobr aria-hidden="true">'
+        f'<span class="math" id="MathJax-Span-{element_id}">'
+        f'<span class="mrow"><span class="mn" style="font-family: MathJax_Main;">{rendered}</span></span>'
+        "</span></nobr>"
+        f'<span class="MJX_Assistive_MathML" role="presentation">'
+        f'<math xmlns="http://www.w3.org/1998/Math/MathML"><mn>{rendered}</mn></math></span>'
+        "</span>"
+        f'<script type="math/tex" id="MathJax-Element-{element_id}">{tex}</script>'
+    )
+
+
+def test_html_to_markdownish_does_not_duplicate_mathjax_digits():
+    """Rendered blog pages carry each formula twice (nobr + assistive MathML)
+    after the TeX script is dropped; digits must not be duplicated."""
+    html = (
+        "<p>Since the coin moves down by "
+        + _mathjax_formula("1", "1", 1)
+        + " each time, but by "
+        + _mathjax_formula("2", "2", 2)
+        + " in the other case.</p>"
+    )
+    text = scrape_cf_tutorial.html_to_markdownish(html)
+    assert "moves down by 1 each time, but by 2 in the other case" in text
+    assert "by 11 each" not in text
+
+
+def test_html_to_markdownish_plain_markup_unchanged():
+    """Unrendered blog pages keep their $$$...$$$ markup as-is (unchanged
+    behaviour: the markdownish output intentionally keeps the markup)."""
+    html = "<p>cost is $$$10$$$ per item, at most $$$9$$$ times</p>"
+    text = scrape_cf_tutorial.html_to_markdownish(html)
+    assert text == "cost is $$$10$$$ per item, at most $$$9$$$ times"

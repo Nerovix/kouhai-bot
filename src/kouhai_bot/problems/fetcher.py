@@ -25,6 +25,7 @@ import os
 import re
 import sys
 import urllib.request
+from html.parser import HTMLParser
 from io import BytesIO
 from urllib.parse import urljoin
 
@@ -360,9 +361,95 @@ def call_vl_with_retry(
 
 # ── HTML to text ────────────────────────────────────────────────────────
 
+class _MathJaxNormalizer(HTMLParser):
+    """Collapse MathJax-rendered formulas so each formula contributes one text copy.
+
+    A Playwright-fetched CF page has MathJax (v2 HTML-CSS + assistive MathML)
+    output for every inline formula, and each formula appears THREE times in
+    the DOM text: the visible <nobr> rendering, the assistive
+    ``MJX_Assistive_MathML`` <math> block, and the trailing
+    ``<script type="math/tex">`` TeX source. Naive tag-stripping keeps all
+    three, so ``$$$1$$$`` becomes ``111``. This normalizer keeps only the TeX
+    source (equivalent to the ``$$$...$$$`` markup on unrendered pages) and
+    drops the rendered duplicates.
+    """
+
+    _SKIP_TAGS = frozenset({"nobr", "mjx-container"})
+    _SKIP_CLASS_TOKENS = ("MathJax_Preview", "MJX_Assistive_MathML")
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._skip_depth = 0
+        self._in_any_script = False
+        self._in_tex_script = False
+
+    def _should_skip(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+        if tag in self._SKIP_TAGS:
+            return True
+        cls = dict(attrs).get("class", "") or ""
+        return any(tok in cls for tok in self._SKIP_CLASS_TOKENS)
+
+    def handle_starttag(self, tag, attrs):
+        if self._skip_depth:
+            self._skip_depth += 1
+            return
+        if self._should_skip(tag, attrs):
+            self._skip_depth = 1
+            return
+        if tag == "script":
+            self._in_any_script = True
+            # MathJax v2 emits type="math/tex" (inline) or
+            # "math/tex; mode=display" (display formulas).
+            if (dict(attrs).get("type") or "").startswith("math/tex"):
+                self._in_tex_script = True
+            return
+        tag_text = self.get_starttag_text() or ""
+        self.parts.append(tag_text)
+
+    def handle_startendtag(self, tag, attrs):
+        if not self._skip_depth and not self._should_skip(tag, attrs):
+            tag_text = self.get_starttag_text() or ""
+            self.parts.append(tag_text)
+
+    def handle_endtag(self, tag):
+        if self._skip_depth:
+            self._skip_depth -= 1
+            return
+        if tag == "script":
+            self._in_any_script = False
+            self._in_tex_script = False
+            return
+        self.parts.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if self._skip_depth:
+            return
+        # Keep normal text and the TeX source of <script type="math/tex">;
+        # drop the body of any other script tag.
+        if self._in_any_script and not self._in_tex_script:
+            return
+        self.parts.append(data)
+
+
+def normalize_mathjax(html_frag: str) -> str:
+    """Return a copy of ``html_frag`` with MathJax rendered artifacts removed.
+
+    Only the ``<script type="math/tex">`` TeX source survives per formula, so
+    later tag-stripping yields one copy per formula (matching the
+    ``$$$...$$$`` markup found on unrendered CF pages).
+    """
+    if "MathJax" not in html_frag and "<script" not in html_frag:
+        return html_frag
+    parser = _MathJaxNormalizer()
+    parser.feed(html_frag)
+    parser.close()
+    return "".join(parser.parts)
+
+
 def html_to_text(ps_html: str) -> str:
     """Strip HTML tags, normalize whitespace."""
-    text = re.sub(r"<[^>]+>", "", ps_html)
+    text = re.sub(r"<[^>]+>", "", normalize_mathjax(ps_html))
     text = html_lib.unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"\$\$\$|\$\$|\$", "", text)

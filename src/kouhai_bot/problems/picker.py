@@ -438,7 +438,8 @@ def fetch_statement(problem: dict) -> object:
             re.DOTALL,
         )
         if inp_m:
-            inp = re.sub(r"<[^>]+>", "", inp_m.group(1))
+            inp = cf_statement.normalize_mathjax(inp_m.group(1))
+            inp = re.sub(r"<[^>]+>", "", inp)
             inp = re.sub(r"\s+", " ", inp).strip()
             inp = re.sub(r"\$\$\$|\$\$|\$", "", inp)
             result["input"] = inp
@@ -463,7 +464,11 @@ def fetch_statement(problem: dict) -> object:
                 re.DOTALL,
             )
             if note_m:
-                note = re.sub(r"<[^>]+>", "", note_m.group(1))
+                # MathJax-rendered pages carry each formula three times
+                # (visible <nobr>, assistive MathML, TeX <script>); normalize
+                # before tag-stripping so digits are not tripled.
+                note = cf_statement.normalize_mathjax(note_m.group(1))
+                note = re.sub(r"<[^>]+>", "", note)
                 note = re.sub(r"\s+", " ", note).strip()
                 note = re.sub(r"\$\$\$|\$\$|\$", "", note)
                 result["notes"] = note

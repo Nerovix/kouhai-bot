@@ -31,6 +31,7 @@ try:
 except ImportError:
     curl_requests = None
 from kouhai_bot.problems import cf_fetcher
+from kouhai_bot.problems.fetcher import normalize_mathjax
 
 CF_ROOT = "https://codeforces.com"
 class ScrapeError(RuntimeError):
@@ -326,6 +327,11 @@ def extract_blog_body_html(tutorial_html: str) -> str:
 def html_to_markdownish(body_html: str) -> str:
     s = body_html
     s = re.sub(r"<!--[\s\S]*?-->", "", s)
+    # MathJax-rendered pages carry each formula twice here (visible <nobr>
+    # rendering + assistive MathML; the TeX <script> is dropped below), so
+    # naive tag-stripping would duplicate digits ("by 1" -> "by 11").
+    # Keep only the TeX source per formula before stripping tags.
+    s = normalize_mathjax(s)
     s = re.sub(r"<script[\s\S]*?</script>", "", s, flags=re.I)
     s = re.sub(r"<style[\s\S]*?</style>", "", s, flags=re.I)
     s = re.sub(r"</(strong|b)>", "\n", s, flags=re.I)

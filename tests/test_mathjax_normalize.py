@@ -96,8 +96,13 @@ def test_html_to_text_plain_markup_unchanged():
     assert text == "craft one weapon of the 1-st class, spending 9 ingots"
 
 
-def test_normal_script_content_dropped():
-    html = "<p>before</p><script>var x = 1;</script><p>after</p>"
+def test_normal_script_content_dropped_when_mathjax_present():
+    """Once the normalizer is active (MathJax present), non-tex script
+    bodies are dropped."""
+    html = (
+        '<span class="MathJax_Preview"></span>'
+        "<p>before</p><script>var x = 1;</script><p>after</p>"
+    )
     out = fetcher.normalize_mathjax(html)
     assert "var x" not in out
     assert "<p>before</p>" in out and "<p>after</p>" in out
@@ -120,6 +125,67 @@ def test_display_mode_tex_script_kept():
     text = re.sub(r"<[^>]+>", "", out)
     assert "\\sum_{i=1}^{n} i" in text
     assert text.count("\\sum") == 1
+
+
+def test_escaped_inequalities_survive_tag_stripping():
+    """Character references must not be decoded before tag-stripping, or
+    '<' would be mistaken for markup and the text deleted."""
+    html = (
+        '<p>for all i &lt; n and x &gt;= y</p>'
+        + _mathjax_formula("a_i \\le 5", "a_i\\le5", 60)
+        + "<p>after</p>"
+    )
+    out = fetcher.normalize_mathjax(html)
+    # normalize keeps the references verbatim; only html_to_text's final
+    # unescape decodes them, after tag-stripping.
+    stripped = re.sub(r"<[^>]+>", "", out)
+    assert "i &lt; n" in stripped and "x &gt;= y" in stripped
+    assert "after" in stripped
+    text = fetcher.html_to_text(html)
+    assert "for all i < n and x >= y" in text
+    assert "after" in text
+
+
+def test_void_element_inside_skipped_block_keeps_depth_balanced():
+    html = (
+        '<span class="MathJax" id="MathJax-Element-70-Frame">'
+        '<nobr aria-hidden="true"><span class="math">a<br>'
+        '<img src="/x.png"></span></nobr>'
+        '<span class="MJX_Assistive_MathML"><math><mi>a</mi></math></span></span>'
+        '<script type="math/tex">a</script>'
+        "<p>tail text must survive</p>"
+    )
+    out = fetcher.normalize_mathjax(html)
+    text = re.sub(r"<[^>]+>", "", out)
+    assert "tail text must survive" in text
+    assert "a" in text
+
+
+def test_mathjax_v3_container_keeps_assistive_mathml_text():
+    """MathJax v3 has no legacy TeX <script>; the container's assistive
+    <math> is the only text source and must be preserved, not skipped."""
+    html = (
+        "<p>answer is </p>"
+        '<mjx-container class="MathJax" jax="CHTML" display="false">'
+        '<mjx-math class="MJX-TEX" aria-hidden="true">'
+        '<mjx-mn class="mjx-n"><mjx-c class="mjx-c39"></mjx-c></mjx-mn>'
+        "</mjx-math>"
+        '<math xmlns="http://www.w3.org/1998/Math/MathML"><mn>9</mn></math>'
+        "</mjx-container>"
+        "<p>.</p>"
+    )
+    out = fetcher.normalize_mathjax(html)
+    text = re.sub(r"<[^>]+>", "", out)
+    assert "9" in text
+    assert text.count("9") == 1
+
+
+def test_plain_script_page_untouched():
+    """Pages without MathJax output take the fast path: scripts keep their
+    legacy behaviour (content preserved after tag-stripping)."""
+    html = "<p>a</p><script>var x = 1;</script><p>b</p>"
+    assert fetcher.normalize_mathjax(html) is html
+    assert fetcher.normalize_mathjax(html) == html
 
 
 def test_picker_notes_extraction_no_duplication():

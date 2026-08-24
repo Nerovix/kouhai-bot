@@ -374,11 +374,16 @@ class _MathJaxNormalizer(HTMLParser):
     drops the rendered duplicates.
     """
 
-    _SKIP_TAGS = frozenset({"nobr", "mjx-container"})
+    _SKIP_TAGS = frozenset({"nobr"})
     _SKIP_CLASS_TOKENS = ("MathJax_Preview", "MJX_Assistive_MathML")
+    # HTML void elements have no end tag; they must not bump the skip depth.
+    _VOID_TAGS = frozenset(
+        {"area", "base", "br", "col", "embed", "hr", "img", "input",
+         "link", "meta", "param", "source", "track", "wbr"}
+    )
 
     def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
+        super().__init__(convert_charrefs=False)
         self.parts: list[str] = []
         self._skip_depth = 0
         self._in_any_script = False
@@ -392,7 +397,8 @@ class _MathJaxNormalizer(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         if self._skip_depth:
-            self._skip_depth += 1
+            if tag not in self._VOID_TAGS:
+                self._skip_depth += 1
             return
         if self._should_skip(tag, attrs):
             self._skip_depth = 1
@@ -431,15 +437,30 @@ class _MathJaxNormalizer(HTMLParser):
             return
         self.parts.append(data)
 
+    def handle_entityref(self, name):
+        # convert_charrefs=False: keep character references verbatim so the
+        # later tag-stripping regex cannot mistake a decoded '<'/'&' for
+        # markup; html.unescape() decodes them once afterwards. References
+        # inside the kept TeX source are preserved too.
+        if self._skip_depth or (self._in_any_script and not self._in_tex_script):
+            return
+        self.parts.append(f"&{name};")
+
+    def handle_charref(self, name):
+        if self._skip_depth or (self._in_any_script and not self._in_tex_script):
+            return
+        self.parts.append(f"&#{name};")
+
 
 def normalize_mathjax(html_frag: str) -> str:
     """Return a copy of ``html_frag`` with MathJax rendered artifacts removed.
 
     Only the ``<script type="math/tex">`` TeX source survives per formula, so
     later tag-stripping yields one copy per formula (matching the
-    ``$$$...$$$`` markup found on unrendered CF pages).
+    ``$$$...$$$`` markup found on unrendered CF pages). Pages without
+    MathJax output are returned untouched, preserving legacy behaviour.
     """
-    if "MathJax" not in html_frag and "<script" not in html_frag:
+    if "MathJax" not in html_frag and "math/tex" not in html_frag:
         return html_frag
     parser = _MathJaxNormalizer()
     parser.feed(html_frag)

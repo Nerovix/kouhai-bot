@@ -57,22 +57,29 @@ cp config.example.yaml config.yaml
 
 目前接口仅兼容 OpenAI 格式，不过大部分厂商都提供此格式。bot 在回答问题时会按照 llm 下的配置从上到下按顺序尝试连接。如果你不清楚如何填写配置，向 AI 提供你的厂商、模型需求和 apikey 以寻求帮助。
 
-> 配置中的 model_tag 是一个标记，会附在 bot 的每个需要 llm 接入的请求尾部，以便用户知晓自己的请求是由哪个模型处理的，~~以便开骂~~
+Bot 使用三个模型队列，每个队列可配置多个 provider，失败时自动 fallback：
 
 - `smart_model`：用于判题（`/submit`）和复盘（`/review`），需要较强的推理能力
 - `general_model`：用于题面摘要、样例解释、题解爬取、题意澄清（`/clarify`）等任务，可以使用更便宜的模型
+- `multimodal_model`（可选）：用于处理包含公式图、示意图的题面。未配置时，选题会跳过带图候选
+
+> 配置中的 `model_tag` 是一个标记，会附在 bot 的每个需要 llm 接入的请求尾部，以便用户知晓自己的请求是由哪个模型处理的，~~以便开骂~~
 
 > 在我们的测试中，GPT-5.6 系列基本胜任，GLM-5.2/5.3 也相当不错，DeepSeek V4 系列可用。
 
-#### 多模态题面
+每个 provider 支持的字段：
+- `name`（必填）：provider 名称
+- `api_key`（必填）：API key
+- `base_url`（必填）：API 地址（如 `https://api.openai.com/v1`）
+- `model`（必填）：模型名称
+- `reasoning_effort`（可选）：推理强度，如 `low`/`medium`/`high`/`xhigh`
+- `model_tag`（可选）：显示在回复末尾的标记
+- `stream`（可选，默认 false）：是否使用 SSE 流式传输
+- `send_thinking`（可选，默认 true）：是否发送 thinking 参数
+- `temperature`（可选）：温度参数
+- `extra_body`（可选）：额外的请求体字段
 
-```
-# Optional multimodal fallback queue
-```
-
-`general_model` 被用于题面摘要、样例解释、题解爬取、题意澄清等任务。如果题面包含图片（公式图、示意图），需要配置 `llm.multimodal_model` 来处理。未配置时，选题会跳过带图候选，已有带图题的 `/clarify` 会提示当前缺少多模态模型。
-
-旧的 `qwen` / Qwen-VL 公式 OCR 配置不再是运行时必需项，保留只是为了兼容旧工具。
+> DashScope/阿里云百炼的 provider 会自动使用 SSE 流式传输，无需手动设置 `stream: true`。
 
 #### 配置群聊
 

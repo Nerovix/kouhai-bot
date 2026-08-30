@@ -59,7 +59,10 @@ cp config.example.yaml config.yaml
 
 > 配置中的 model_tag 是一个标记，会附在 bot 的每个需要 llm 接入的请求尾部，以便用户知晓自己的请求是由哪个模型处理的，~~以便开骂~~
 
-> 在我们的测试中，GPT-5.6 系列基本胜任，GLM-5.2/5.3 也相当不错，DeepSeek V4 系列可用。建议 smart_model 使用推理能力强的模型，general_model 可以使用更便宜的模型。
+- `smart_model`：用于判题（`/submit`）和复盘（`/review`），需要较强的推理能力
+- `general_model`：用于题面摘要、样例解释、题解爬取、题意澄清（`/clarify`）等任务，可以使用更便宜的模型
+
+> 在我们的测试中，GPT-5.6 系列基本胜任，GLM-5.2/5.3 也相当不错，DeepSeek V4 系列可用。
 
 #### 多模态题面
 

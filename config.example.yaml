@@ -1,126 +1,91 @@
-# Kouhai Bot — Example Configuration
-# Copy this to config.yaml and fill in your values.
-# config.yaml is .gitignored — never commit real credentials.
+# Kouhai Bot 配置文件示例
+# 复制此文件为 config.yaml 并填入你的配置
+# config.yaml 已在 .gitignore 中，不会被提交
 
-# ── QQ Bot ──
-bot_qq: 0  # your bot QQ number
+# ── QQ Bot 配置 ──
+bot_qq: 123456789  # 你的 Bot QQ 号
 
-# ── NapCat WebSocket (bot listens here, NapCat connects to this) ──
-napcat_ws_host: "0.0.0.0"   # MUST be 0.0.0.0 when NapCat runs in Docker
-napcat_ws_port: 8097
-napcat_http_host: "127.0.0.1"
-napcat_http_port: 3000
+# ── NapCat 连接配置 ──
+# Bot 通过 WebSocket 连接到 NapCat
+napcat_ws_host: "0.0.0.0"  # 如果 NapCat 在 Docker 中运行，必须是 0.0.0.0
+napcat_ws_port: 8097       # WebSocket 监听端口
+napcat_http_host: "127.0.0.1"  # NapCat HTTP API 地址
+napcat_http_port: 3000     # NapCat HTTP API 端口
 
-# ── LLM Fallback ──
-# Providers are tried in list order.  First success wins.
-# Each provider is retried up to max_retries times internally before
-# moving to the next one.
+# ── LLM 配置 ──
+# Bot 使用三个模型队列，按顺序尝试每个 provider
+# 每个队列可以配置多个 provider，失败时自动 fallback
 llm:
-  max_retries: 3               # per-provider retries
-  retry_base_delay_sec: 1.0
-  retry_max_delay_sec: 8.0
-  stream_idle_timeout_sec: 120 # SSE idle timeout; retries if no bytes arrive for this long
-
-  # Per-task timeouts (apply to all providers)
-  judge_timeout_sec: 1200
-  clarify_timeout_sec: 600
-  review_timeout_sec: 600
-  summary_timeout_sec: 120
-
-  # Smart-model fallback queue — judge/review use this list. Order matters.
+  # ── smart_model：判题和复盘 ──
+  # 用于 /submit 判题和 /review 复盘
+  # 需要强推理能力，建议使用顶级模型
   smart_model:
-    # ── Optional primary: ZenMux Grok 4.5 Free (OpenAI-compatible) ──
-    # - name: grok45free
-    #   api_key: "..."
-    #   base_url: "https://zenmux.ai/api/v1"
-    #   model: "x-ai/grok-4.5-free"
-    #   reasoning_effort: "xhigh"  # highest accepted by this ZenMux model
-    #   model_tag: "『∅』"
+    - name: "openai"
+      api_key: "sk-..."
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-5.6"
+      reasoning_effort: "high"  # 推理强度：low/medium/high/xhigh
+      model_tag: "『GPT5.6』"   # 显示在回复末尾的标记
+      stream: true              # 使用 SSE 流式传输（推荐）
+    
+    # 备选 provider
+    # - name: "deepseek"
+    #   api_key: "sk-..."
+    #   base_url: "https://api.deepseek.com/v1"
+    #   model: "deepseek-v4-pro"
+    #   reasoning_effort: "high"
+    #   model_tag: "『DSv4pro』"
+    #   stream: true
 
-    # ── Primary: OpenAI-compatible ──
-    - name: openai
-      api_key: "..."
-      base_url: "..."
-      model: "gpt-5.5"
-      stream: true               # use SSE streaming; recommended for sub2api/OpenAI
-      reasoning_effort: "high"  # minimal/low/medium/high/xhigh
-      model_tag: "『֎AI』"        # appended to LLM output; empty to disable
-
-    # ── Fallback: Qwen/DashScope (auto-uses SSE streaming) ──
-    - name: qwen
-      api_key: "..."
-      base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      model: "qwen3.7-max"
-      model_tag: "『Qwen』"
-
-    # ── Fallback: DeepSeek (supports OpenAI-compatible format) ──
-    - name: deepseek
-      api_key: "..."
-      base_url: "https://api.deepseek.com"
-      model: "deepseek-v4-pro"
-      model_tag: "『🐳』"
-
-  # General-model fallback queue — clarify/summary/editorial and other tasks use this list.
-  # This queue can use completely different providers/models from smart_model.
+  # ── general_model：摘要、澄清、题解爬取 ──
+  # 用于题面摘要、样例解释、题解爬取、/clarify 题意澄清
+  # 可以使用更便宜的模型
   general_model:
-    # Optional stronger summary/general provider: ZenMux MiniMax M3 (OpenAI-compatible)
-    # - name: minimax-m3
-    #   api_key: "..."
-    #   base_url: "https://zenmux.ai/api/v1"
-    #   model: "minimax/minimax-m3"
-    #   model_tag: "『M3』"
+    - name: "openai"
+      api_key: "sk-..."
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-5.6-mini"
+      model_tag: "『GPT5.6mini』"
+      stream: true
+    
+    # 备选 provider
+    # - name: "qwen"
+    #   api_key: "sk-..."
+    #   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    #   model: "qwen-max"
+    #   model_tag: "『Qwen』"
+    #   stream: true  # DashScope 自动使用 SSE
 
-    - name: qwen
-      api_key: "..."
-      base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      model: "qwen3.7-plus"
-      model_tag: "『Qwen』"
-
-    - name: deepseek
-      api_key: "..."
-      base_url: "https://api.deepseek.com"
-      model: "deepseek-v4-chat"
-      model_tag: "『🐳』"
-
-  # Optional multimodal fallback queue — image-bearing problem summaries and /clarify use this list.
+  # ── multimodal_model：处理带图片的题面（可选） ──
+  # 用于处理包含公式图、示意图的 Codeforces 题面
+  # 如果不配置，带图题会被跳过
   multimodal_model:
-    - name: mmx
-      api_key: "..."
-      base_url: "https://zenmux.ai/api/v1"
-      model: "mmx/mmx"
-      model_tag: "『MMx』"
+    - name: "openai"
+      api_key: "sk-..."
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-5.6-vision"
+      model_tag: "『GPT5.6v』"
+      stream: true
 
-# ── Legacy Qwen-VL (deprecated) ──
-# Runtime statement images now use llm.multimodal_model instead of a separate formula-OCR pass.
-# This section is optional and kept only for compatibility with old local tooling.
-qwen:
-  api_key: "..."
-  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  model: ""
+# ── 群聊配置 ──
+current_group: 987654321  # 服务的 QQ 群号
 
-# ── Group ──
-current_group: 0  # your QQ group number
-
-# ── User Groups (optional) ──
-# Users not listed here are in the default group.
-# Example: a "starred" group displayed as "打星" with delayed /submit.
-# user_groups:
-#   - name: starred
-#     display_name: 打星
-#     user_ids: [<user_id_1>, <user_id_2>]
-#     submit_delay_sec: 1800  # minimum wait; non-zero enables dynamic per-user waits
-#     submit_delay_message: "将机会多留给年轻人吧～{wait}"
-
-# ── Problem Selection ──
+# ── 题目选择 ──
 problem:
-  min_rating: 2600
-  max_rating: 2800
-  newproblem_cooldown: 60    # /newproblem cooldown in seconds
-  submit_ac_backdoor: "..."  # optional: if non-empty, matching /submit skips judge
+  min_rating: 2600  # 最低难度
+  max_rating: 2800  # 最高难度
+  newproblem_cooldown: 60  # /newproblem 冷却时间（秒）
 
-# ── Curfew (宵禁) ──
-# Block /submit during quiet hours (Beijing time).
-# start=0, duration=0 disables curfew.
-curfew:
-  start_hour: 4
-  duration_hours: 1
+# ── 打星用户（可选） ──
+# 将某些用户从正式榜中踢出，单独记榜
+# user_groups:
+#   - name: "starred"
+#     display_name: "打星"
+#     user_ids: [123456789, 987654321]
+#     submit_delay_sec: 1800  # 题目公布后 30 分钟内无法提交
+
+# ── 宵禁（可选） ──
+# 在指定时间段内禁止 /submit
+# curfew:
+#   start_hour: 23  # 开始时间（24小时制）
+#   duration_hours: 8  # 持续时间（小时）

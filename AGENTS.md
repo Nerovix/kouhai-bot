@@ -66,6 +66,16 @@ NapCat (QQ) ──WS──> worker.py
   by `.input`/`.output` class pairs (not bare `<pre>` scanning), and the
   `problem-statement` block itself is located by div-depth counting since the
   `</div><script` terminator is not present in every template variant.
+- **MathJax formula deduplication**: `problems/fetcher.py:normalize_mathjax()` is the
+  single shared implementation that removes MathJax-rendered duplicate formulas from
+  CF HTML. Rendered CF pages carry each formula multiple times (visible `<nobr>`
+  rendering, `MJX_Assistive_MathML` accessibility copy, and the original
+  `<script type="math/tex">` source). The normalizer keeps only the TeX source
+  wrapped in `$$$...$$$`, discarding the rendered copies. It is called from
+  `html_to_text()` (problem statements) and from `html_to_markdownish()` in
+  `tools/scrape_cf_tutorial.py` (tutorial blog pages). Without this, LLM judge
+  and tutorial extraction see duplicated numbers (e.g. "111" instead of "1") and
+  may misinterpret problem constraints.
 - **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before image metadata via `_images_collected`. Stale caches with images are re-fetched so image metadata is available for multimodal tasks.
 - **Editorial extraction matches Div1/Div2 mirror codes by title**: CF
   mirrors of the same problem carry different codes but the same name (e.g.
@@ -77,6 +87,15 @@ NapCat (QQ) ──WS──> worker.py
   statement/IO format; anything uncertain must be `match=false` — never risk
   attaching the wrong editorial (judge correctness depends on it). Any API
   failure degrades to an empty sibling list (prompt-only title matching).
+- **Editorial extraction distinguishes easy/hard versions**: Problems with
+  similar names but different difficulty levels (e.g. `95B` "Lucky Numbers"
+  vs `96B` "Lucky Numbers (easy)") are treated as different problems. The
+  extractor prompt explicitly warns the LLM to check constraint ranges and
+  solution complexity — easy/hard versions have different constraints and
+  require different algorithms. If a blog discusses the easy version but the
+  target problem is the hard version (or vice versa), the match must be
+  `match=false`. This prevents attaching the wrong editorial when problem
+  names are similar but not identical.
 - **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
 - **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection,
   dispatches commands, and owns the scheduler, next-problem prefetch loop, and
@@ -472,7 +491,7 @@ No repository-local runtime queue is used.
 | `/help` | help.py | `handle` | ❌ | — | Auto-generated help (forward card) |
 | `/review` (`/rv`) | review.py | `handle` | ✅ state scheduler | `llm.smart_model` queue | Discuss the latest solved group/private problem by default; quoted group problem cards can target older problems |
 | `/status` | stubs.py | `handle_status` | ❌ | — | Check whether this group or private judge has active stateful work |
-| `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, `random`, or a quoted problem card |
+| `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, `random`, or a quoted problem card. Supports rating range (e.g. `/sp 2500-2600`) for targeted difficulty selection |
 | `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite |
 | `/testcd` | testcd.py | `handle` | ❌ | — | Private-only; show whether this user can submit the current group problem or how long remains in dynamic submit CD |
 

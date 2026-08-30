@@ -59,7 +59,7 @@ cp config.example.yaml config.yaml
 
 > 配置中的 model_tag 是一个标记，会附在 bot 的每个需要 llm 接入的请求尾部，以便用户知晓自己的请求是由哪个模型处理的，~~以便开骂~~
 
-> 在我们的测试中，gpt-5.5 high 基本胜任，qwen-3.7-max 也相当不错，Deepseek v4 pro 可用，但由于其 CoT 较长，响应慢，推理能力也确实不及前者，建议只作为 API 连接不稳时的 fallback
+> 在我们的测试中，GPT-5.6 系列基本胜任，GLM-5.2/5.3 也相当不错，DeepSeek V4 系列可用。建议 smart_model 使用推理能力强的模型，general_model 可以使用更便宜的模型。
 
 ZenMux 上的体验模型也可以作为 OpenAI-compatible provider 配置。示例见 `config.example.yaml`；例如 Grok 4.5 Free 可使用 `model: "x-ai/grok-4.5-free"`、`reasoning_effort: "xhigh"`、`model_tag: "『∅』"`。如果某个网关需要特殊 payload，可在 provider 上配置 `temperature`、`send_thinking` 或 `extra_body`，避免为每个模型在代码里新增分支。
 
@@ -141,11 +141,9 @@ bot 能看到原题面他与你在此题的所有对话历史（包括所有clar
 
 ### 6. misc
 
-#### 爬取题解！
+#### 难度范围选题
 
-爬取到的题解会在题目被解决时同步发送到群聊中，而且可以提高review的质量。
-
-爬取题解的工具全部保留在 `/tools` 中，但较为杂乱。请直接寻求 AI 的协助。
+`/sp` 命令支持按难度范围选题（如 `/sp 2500-2600`），方便针对性训练。
 
 #### CF 赛事预告！
 

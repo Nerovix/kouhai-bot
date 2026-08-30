@@ -61,15 +61,13 @@ cp config.example.yaml config.yaml
 
 > 在我们的测试中，GPT-5.6 系列基本胜任，GLM-5.2/5.3 也相当不错，DeepSeek V4 系列可用。建议 smart_model 使用推理能力强的模型，general_model 可以使用更便宜的模型。
 
-ZenMux 上的体验模型也可以作为 OpenAI-compatible provider 配置。示例见 `config.example.yaml`；例如 Grok 4.5 Free 可使用 `model: "x-ai/grok-4.5-free"`、`reasoning_effort: "xhigh"`、`model_tag: "『∅』"`。如果某个网关需要特殊 payload，可在 provider 上配置 `temperature`、`send_thinking` 或 `extra_body`，避免为每个模型在代码里新增分支。
-
 #### 多模态题面
 
 ```
 # Optional multimodal fallback queue
 ```
 
-如果希望 bot 选择和澄清包含公式图、示意图的 Codeforces 题面，请配置 `llm.multimodal_model`。带图题的中文题意摘要和 `/clarify` 会走这个队列；未配置时，选题会跳过带图候选，已有带图题的 `/clarify` 会提示当前缺少多模态模型。
+`general_model` 被用于题面摘要、样例解释、题解爬取、题意澄清等任务。如果题面包含图片（公式图、示意图），需要配置 `llm.multimodal_model` 来处理。未配置时，选题会跳过带图候选，已有带图题的 `/clarify` 会提示当前缺少多模态模型。
 
 旧的 `qwen` / Qwen-VL 公式 OCR 配置不再是运行时必需项，保留只是为了兼容旧工具。
 

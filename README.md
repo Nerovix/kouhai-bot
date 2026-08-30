@@ -57,11 +57,13 @@ cp config.example.yaml config.yaml
 
 目前接口仅兼容 OpenAI 格式，不过大部分厂商都提供此格式。bot 在回答问题时会按照 llm 下的配置从上到下按顺序尝试连接。如果你不清楚如何填写配置，向 AI 提供你的厂商、模型需求和 apikey 以寻求帮助。
 
-Bot 使用三个模型队列，每个队列可配置多个 provider，失败时自动 fallback：
+Bot 根据任务类型路由到不同的模型队列：
 
-- `smart_model`：用于判题（`/submit`）和复盘（`/review`），需要较强的推理能力
-- `general_model`：用于题面摘要、样例解释、题解爬取、题意澄清（`/clarify`）等任务，可以使用更便宜的模型
-- `multimodal_model`（可选）：用于处理包含公式图、示意图的题面。未配置时，选题会跳过带图候选
+- `smart_model`：判题（`/submit`）和复盘（`/review`），需要强推理能力
+- `general_model`：题面摘要、样例解释、题解爬取、题意澄清（`/clarify`）等，可用更便宜的模型
+- `multimodal_model`（可选）：处理带图片的题面（公式图、示意图）
+
+如果题面有图片，任务会被标记为 `multimodal_summary` 或 `multimodal_clarify`，只会路由到 `multimodal_model`。即使 `general_model` 配置的是多模态模型，也必须单独在 `multimodal_model` 里再配一次，否则带图题会被跳过。
 
 > 配置中的 `model_tag` 是一个标记，会附在 bot 的每个需要 llm 接入的请求尾部，以便用户知晓自己的请求是由哪个模型处理的，~~以便开骂~~
 

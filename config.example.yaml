@@ -59,6 +59,8 @@ llm:
   # ── multimodal_model：处理带图片的题面（可选） ──
   # 用于处理包含公式图、示意图的 Codeforces 题面
   # 如果不配置，带图题会被跳过
+  # 注意：即使 general_model 配置的是多模态模型，也必须在这里单独配置一次
+  # 因为 multimodal 任务只会路由到 multimodal_model，不会 fallback 到 general_model
   multimodal_model:
     - name: "openai"
       api_key: "sk-..."

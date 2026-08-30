@@ -400,7 +400,11 @@ def _build_extractor_messages(
                 "同一道题 \"Nice table\"）。problem_sibling_codes 列出与本题同名的题号，"
                 "它们可能对应同一道题。判定规则：段落标题中的题目名称与本题名称相同，"
                 "且题意/输入输出格式吻合 → 即使题号不同也视为匹配；"
-                "仅名称或题号相同但题意不符，或任何无法确认的情况 → 必须 match=false。"
+                "仅名称或题号相同但题意不符，或任何无法确认的情况 → 必须 match=false。\\n"
+                "关键：easy/hard version 是**不同的题目**！例如 95B (Lucky Numbers, Div1 B, hard) "
+                "与 96B (Lucky Numbers (easy), Div2 B, easy) 虽然名称相似，但约束、解法完全不同。"
+                "如果本题是 hard version，blog 中讨论 easy version 的段落必须 match=false；反之亦然。"
+                "判断依据：看约束范围（如 N≤10^9 vs N≤10^18）、解法复杂度（暴力枚举 vs DP/数学推导）。"
                 "宁可漏爬，不可爬错。"
             ),
         },

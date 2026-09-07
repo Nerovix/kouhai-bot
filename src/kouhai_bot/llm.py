@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from .config import get_config
+from .llm_config import LlmProviderConfig
 
 logger = logging.getLogger("kouhai-bot.llm")
 
@@ -128,6 +129,39 @@ def _provider_is_dashscope(provider_name: str, base_url: str) -> bool:
         or host.endswith(".dashscope.aliyuncs.com")
         or host.endswith(".maas.aliyuncs.com")
     )
+
+
+def _apply_rating_gate(
+    providers: list[LlmProviderConfig],
+    problem_rating: int | None,
+    *,
+    task_name: str,
+    provider_name_pinned: bool,
+) -> list[LlmProviderConfig]:
+    """Return smart providers eligible for the problem rating.
+
+    The helper deliberately has no logging or fallback behavior so the gate can
+    be unit-tested independently of the transport.  Callers decide what to do
+    when every provider is outside its configured range.
+    """
+    if (
+        problem_rating is None
+        or task_name not in {"judge", "review"}
+        or provider_name_pinned
+    ):
+        return list(providers)
+    return [
+        provider
+        for provider in providers
+        if (
+            provider.min_rating is None
+            or problem_rating >= provider.min_rating
+        )
+        and (
+            provider.max_rating is None
+            or problem_rating <= provider.max_rating
+        )
+    ]
 
 
 
@@ -527,6 +561,7 @@ async def chat_completion(
     thinking: dict | None = None,
     provider_name: str = "",
     send_reasoning_effort: bool = True,
+    problem_rating: int | None = None,
 ) -> ChatCompletionResult:
     """Call providers in fallback order; first success wins.
 
@@ -541,6 +576,33 @@ async def chat_completion(
         providers = cfg.llm_multimodal_providers
     else:
         providers = cfg.llm_general_providers
+    unfiltered_providers = providers
+    gated_providers = _apply_rating_gate(
+        providers,
+        problem_rating,
+        task_name=task_name,
+        provider_name_pinned=bool(provider_name),
+    )
+    if gated_providers != providers:
+        for skipped in providers:
+            if skipped in gated_providers:
+                continue
+            logger.info(
+                "Skipping LLM provider '%s' for problem rating %s "
+                "(min_rating=%s, max_rating=%s)",
+                skipped.name,
+                problem_rating,
+                skipped.min_rating,
+                skipped.max_rating,
+            )
+        if not gated_providers:
+            logger.warning(
+                "All smart_model providers were outside the rating gate for "
+                "problem rating %s; falling back to the unfiltered queue",
+                problem_rating,
+            )
+            gated_providers = unfiltered_providers
+    providers = gated_providers
     if provider_name:
         providers = [p for p in providers if p.name == provider_name]
     if not providers:

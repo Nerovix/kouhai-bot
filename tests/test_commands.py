@@ -295,7 +295,7 @@ async def _mock_deepseek(messages, model="", task="", temperature=0.7, timeout=1
 
 
 async def _mock_chat_completion_result(messages, model="", task="", temperature=0.7, timeout=120,
-                                       response_format=None, thinking=None):
+                                       response_format=None, thinking=None, problem_rating=None):
     result = await _mock_deepseek(
         messages,
         model=model,
@@ -315,7 +315,7 @@ async def _mock_chat_completion_result(messages, model="", task="", temperature=
     )
 
 
-async def _mock_judge_result(problem_text, submission, history=None):
+async def _mock_judge_result(problem_text, submission, history=None, problem_rating=None):
     result = await _mock_chat_completion_result(
         [
             {"role": "system", "content": ""},
@@ -338,6 +338,7 @@ async def _mock_second_judge_result(
     editorial_source="",
     provider_name="",
     model="",
+    problem_rating=None,
 ):
     _second_judge_calls.append({
         "problem_text": problem_text,
@@ -397,6 +398,7 @@ def _dialogue_has_assistant_text(dialogue, content):
 
 def _wrap_llm_result(fn, failure_kind="service_unavailable"):
     async def _wrapped(*args, **kwargs):
+        kwargs.pop("problem_rating", None)  # consumed by chat_completion layer, never reaches provider
         result = await fn(*args, **kwargs)
         if result is None:
             return ChatCompletionResult(text=None, failure_kind=failure_kind)
@@ -405,7 +407,7 @@ def _wrap_llm_result(fn, failure_kind="service_unavailable"):
 
 
 def _wrap_deepseek_as_judge_result(fn, failure_kind="service_unavailable"):
-    async def _wrapped(problem_text, submission, history=None):
+    async def _wrapped(problem_text, submission, history=None, problem_rating=None):
         result = await fn(
             [{}, {"content": json.dumps({"submission": submission, "history": history})}],
             task="judge",
@@ -1397,7 +1399,7 @@ def test_submit_llm_failure_shows_admin_message():
     _setup_problem()
     _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
 
-    async def _fail_judge(problem_text, submission, history=None):
+    async def _fail_judge(problem_text, submission, history=None, problem_rating=None):
         return ChatCompletionResult(text=None, failure_kind="service_unavailable")
 
     with _all_patches(), patch("kouhai_bot.handlers.cmd.submit.judge_submission_result", _fail_judge):
@@ -1421,7 +1423,7 @@ def test_submit_timeout_is_saved_as_context():
     _setup_problem()
     _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
 
-    async def _timeout_judge(problem_text, submission, history=None):
+    async def _timeout_judge(problem_text, submission, history=None, problem_rating=None):
         return ChatCompletionResult(text=None, failure_kind="timeout")
 
     with _all_patches(), patch("kouhai_bot.handlers.cmd.submit.judge_submission_result", _timeout_judge):

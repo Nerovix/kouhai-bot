@@ -46,6 +46,7 @@ async def call_chat_completion_result(
     response_format: dict | None = None,
     thinking: dict | None = None,
     provider_name: str = "",
+    problem_rating: int | None = None,
 ) -> ChatCompletionResult:
     """Call the configured chat-completions provider and keep terminal failure metadata."""
     return await chat_completion(
@@ -57,6 +58,7 @@ async def call_chat_completion_result(
         response_format=response_format,
         thinking=thinking,
         provider_name=provider_name,
+        problem_rating=problem_rating,
     )
 
 
@@ -69,6 +71,7 @@ async def call_chat_completion(
     response_format: dict | None = None,
     thinking: dict | None = None,
     provider_name: str = "",
+    problem_rating: int | None = None,
 ) -> str | None:
     """Call the configured chat-completions provider. Returns response text or None."""
     result = await call_chat_completion_result(
@@ -80,6 +83,7 @@ async def call_chat_completion(
         response_format=response_format,
         thinking=thinking,
         provider_name=provider_name,
+        problem_rating=problem_rating,
     )
     return result.text
 
@@ -1116,6 +1120,7 @@ async def judge_submission_result(
     problem_text: str,
     submission: str,
     history: list[dict] | None = None,
+    problem_rating: int | None = None,
 ) -> ChatCompletionResult:
     """Judge a submission and preserve terminal LLM failure metadata."""
     cfg = get_config()
@@ -1126,6 +1131,7 @@ async def judge_submission_result(
         timeout=cfg.judge_timeout_sec,
         response_format={"type": "json_object"},
         thinking={"type": "enabled"},
+        problem_rating=problem_rating,
     )
 
 
@@ -1138,6 +1144,7 @@ async def second_judge_submission_result(
     editorial_source: str = "",
     provider_name: str = "",
     model: str = "",
+    problem_rating: int | None = None,
 ) -> ChatCompletionResult:
     """Re-check a first-pass correct verdict with official editorial context."""
     cfg = get_config()
@@ -1157,6 +1164,7 @@ async def second_judge_submission_result(
         response_format={"type": "json_object"},
         thinking={"type": "enabled"},
         provider_name=provider_name,
+        problem_rating=problem_rating,
     )
 
 
@@ -1164,9 +1172,15 @@ async def judge_submission(
     problem_text: str,
     submission: str,
     history: list[dict] | None = None,
+    problem_rating: int | None = None,
 ) -> dict | None:
     """Judge a submission. Returns {correct, reason, reaction, reply} or None."""
-    result = await judge_submission_result(problem_text, submission, history)
+    result = await judge_submission_result(
+        problem_text,
+        submission,
+        history,
+        problem_rating=problem_rating,
+    )
     if not result.text:
         return None
     parsed, _repair_tag = await parse_json_with_llm_repair(

@@ -145,7 +145,7 @@ async def _mock_deepseek(messages, model="", task="", temperature=0.7, timeout=1
 
 
 async def _mock_chat_completion_result(messages, model="", task="", temperature=0.7, timeout=120,
-                                       response_format=None, thinking=None):
+                                       response_format=None, thinking=None, problem_rating=None):
     result = await _mock_deepseek(
         messages,
         model=model,
@@ -161,7 +161,7 @@ async def _mock_chat_completion_result(messages, model="", task="", temperature=
     return ChatCompletionResult(text=result, failure_kind=None)
 
 
-async def _mock_judge_result(problem_text, submission, history=None):
+async def _mock_judge_result(problem_text, submission, history=None, problem_rating=None):
     return await _mock_chat_completion_result(
         [{}, {"content": submission}],
         task="judge",

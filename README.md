@@ -80,6 +80,7 @@ Bot 根据任务类型路由到不同的模型队列：
 - `send_thinking`（可选，默认 true）：是否发送 thinking 参数
 - `temperature`（可选）：温度参数
 - `extra_body`（可选）：额外的请求体字段
+- `min_rating` / `max_rating`（可选，int）：仅对 `smart_model` 的判题或复盘生效；当前题 rating 不在范围内时跳过该模型，继续尝试队列中的下一个
 
 > DashScope/阿里云百炼的 provider 会自动使用 SSE 流式传输，无需手动设置 `stream: true`。
 

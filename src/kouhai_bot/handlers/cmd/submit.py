@@ -122,6 +122,15 @@ def _log_preview(value: object, limit: int = 240) -> str:
     return text[:limit] + "..."
 
 
+def _coerce_problem_rating(value: object) -> int | None:
+    if value in (None, "", "?"):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 CLARIFY_PROMPT = """你是一个算法竞赛群的选手，群友对当前题目有疑问，需要你帮他澄清题目细节。
 
 ## 你的任务
@@ -287,9 +296,15 @@ async def _judge_llm_limited(
     problem_text: str,
     submission: str,
     history: list[dict] | None = None,
+    problem_rating: int | None = None,
 ):
     async with _compute_limit():
-        return await judge_submission_result(problem_text, submission, history)
+        return await judge_submission_result(
+            problem_text,
+            submission,
+            history,
+            problem_rating=problem_rating,
+        )
 
 
 async def _second_judge_llm_limited(
@@ -301,6 +316,7 @@ async def _second_judge_llm_limited(
     editorial_source: str = "",
     provider_name: str = "",
     model: str = "",
+    problem_rating: int | None = None,
 ):
     async with _compute_limit():
         return await second_judge_submission_result(
@@ -312,6 +328,7 @@ async def _second_judge_llm_limited(
             editorial_source,
             provider_name=provider_name,
             model=model,
+            problem_rating=problem_rating,
         )
 
 
@@ -794,7 +811,15 @@ class GroupCoordinator:
             req.user_id,
             len(history),
         )
-        result = await _judge_llm_limited(problem_text, req.payload, history)
+        problem_rating = _coerce_problem_rating(
+            (req.submit_problem or {}).get("rating")
+        )
+        result = await _judge_llm_limited(
+            problem_text,
+            req.payload,
+            history,
+            problem_rating=problem_rating,
+        )
         if not result.text:
             logger.warning(
                 "[group_%s] first judge failed pid=%s seq=%s provider=%s model=%s failure=%s",
@@ -859,6 +884,7 @@ class GroupCoordinator:
                     parsed,
                     editorial.text,
                     source,
+                    problem_rating=problem_rating,
                 )
                 if second.text:
                     second_parsed, _second_repair_tag = await parse_json_with_llm_repair(
@@ -969,6 +995,15 @@ class GroupCoordinator:
         if not problem_text:
             return {"kind": "no_statement", "pid": pid}
 
+        problem_rating = load_known_problem_ratings(
+            req.group_id,
+            {pid},
+        ).get(pid)
+        if problem_rating is None and req.is_private:
+            private_problem = get_private_current_problem(req.user_id)
+            if private_problem and str(private_problem.get("today", "") or "") == pid:
+                problem_rating = _coerce_problem_rating(private_problem.get("rating"))
+
         history = await self._load_user_problem_history_for_request(req, pid)
         history_str = _build_review_history(history)
 
@@ -1011,6 +1046,7 @@ class GroupCoordinator:
             task="review",
             timeout=cfg.review_timeout_sec,
             thinking={"type": "enabled"},
+            problem_rating=problem_rating,
         )
         if not result.text:
             return {"kind": result.failure_kind or "error", "pid": pid}

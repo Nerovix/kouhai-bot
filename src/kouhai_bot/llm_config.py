@@ -39,6 +39,8 @@ class LlmProviderConfig:
     send_thinking: bool = True
     temperature: float | None = None
     extra_body: dict[str, Any] = field(default_factory=dict)
+    min_rating: int | None = None
+    max_rating: int | None = None
 
     def model_for(self, explicit_model: str = "") -> str:
         """Resolve the model name for this provider.
@@ -108,6 +110,28 @@ def _build_provider_list(raw: Any, *, section_name: str) -> list[LlmProviderConf
                 f"LLM provider '{name}' in llm.{section_name} has non-mapping extra_body"
             )
 
+        rating_bounds: dict[str, int | None] = {}
+        for bound_name in ("min_rating", "max_rating"):
+            value = p.get(bound_name)
+            if value is None:
+                rating_bounds[bound_name] = None
+                continue
+            try:
+                rating_bounds[bound_name] = int(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise RuntimeError(
+                    f"LLM provider '{name}' in llm.{section_name} has invalid "
+                    f"{bound_name}: expected an int, got {value!r}"
+                ) from exc
+
+        min_rating = rating_bounds["min_rating"]
+        max_rating = rating_bounds["max_rating"]
+        if min_rating is not None and max_rating is not None and min_rating > max_rating:
+            raise RuntimeError(
+                f"LLM provider '{name}' in llm.{section_name} has min_rating "
+                f"greater than max_rating ({min_rating} > {max_rating})"
+            )
+
         providers.append(
             LlmProviderConfig(
                 name=name,
@@ -120,6 +144,8 @@ def _build_provider_list(raw: Any, *, section_name: str) -> list[LlmProviderConf
                 send_thinking=_parse_bool(p.get("send_thinking", True), default=True),
                 temperature=temperature,
                 extra_body=dict(extra_body),
+                min_rating=min_rating,
+                max_rating=max_rating,
             )
         )
     return providers

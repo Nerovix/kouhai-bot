@@ -5,11 +5,19 @@ Instructions for AI coding assistants working on this codebase.
 
 ## Operational Constraints
 
-- Code changes must be prepared on a branch and merged by PR. Do not make direct
-  code/config edits on the live `master` checkout.
+- All changes (code, config, docs) must be prepared in a **new git worktree** on
+  a branch and merged by PR. Never edit the live `master` checkout directly.
+  Use the `gh` CLI to create the PR; merge only after the owner confirms the PR
+  is correct.
 - The live service checkout must remain on `master`. Do not use `uv run restart`
   or otherwise change live service state unless explicitly asked. Running tests is
   allowed.
+- Never commit private information into git-maintained content: QQ numbers, group
+  chat numbers, and API keys must not appear in commits, branches, PRs, or any
+  tracked file. Use placeholders in examples and docs.
+- `AGENTS.md` is the single agent-instruction file for this repo. Keep it up to
+  date whenever architecture or workflow rules change; do not create `CLAUDE.md`
+  or other parallel instruction files.
 - Judge and review tasks must use the configured highest reasoning capability. Do
   not lower `reasoning_effort`, disable thinking, or switch to a weaker effort to
   work around latency/cost.

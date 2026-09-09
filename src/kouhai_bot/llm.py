@@ -56,6 +56,18 @@ class _ChatCompletionAttempt:
     usage: dict | None = None
 
 
+def append_model_tag(text: str, model_tag: str) -> str:
+    """Append a provider model tag to an LLM-generated message.
+
+    No-op for empty tags, and skips doubling when the text already ends with
+    the tag (an LLM can echo the suffix it saw in its dialogue history).
+    """
+    text = str(text or "").rstrip()
+    if not model_tag or text.endswith(model_tag):
+        return text
+    return text + model_tag
+
+
 def _chat_completions_url(base_url: str) -> str:
     """Build the /chat/completions URL from a provider base URL.
 

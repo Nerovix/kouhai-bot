@@ -17,6 +17,7 @@ from typing import Any
 import cloudscraper
 
 from .config import get_config
+from .llm import append_model_tag
 from .handlers.shared import (
     get_problem_summary,
     get_today_problem,
@@ -695,17 +696,20 @@ def format_history_records(records: list[dict], *, user_display_name: str) -> st
     lines = [f"{name}在当前的历史记录如下："]
     for item in records:
         content = _one_line(item.get("content", ""))
-        reply = _one_line(item.get("reply", ""))
         # Judge records persist the model tag as a dedicated field; clarify/review
-        # records embed it in `reply` at save time, so no double rendering here.
-        tag = _one_line(item.get("model_tag", ""))
-        if content and reply:
+        # records embed it in `reply` at save time — append_model_tag's dedup
+        # guard keeps either convention from rendering twice. Empty-reply
+        # incorrect verdicts fell back to the reason in the live message, so
+        # the card mirrors that here.
+        bot_text = _one_line(item.get("reply", ""))
+        if not bot_text and item.get("result") == "incorrect":
+            reason = _one_line(item.get("reason", ""))
+            if reason:
+                bot_text = f"{reason}。再想想？🤔"
+        if content:
             lines.append(f"👤：{content}")
-            lines.append(f"🤖：{reply}{tag}")
-        elif content:
-            lines.append(f"👤：{content}")
-        elif reply:
-            lines.append(f"🤖：{reply}{tag}")
+        if bot_text:
+            lines.append(append_model_tag(f"🤖：{bot_text}", _one_line(item.get("model_tag", ""))))
     return "\n".join(lines)
 
 
@@ -799,18 +803,9 @@ def current_group_pid(group_id: int) -> str:
     return str(current.get("today", "") or "") if current else ""
 
 
-def private_record_has_correct(records: list[dict], pid: str) -> bool:
-    target = str(pid or "")
-    return any(
-        str(item.get("problem", "") or "") == target
-        and item.get("type") == "submit"
-        and item.get("result") == "correct"
-        for item in records
-    )
-
-
-def private_correct_record_model_tag(records: list[dict], pid: str) -> str:
-    """Model tag of the first correct submit record for `pid` (empty when absent)."""
+def first_correct_submit_record(records: list[dict], pid: str) -> dict | None:
+    """First correct submit record for `pid`, or None (single source for the
+    scoring gate and its model-tag lookup so the two cannot drift)."""
     target = str(pid or "")
     for item in records:
         if (
@@ -818,8 +813,18 @@ def private_correct_record_model_tag(records: list[dict], pid: str) -> str:
             and item.get("type") == "submit"
             and item.get("result") == "correct"
         ):
-            return str(item.get("model_tag", "") or "")
-    return ""
+            return item
+    return None
+
+
+def private_record_has_correct(records: list[dict], pid: str) -> bool:
+    return first_correct_submit_record(records, pid) is not None
+
+
+def private_correct_record_model_tag(records: list[dict], pid: str) -> str:
+    """Model tag of the first correct submit record for `pid` (empty when absent)."""
+    record = first_correct_submit_record(records, pid)
+    return str(record.get("model_tag", "") or "") if record else ""
 
 
 def copy_records(records: list[dict]) -> list[dict]:

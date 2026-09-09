@@ -451,15 +451,23 @@ Persistence and derived surfaces (all user-visible LLM output carries the tag):
 - Judge (`/submit`) context records persist the tag as a dedicated `model_tag` field
   (`_context_record` in `handlers/cmd/submit.py`; set only when non-empty, so legacy
   records simply have no tag). Clarify/review records instead embed the tag inside the
-  stored `reply` string at save time — they carry no dedicated field, which is why
-  `private_judge.format_history_records` appends `record["model_tag"]` to 🤖 lines
-  without double-rendering.
-- The forwarded history card (`/sync`, private judge) renders the tag at the end of
-  every 🤖 line.
+  stored `reply` string at save time — they carry no dedicated field.
+- `llm.append_model_tag(text, tag)` is the shared append helper. Besides rstripping,
+  it refuses to double a tag the text already ends with: an LLM that saw tagged
+  dialogue history can echo the suffix in its own reply, and both storage
+  conventions must stay single-rendered.
+- The forwarded history card (`private_judge.format_history_records`, used by `/sync`
+  and private judge) renders the tag at the end of every 🤖 line, and for empty-reply
+  incorrect verdicts falls back to `reason` + `。再想想？🤔` exactly like the live
+  message in `submit.py:_finalize_submit`.
 - The `/sync` scored cheer (private AC synced into the group scoreboard) appends the
-  tag of the synced private correct record via
-  `private_judge.private_correct_record_model_tag`, matching the in-group
-  `/submit` scoreboard message format.
+  tag of the synced private correct record. The scoring gate and tag lookup share
+  `private_judge.first_correct_submit_record` so they cannot drift; the cheer format
+  (including the named-group `🏆 {display_name} Top 5：` title) mirrors
+  `_send_scoreboard_success`.
+- The annotation bundle exporter (`annotations/exporter.py`) carries `model_tag` in
+  both its per-round and `history_before` whitelists, keeping exported provenance
+  symmetric with what users saw.
 
 ## Data Directory
 

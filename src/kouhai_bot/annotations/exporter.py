@@ -54,6 +54,7 @@ def _history_item(record: dict[str, Any]) -> dict[str, Any]:
         "reason": record.get("reason", ""),
         "reply": record.get("reply", ""),
         "problem": record.get("problem", ""),
+        "model_tag": record.get("model_tag", ""),
     }
 
 
@@ -85,6 +86,7 @@ def _collect_rounds_for_problem(scoreboard: dict[str, Any], pid: str) -> list[di
                 "model_verdict": verdict,
                 "reason": record.get("reason", ""),
                 "reply": record.get("reply", ""),
+                "model_tag": record.get("model_tag", ""),
                 "history_before": history_before,
                 "human_label": {
                     "expected_verdict": None,

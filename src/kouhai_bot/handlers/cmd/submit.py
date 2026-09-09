@@ -22,6 +22,7 @@ from typing import Any, Awaitable, Callable, TypeVar
 from .. import registry
 from ..registry import CommandDef
 from ..shared import (
+    append_model_tag,
     build_scoreboard_entries,
     build_multimodal_user_content,
     call_chat_completion_result,
@@ -45,6 +46,7 @@ from ..shared import (
     save_user_submission,
     second_judge_submission_result,
     statement_images,
+    strip_model_tags,
 )
 from ...config import get_config
 from ...context import get_display_name, load_group_ctx
@@ -390,8 +392,10 @@ def _build_review_history(history: list[dict]) -> str:
         content = item.get("content", "") or ""
         typ = record_type(item)
         result = item.get("result", "") or ""
-        reason = item.get("reason", "") or ""
-        reply = item.get("reply", "") or ""
+        # Tags are display-only metadata; the LLM must never see them
+        # (legacy records embedded them in the stored reply).
+        reason = strip_model_tags(item.get("reason", "") or "")
+        reply = strip_model_tags(item.get("reply", "") or "")
         type_counts[typ] = type_counts.get(typ, 0) + 1
         if typ == "clarify":
             parts.append(
@@ -1086,9 +1090,7 @@ class GroupCoordinator:
             text = " 做法被判定为正确了～前面还有更早发出的提交正在判题，排行榜结果需要等它们结束后再确认。"
         else:
             text = " 做法被判定为正确了～"
-        if model_tag:
-            text = text.rstrip() + model_tag
-        await _send_req_plain(req, text)
+        await _send_req_plain(req, append_model_tag(text, model_tag))
         req.submit_waiting_reply_sent = True
 
     def _problem_label_from_snapshot(self, req: PendingRequest, pid: str) -> str:
@@ -1120,8 +1122,7 @@ class GroupCoordinator:
             )
         else:
             text = f"做对了 {problem_label}！🎉 这次通过只记录在 private judge，不计入群榜。"
-        if model_tag:
-            text = text.rstrip() + model_tag
+        text = append_model_tag(text, model_tag)
         self._log_finished(req, "correct", problem=pid, extra={"scope": PRIVATE_SCOPE})
         await _send_req_plain(req, text)
         if first_solve:
@@ -1176,9 +1177,7 @@ class GroupCoordinator:
         reveal = self._problem_source_from_snapshot(req, pid) or await _reveal_problem_source(req.group_id)
         if reveal:
             lines.extend(["", reveal])
-        resp_text = "\n".join(lines)
-        if model_tag:
-            resp_text = resp_text.rstrip() + model_tag
+        resp_text = append_model_tag("\n".join(lines), model_tag)
         await send_group_msg(req.group_id, [
             build_at(req.user_id),
             build_text(f" {resp_text}"),
@@ -1346,19 +1345,15 @@ class GroupCoordinator:
 
         if reply:
             reply = re.sub(r'@\S+', '', reply.replace("\U0001f605", "\u2764\ufe0f")).strip()
-            if model_tag:
-                reply = reply.rstrip() + model_tag
             self._log_finished(req, "incorrect", problem=pid)
-            await _send_req_plain(req, reply)
+            await _send_req_plain(req, append_model_tag(reply, model_tag))
             await self._resolve_submit_scores(pid)
             await self._finish_request(req)
             return
 
         reason = reason or "做法不太对呢"
-        if model_tag:
-            reason = reason.rstrip() + model_tag
         self._log_finished(req, "incorrect", problem=pid)
-        await _send_req_plain(req, f"{reason}。再想想？🤔")
+        await _send_req_plain(req, append_model_tag(f"{reason}。再想想？🤔", model_tag))
         await self._resolve_submit_scores(pid)
         await self._finish_request(req)
 
@@ -1432,13 +1427,12 @@ class GroupCoordinator:
             reply = reply[:500] + "…"
         reply = reply.replace("😅", "❤️")
         model_tag = result.get("model_tag", "")
-        if model_tag:
-            reply = reply.rstrip() + model_tag
-        await _send_req_plain(req, reply)
+        await _send_req_plain(req, append_model_tag(reply, model_tag))
 
+        # Store the raw reply + tag field; the tag is display-only metadata.
         await self._save_context_record(
             req,
-            _context_record(req, result="clarify", reply=reply, problem=pid),
+            _context_record(req, result="clarify", reply=reply, problem=pid, model_tag=model_tag),
         )
         self._log_finished(req, "ok", problem=pid)
         await self._finish_request(req)
@@ -1480,19 +1474,18 @@ class GroupCoordinator:
 
         reply = result.get("reply", "").replace("😅", "❤️")
         model_tag = result.get("model_tag", "")
-        if model_tag:
-            reply = reply.rstrip() + model_tag
+        display_reply = append_model_tag(reply, model_tag)
 
-        if len(reply) > _REVIEW_FORWARD_THRESHOLD:
+        if len(display_reply) > _REVIEW_FORWARD_THRESHOLD:
             cfg = get_config()
-            chunks = _chunk_text(reply, _REVIEW_CHUNK_SIZE)
+            chunks = _chunk_text(display_reply, _REVIEW_CHUNK_SIZE)
             logger.info(
                 "[group_%s] /review seq=%s user=%s pid=%s using forward-card path: reply_len=%s chunks=%s",
                 req.group_id,
                 req.seq,
                 req.user_id,
                 pid,
-                len(reply),
+                len(display_reply),
                 len(chunks),
             )
             node_ids: list[str] = []
@@ -1583,13 +1576,14 @@ class GroupCoordinator:
                 req.seq,
                 req.user_id,
                 pid,
-                len(reply),
+                len(display_reply),
             )
-            await _send_req_plain(req, reply)
+            await _send_req_plain(req, display_reply)
 
+        # Store the raw reply + tag field; the tag is display-only metadata.
         await self._save_context_record(
             req,
-            _context_record(req, result="review", reply=reply, problem=pid),
+            _context_record(req, result="review", reply=reply, problem=pid, model_tag=model_tag),
         )
         self._log_finished(req, "ok", problem=pid)
         await self._finish_request(req)

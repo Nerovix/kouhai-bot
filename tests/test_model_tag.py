@@ -8,6 +8,7 @@ Covers the two gaps fixed together:
 """
 
 import sys, os, asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -103,9 +104,24 @@ def test_history_card_without_model_tag_field_unchanged():
     assert text.splitlines()[2] == "🤖：嗯嗯思路对啦～"
 
 
-def test_history_card_does_not_double_render_embedded_clarify_tag():
-    # clarify/review records embed the tag in `reply` at save time and carry no
-    # dedicated field — the card must render it exactly once.
+def test_history_card_renders_new_style_clarify_field_tag():
+    # New clarify/review records store the raw reply + a dedicated field.
+    record = {
+        "timestamp": "2026-09-09T12:05:00+08:00",
+        "type": "clarify",
+        "content": "n 的范围是多少？",
+        "result": "clarify",
+        "reply": "n ≤ 1e5 哦～",
+        "problem": PID,
+        "model_tag": TAG,
+    }
+    text = format_history_records([record], user_display_name="张三")
+    assert text.splitlines()[2] == "🤖：n ≤ 1e5 哦～" + TAG
+
+
+def test_history_card_renders_legacy_embedded_clarify_tag_once():
+    # Legacy clarify/review records embedded the tag in `reply` and carry no
+    # field — the card must still render it exactly once.
     record = {
         "timestamp": "2026-09-09T12:05:00+08:00",
         "type": "clarify",
@@ -180,6 +196,57 @@ def test_append_model_tag_cases():
     assert append_model_tag("做法对啦", TAG) == "做法对啦" + TAG
     assert append_model_tag("做法对啦" + TAG, TAG) == "做法对啦" + TAG
     assert append_model_tag("做法对啦 \n", TAG) == "做法对啦" + TAG
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# strip_model_tags: the LLM never sees tags
+# ═══════════════════════════════════════════════════════════════════════
+
+def _patched_llm_tags():
+    provider = SimpleNamespace(model_tag=TAG)
+    cfg = SimpleNamespace(
+        llm_smart_providers=[provider],
+        llm_general_providers=[SimpleNamespace(model_tag="『B』")],
+        llm_multimodal_providers=[],
+    )
+    return patch("kouhai_bot.llm.get_config", return_value=cfg)
+
+
+def test_strip_model_tags_removes_trailing_tags_only():
+    from kouhai_bot.llm import strip_model_tags
+
+    assert strip_model_tags("思路对啦" + TAG, [TAG]) == "思路对啦"
+    assert strip_model_tags("思路对啦" + TAG + "『B』", [TAG, "『B』"]) == "思路对啦"
+    assert strip_model_tags("思路对啦", [TAG]) == "思路对啦"
+    # Mid-text occurrences are user content and must survive.
+    assert strip_model_tags(f"他发的{TAG}是啥", [TAG]) == f"他发的{TAG}是啥"
+    assert strip_model_tags("", [TAG]) == ""
+
+
+def test_strip_model_tags_uses_configured_tags():
+    from kouhai_bot.llm import strip_model_tags
+
+    with _patched_llm_tags():
+        assert strip_model_tags("思路对啦" + TAG) == "思路对啦"
+        assert strip_model_tags("思路对啦" + "『B』") == "思路对啦"
+    with patch("kouhai_bot.llm.get_config", side_effect=RuntimeError("no config")):
+        assert strip_model_tags("思路对啦" + TAG) == "思路对啦" + TAG
+
+
+def test_history_dialogue_strips_tags_from_bot_turns():
+    from kouhai_bot.handlers.shared import _history_dialogue
+
+    records = [
+        # Legacy judge record with embedded tag in reply.
+        {**_judge_record("相邻区间讲清楚呀～" + TAG)},
+        # Reason-only incorrect record whose reason carries an echo tag.
+        {**_judge_record(""), "result": "incorrect", "reason": "会 TLE" + TAG},
+    ]
+    with _patched_llm_tags():
+        dialogue = _history_dialogue(records)
+    bot_contents = [turn["content"] for turn in dialogue if turn["role"] == "assistant"]
+    assert bot_contents == ["相邻区间讲清楚呀～", "会 TLE"]
+    assert all(TAG not in content for content in bot_contents)
 
 
 # ═══════════════════════════════════════════════════════════════════════

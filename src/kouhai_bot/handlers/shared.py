@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import get_config
-from ..llm import ChatCompletionResult, chat_completion, strip_leaked_thinking
+from ..llm import ChatCompletionResult, append_model_tag, chat_completion, strip_leaked_thinking, strip_model_tags
 from ..problem_content import (
     format_problem_statement_for_llm,
     load_statement_json,
@@ -992,7 +992,9 @@ def _history_dialogue(history: list[dict] | None) -> list[dict]:
                 user_turn["verdict"] = result
             dialogue.append(user_turn)
 
-        reply = str(item.get("reply", "") or "").strip()
+        # Tags are display-only metadata; the LLM must never see them
+        # (legacy records embedded them in the stored reply).
+        reply = strip_model_tags(str(item.get("reply", "") or "").strip())
         if reply:
             dialogue.append({
                 "turn": len(dialogue) + 1,
@@ -1002,7 +1004,7 @@ def _history_dialogue(history: list[dict] | None) -> list[dict]:
                 "note": "bot_feedback_not_user_claim",
             })
 
-        reason = str(item.get("reason", "") or "").strip()
+        reason = strip_model_tags(str(item.get("reason", "") or "").strip())
         if reason and not reply:
             dialogue.append({
                 "turn": len(dialogue) + 1,

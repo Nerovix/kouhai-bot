@@ -448,18 +448,23 @@ An empty `model_tag` disables the feature per-provider.
 
 Persistence and derived surfaces (all user-visible LLM output carries the tag):
 
-- Judge (`/submit`) context records persist the tag as a dedicated `model_tag` field
-  (`_context_record` in `handlers/cmd/submit.py`; set only when non-empty, so legacy
-  records simply have no tag). Clarify/review records instead embed the tag inside the
-  stored `reply` string at save time — they carry no dedicated field.
-- `llm.append_model_tag(text, tag)` is the shared append helper. Besides rstripping,
-  it refuses to double a tag the text already ends with: an LLM that saw tagged
-  dialogue history can echo the suffix in its own reply, and both storage
-  conventions must stay single-rendered.
+- **The LLM never sees tags.** Tags are display-only metadata. All context records
+  (judge/clarify/review) store the raw LLM text plus a dedicated `model_tag` field
+  (`_context_record` in `handlers/cmd/submit.py`, set only when non-empty). The
+  prompt builders (`shared._history_dialogue`, `submit._build_review_history`) run
+  stored `reply`/`reason` through `llm.strip_model_tags`, which removes trailing
+  configured-tag suffixes — covering both legacy records that embedded the tag in
+  the stored reply and tags an LLM may echo from earlier dialogue. Mid-text
+  occurrences are user content and are never stripped.
+- `llm.append_model_tag(text, tag)` is the single display-time append helper used by
+  every QQ send path (submit correct/incorrect, clarify, review, sync cheer). Besides
+  rstripping, it refuses to double a tag the text already ends with (the same echo
+  case, at render time).
 - The forwarded history card (`private_judge.format_history_records`, used by `/sync`
   and private judge) renders the tag at the end of every 🤖 line, and for empty-reply
   incorrect verdicts falls back to `reason` + `。再想想？🤔` exactly like the live
-  message in `submit.py:_finalize_submit`.
+  message in `submit.py:_finalize_submit`. Legacy records whose `reply` already
+  embeds the tag render it once (no field → no append).
 - The `/sync` scored cheer (private AC synced into the group scoreboard) appends the
   tag of the synced private correct record. The scoring gate and tag lookup share
   `private_judge.first_correct_submit_record` so they cannot drift; the cheer format

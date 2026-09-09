@@ -2194,9 +2194,20 @@ def test_review_after_pending_submit_uses_snapshotted_solved_problem():
 
 
 def test_submit_off_topic():
-    """Model-marked off-topic → 123 reaction, no message."""
+    """Model-marked off-topic → 123 reaction, no message, no history record."""
     _reset_state()
     _setup_problem()
+    prior_record = {
+        "timestamp": "2026-09-09T11:00:00+08:00",
+        "type": "submit",
+        "content": "earlier real submission",
+        "result": "incorrect",
+        "reason": "不对",
+        "reply": "再想想～",
+        "problem": PID,
+        "request_id": "local-prior",
+    }
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {str(UID): [prior_record]}})
     global _deepseek_response
     _deepseek_response = {"correct": False, "reason": "", "reply": "", "reaction": "123"}
 
@@ -2206,6 +2217,11 @@ def test_submit_off_topic():
 
     assert any(r[1] == "123" for r in _reacted), f"Expected 123, got {_reacted}"
     assert len(_sent) == 0, f"Expected no message for off-topic"
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        sb = json.load(f)
+    records = sb.get("user_submissions", {}).get(str(UID), [])
+    # The off-topic submit leaves no trace; the earlier real record survives.
+    assert records == [prior_record], f"Expected only the prior record, got: {records}"
     _cleanup()
     print("✅ submit: off-topic")
 
@@ -2219,11 +2235,12 @@ def test_private_submit_off_topic_sends_face_123():
     with _all_patches():
         from kouhai_bot.handlers.cmd.submit import handle
         from kouhai_bot.handlers.shared import get_today_problem
-        from kouhai_bot.private_judge import set_private_current_problem
+        from kouhai_bot.private_judge import load_private_state, set_private_current_problem
 
         set_private_current_problem(UID, get_today_problem(GID))
         asyncio.run(handle(**_kwargs(_make_private_event("/submit 傻逼"))))
 
+        state = load_private_state(UID)
     face_segments = [
         seg
         for item in _private_sent if item["user_id"] == UID
@@ -2233,8 +2250,36 @@ def test_private_submit_off_topic_sends_face_123():
     assert "123" in face_ids, _private_sent
     private_text = "\n".join(_last_text_item(item) for item in _private_sent if item["user_id"] == UID)
     assert "😵" not in private_text, private_text
+    assert state.get("user_submissions", []) == [], \
+        f"Off-topic private submit must leave no record, got: {state.get('user_submissions')}"
     _cleanup()
     print("✅ private submit: off-topic uses face 123")
+
+
+def test_clarify_off_topic_leaves_no_record():
+    """Off-topic clarify → 123 reaction, and the pending record is dropped."""
+    _reset_state()
+    _setup_problem()
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    global _deepseek_response
+    _deepseek_response = '{"reply": "", "reaction": "123"}'
+
+    ctx_file = os.path.join(_data_dir(), "groups", f"groupctx_{GID}.json")
+    with open(ctx_file, "w") as f:
+        json.dump([{"role": "assistant", "content": "J(x)=所有gcd(k,x/k)=1的因子k之和。"}], f)
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.clarify import handle
+        asyncio.run(handle(**_kwargs(_make_event("/clarify 今天天气怎么样"))))
+
+    assert any(r[1] == "123" for r in _reacted), f"Expected 123, got {_reacted}"
+    assert len(_sent) == 0, f"Expected no message for off-topic clarify"
+    with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
+        sb = json.load(f)
+    records = sb.get("user_submissions", {}).get(str(UID), [])
+    assert records == [], f"Off-topic clarify must leave no record, got: {records}"
+    _cleanup()
+    print("✅ clarify: off-topic leaves no record")
 
 
 def test_submit_operation_not_blocked():

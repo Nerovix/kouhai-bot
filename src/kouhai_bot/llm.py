@@ -56,6 +56,62 @@ class _ChatCompletionAttempt:
     usage: dict | None = None
 
 
+def append_model_tag(text: str, model_tag: str) -> str:
+    """Append a provider model tag to an LLM-generated message.
+
+    No-op for empty tags, and skips doubling when the text already ends with
+    the tag (an LLM can echo the suffix it saw in its dialogue history).
+    """
+    text = str(text or "").rstrip()
+    if not model_tag or text.endswith(model_tag):
+        return text
+    return text + model_tag
+
+
+def configured_model_tags() -> list[str]:
+    """All non-empty provider model tags across every fallback queue."""
+    try:
+        cfg = get_config()
+    except Exception:
+        return []
+    tags: list[str] = []
+    queues = (
+        getattr(cfg, "llm_smart_providers", None),
+        getattr(cfg, "llm_general_providers", None),
+        getattr(cfg, "llm_multimodal_providers", None),
+    )
+    for providers in queues:
+        for provider in providers or []:
+            tag = str(getattr(provider, "model_tag", "") or "").strip()
+            if tag and tag not in tags:
+                tags.append(tag)
+    return tags
+
+
+def strip_model_tags(text: str, tags: list[str] | None = None) -> str:
+    """Remove trailing model-tag suffixes from text meant for LLM prompts.
+
+    The LLM must never see tags: they are display-only metadata. Legacy
+    records embedded the tag in the stored reply, and an LLM can echo a tag
+    it saw earlier — both surface as trailing suffixes. Only trailing
+    occurrences are stripped, so user content quoting a tag mid-text is
+    untouched.
+    """
+    if not text:
+        return text
+    if tags is None:
+        tags = configured_model_tags()
+    stripped = text
+    removed = True
+    while removed:
+        removed = False
+        for tag in tags:
+            if tag and stripped.endswith(tag):
+                stripped = stripped[: -len(tag)].rstrip()
+                removed = True
+    return stripped
+
+
 def _chat_completions_url(base_url: str) -> str:
     """Build the /chat/completions URL from a provider base URL.
 

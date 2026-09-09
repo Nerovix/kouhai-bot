@@ -454,6 +454,34 @@ The tag reflects which provider actually served the request. If the primary prov
 succeeded, its tag is used. If a fallback provider was invoked, its tag appears instead.
 An empty `model_tag` disables the feature per-provider.
 
+Persistence and derived surfaces (all user-visible LLM output carries the tag):
+
+- **The LLM never sees tags.** Tags are display-only metadata. All context records
+  (judge/clarify/review) store the raw LLM text plus a dedicated `model_tag` field
+  (`_context_record` in `handlers/cmd/submit.py`, set only when non-empty). The
+  prompt builders (`shared._history_dialogue`, `submit._build_review_history`) run
+  stored `reply`/`reason` through `llm.strip_model_tags`, which removes trailing
+  configured-tag suffixes — covering both legacy records that embedded the tag in
+  the stored reply and tags an LLM may echo from earlier dialogue. Mid-text
+  occurrences are user content and are never stripped.
+- `llm.append_model_tag(text, tag)` is the single display-time append helper used by
+  every QQ send path (submit correct/incorrect, clarify, review, sync cheer). Besides
+  rstripping, it refuses to double a tag the text already ends with (the same echo
+  case, at render time).
+- The forwarded history card (`private_judge.format_history_records`, used by `/sync`
+  and private judge) renders the tag at the end of every 🤖 line, and for empty-reply
+  incorrect verdicts falls back to `reason` + `。再想想？🤔` exactly like the live
+  message in `submit.py:_finalize_submit`. Legacy records whose `reply` already
+  embeds the tag render it once (no field → no append).
+- The `/sync` scored cheer (private AC synced into the group scoreboard) appends the
+  tag of the synced private correct record. The scoring gate and tag lookup share
+  `private_judge.first_correct_submit_record` so they cannot drift; the cheer format
+  (including the named-group `🏆 {display_name} Top 5：` title) mirrors
+  `_send_scoreboard_success`.
+- The annotation bundle exporter (`annotations/exporter.py`) carries `model_tag` in
+  both its per-round and `history_before` whitelists, keeping exported provenance
+  symmetric with what users saw.
+
 ## Data Directory
 
 `~/.kouhai-bot/` — mirrors the old `~/.daily-problem/` structure:
@@ -532,6 +560,11 @@ Key rules:
   Final handling updates that same record in place. Superseded unanswered `/submit`,
   timeout, and service-failure records therefore remain historical context across
   restarts with empty `reason`/`reply`.
+- **Offtopic leaves no record**: when the judge marks a `/submit` or `/clarify` as
+  offtopic (`reaction="123"`), the pending record is removed by `request_id`
+  (`remove_user_submission` / `remove_private_submission`) — the interaction is
+  treated as if it never happened: it does not appear in the history card, judge
+  prompts, or `/sync` counts.
 - **Short state critical sections**: JSON read/modify/write endpoints are protected by
   the relevant group/private coordinator async lock. LLM calls never hold this lock.
   `/sync` also uses the group coordinator lock when it writes group `scoreboard.json`.

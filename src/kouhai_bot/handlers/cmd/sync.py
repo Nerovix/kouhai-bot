@@ -9,24 +9,30 @@ from collections import Counter
 from .. import registry
 from ..registry import CommandDef
 from ...napcat.client import build_at, build_plain_message, build_text, react_emoji, send_group_msg, send_private_msg
+from ...llm import append_model_tag
 from ...private_judge import (
     GROUP_SCOPE,
     PRIVATE_SCOPE,
     copy_records,
     current_group_pid,
+    first_correct_submit_record,
     get_private_current_pid,
     group_problem_history,
     is_group_problem_solved,
     load_private_problem_history,
     mark_private_solved,
-    private_record_has_correct,
     replace_group_problem_clarifies,
     replace_group_problem_history,
     replace_private_problem_clarifies,
     replace_private_problem_history,
     send_history_card,
 )
-from ...user_groups import get_user_group, is_dynamic_submit_delay_enabled, submit_remaining_sec
+from ...user_groups import (
+    get_user_group,
+    is_default_group,
+    is_dynamic_submit_delay_enabled,
+    submit_remaining_sec,
+)
 from ..shared import (
     fetch_group_member_nickname_map,
     format_points,
@@ -90,7 +96,9 @@ def _synced_record_counts(records: list[dict], *, scored_correct: bool) -> dict[
     }
 
 
-async def _score_synced_private_ac(group_id: int, user_id: int, sender: dict, pid: str) -> tuple[str, bool]:
+async def _score_synced_private_ac(
+    group_id: int, user_id: int, sender: dict, pid: str, model_tag: str = "",
+) -> tuple[str, bool]:
     problem = get_today_problem(group_id)
     if not problem or str(problem.get("today", "") or "") != pid:
         return "", False
@@ -109,6 +117,7 @@ async def _score_synced_private_ac(group_id: int, user_id: int, sender: dict, pi
     if updated is None:
         return "群里已经有人先通过这题了，本次只同步记录，不再加分。", False
     is_fb, solved, top5, sb = updated
+    user_group = None
     ranked = []
     try:
         user_group = get_user_group(user_id)
@@ -129,7 +138,12 @@ async def _score_synced_private_ac(group_id: int, user_id: int, sender: dict, pi
     lines = [cheer]
     if top5:
         nickname_map = await fetch_group_member_nickname_map(group_id)
-        lines.extend(["", "🏆 Top 5："])
+        top_title = (
+            "🏆 Top 5："
+            if user_group is None or is_default_group(user_group)
+            else f"🏆 {user_group.display_name} Top 5："
+        )
+        lines.extend(["", top_title])
         for entry in top5:
             uid = str(entry["user_id"])
             name = nickname_map.get(uid) or entry["nickname"] or uid
@@ -140,7 +154,7 @@ async def _score_synced_private_ac(group_id: int, user_id: int, sender: dict, pi
     if reveal:
         lines.extend(["", reveal])
     schedule_post_solve_editorial_followup(group_id, pid)
-    return "\n".join(lines), True
+    return append_model_tag("\n".join(lines), model_tag), True
 
 
 async def handle(group_id: int, user_id: int, sender: dict,
@@ -232,8 +246,15 @@ async def handle(group_id: int, user_id: int, sender: dict,
     extra = ""
     scored_correct = False
     if target_scope == GROUP_SCOPE and source_scope == PRIVATE_SCOPE and not starred_limited:
-        if private_record_has_correct(source_records, pid):
-            extra, scored_correct = await _score_synced_private_ac(group_id, user_id, sender, pid)
+        correct_record = first_correct_submit_record(source_records, pid)
+        if correct_record is not None:
+            extra, scored_correct = await _score_synced_private_ac(
+                group_id,
+                user_id,
+                sender,
+                pid,
+                model_tag=str(correct_record.get("model_tag", "") or ""),
+            )
     elif starred_limited:
         extra = "你是打星用户且目前还在提交 CD 内，本次仅同步 clarify，submit/review/通过记录已忽略。"
 

@@ -936,6 +936,25 @@ def save_user_submission(group_id: int, user_id: int, submission: dict) -> None:
     save_scoreboard(group_id, sb)
 
 
+def remove_user_submission(group_id: int, user_id: int, request_id: str) -> None:
+    """Drop one record by request_id — used when an interaction is judged
+    offtopic and must leave no trace in the history."""
+    request_id = str(request_id or "")
+    if not request_id:
+        return
+    sb = load_scoreboard(group_id)
+    submissions = sb.get("user_submissions", {})
+    items = submissions.get(str(user_id))
+    if not isinstance(items, list):
+        return
+    kept = [item for item in items if str(item.get("request_id", "") or "") != request_id]
+    if len(kept) == len(items):
+        return
+    submissions[str(user_id)] = kept
+    sb["user_submissions"] = submissions
+    save_scoreboard(group_id, sb)
+
+
 def clear_user_problem_submissions(group_id: int, user_id: int, pid: str) -> int:
     sb = load_scoreboard(group_id)
     submissions = sb.get("user_submissions", {})

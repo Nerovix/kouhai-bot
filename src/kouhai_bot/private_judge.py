@@ -219,6 +219,24 @@ def save_private_submission(user_id: int, submission: dict) -> None:
     save_private_state(user_id, state)
 
 
+def remove_private_submission(user_id: int, request_id: str) -> None:
+    """Drop one record by request_id — used when an interaction is judged
+    offtopic and must leave no trace in the history."""
+    request_id = str(request_id or "")
+    if not request_id:
+        return
+    state = load_private_state(user_id)
+    items = state.get("user_submissions", [])
+    kept = [
+        item for item in items
+        if not isinstance(item, dict) or str(item.get("request_id", "") or "") != request_id
+    ]
+    if len(kept) == len(items):
+        return
+    state["user_submissions"] = kept
+    save_private_state(user_id, state)
+
+
 def replace_private_problem_history(user_id: int, pid: str, records: list[dict]) -> None:
     state = load_private_state(user_id)
     target = str(pid or "")

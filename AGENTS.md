@@ -552,6 +552,11 @@ Key rules:
   Final handling updates that same record in place. Superseded unanswered `/submit`,
   timeout, and service-failure records therefore remain historical context across
   restarts with empty `reason`/`reply`.
+- **Offtopic leaves no record**: when the judge marks a `/submit` or `/clarify` as
+  offtopic (`reaction="123"`), the pending record is removed by `request_id`
+  (`remove_user_submission` / `remove_private_submission`) — the interaction is
+  treated as if it never happened: it does not appear in the history card, judge
+  prompts, or `/sync` counts.
 - **Short state critical sections**: JSON read/modify/write endpoints are protected by
   the relevant group/private coordinator async lock. LLM calls never hold this lock.
   `/sync` also uses the group coordinator lock when it writes group `scoreboard.json`.

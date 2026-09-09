@@ -42,6 +42,7 @@ from ..shared import (
     rating_to_points,
     remember_problem_rating,
     parse_json_with_llm_repair,
+    remove_user_submission,
     save_scoreboard,
     save_user_submission,
     second_judge_submission_result,
@@ -75,6 +76,7 @@ from ...private_judge import (
     load_private_problem_history,
     mark_group_problem_private_notified,
     mark_private_solved,
+    remove_private_submission,
     replace_private_problem_history,
     save_private_submission,
     send_problem_card_private,
@@ -742,6 +744,18 @@ class GroupCoordinator:
                 save_user_submission(req.group_id, req.user_id, record)
             return True
 
+    async def _remove_context_record(self, req: PendingRequest) -> None:
+        """Drop the enqueue-time pending record: an offtopic interaction is
+        treated as if the conversation never happened."""
+        async with self.lock:
+            request_id = _request_id(req)
+            if not request_id:
+                return
+            if req.is_private:
+                remove_private_submission(req.user_id, request_id)
+            else:
+                remove_user_submission(req.group_id, req.user_id, request_id)
+
     async def _run_request(self, req: PendingRequest) -> None:
         try:
             if req.discarded:
@@ -1297,6 +1311,7 @@ class GroupCoordinator:
         if reaction == "123":
             self._log_finished(req, "offtopic", problem=pid)
             await _react_req(req, "123")
+            await self._remove_context_record(req)
             req.submit_judge_done = True
             req.submit_correct = False
             await self._resolve_submit_scores(pid)
@@ -1409,6 +1424,7 @@ class GroupCoordinator:
         if parsed.get("reaction") == "123":
             self._log_finished(req, "offtopic", problem=pid)
             await _react_req(req, "123")
+            await self._remove_context_record(req)
             await self._finish_request(req)
             return
 

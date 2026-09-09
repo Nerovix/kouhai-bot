@@ -19,6 +19,7 @@ from ...private_judge import (
     is_group_problem_solved,
     load_private_problem_history,
     mark_private_solved,
+    private_correct_record_model_tag,
     private_record_has_correct,
     replace_group_problem_clarifies,
     replace_group_problem_history,
@@ -90,7 +91,9 @@ def _synced_record_counts(records: list[dict], *, scored_correct: bool) -> dict[
     }
 
 
-async def _score_synced_private_ac(group_id: int, user_id: int, sender: dict, pid: str) -> tuple[str, bool]:
+async def _score_synced_private_ac(
+    group_id: int, user_id: int, sender: dict, pid: str, model_tag: str = "",
+) -> tuple[str, bool]:
     problem = get_today_problem(group_id)
     if not problem or str(problem.get("today", "") or "") != pid:
         return "", False
@@ -140,7 +143,10 @@ async def _score_synced_private_ac(group_id: int, user_id: int, sender: dict, pi
     if reveal:
         lines.extend(["", reveal])
     schedule_post_solve_editorial_followup(group_id, pid)
-    return "\n".join(lines), True
+    text = "\n".join(lines)
+    if model_tag:
+        text = text.rstrip() + model_tag
+    return text, True
 
 
 async def handle(group_id: int, user_id: int, sender: dict,
@@ -233,7 +239,13 @@ async def handle(group_id: int, user_id: int, sender: dict,
     scored_correct = False
     if target_scope == GROUP_SCOPE and source_scope == PRIVATE_SCOPE and not starred_limited:
         if private_record_has_correct(source_records, pid):
-            extra, scored_correct = await _score_synced_private_ac(group_id, user_id, sender, pid)
+            extra, scored_correct = await _score_synced_private_ac(
+                group_id,
+                user_id,
+                sender,
+                pid,
+                model_tag=private_correct_record_model_tag(source_records, pid),
+            )
     elif starred_limited:
         extra = "你是打星用户且目前还在提交 CD 内，本次仅同步 clarify，submit/review/通过记录已忽略。"
 

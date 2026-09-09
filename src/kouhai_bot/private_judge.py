@@ -696,13 +696,16 @@ def format_history_records(records: list[dict], *, user_display_name: str) -> st
     for item in records:
         content = _one_line(item.get("content", ""))
         reply = _one_line(item.get("reply", ""))
+        # Judge records persist the model tag as a dedicated field; clarify/review
+        # records embed it in `reply` at save time, so no double rendering here.
+        tag = _one_line(item.get("model_tag", ""))
         if content and reply:
             lines.append(f"👤：{content}")
-            lines.append(f"🤖：{reply}")
+            lines.append(f"🤖：{reply}{tag}")
         elif content:
             lines.append(f"👤：{content}")
         elif reply:
-            lines.append(f"🤖：{reply}")
+            lines.append(f"🤖：{reply}{tag}")
     return "\n".join(lines)
 
 
@@ -804,6 +807,19 @@ def private_record_has_correct(records: list[dict], pid: str) -> bool:
         and item.get("result") == "correct"
         for item in records
     )
+
+
+def private_correct_record_model_tag(records: list[dict], pid: str) -> str:
+    """Model tag of the first correct submit record for `pid` (empty when absent)."""
+    target = str(pid or "")
+    for item in records:
+        if (
+            str(item.get("problem", "") or "") == target
+            and item.get("type") == "submit"
+            and item.get("result") == "correct"
+        ):
+            return str(item.get("model_tag", "") or "")
+    return ""
 
 
 def copy_records(records: list[dict]) -> list[dict]:

@@ -481,6 +481,7 @@ def _context_record(
     reason: str = "",
     reply: str = "",
     problem: str = "",
+    model_tag: str = "",
 ) -> dict:
     record = {
         "timestamp": req.admitted_wall.isoformat(),
@@ -494,6 +495,8 @@ def _context_record(
     request_id = _request_id(req)
     if request_id:
         record["request_id"] = request_id
+    if model_tag:
+        record["model_tag"] = model_tag
     return record
 
 
@@ -1309,6 +1312,7 @@ class GroupCoordinator:
                 reason=reason,
                 reply=reply,
                 problem=pid,
+                model_tag=model_tag,
             ),
         )
         req.submit_judge_done = True

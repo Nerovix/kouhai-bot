@@ -446,6 +446,21 @@ The tag reflects which provider actually served the request. If the primary prov
 succeeded, its tag is used. If a fallback provider was invoked, its tag appears instead.
 An empty `model_tag` disables the feature per-provider.
 
+Persistence and derived surfaces (all user-visible LLM output carries the tag):
+
+- Judge (`/submit`) context records persist the tag as a dedicated `model_tag` field
+  (`_context_record` in `handlers/cmd/submit.py`; set only when non-empty, so legacy
+  records simply have no tag). Clarify/review records instead embed the tag inside the
+  stored `reply` string at save time — they carry no dedicated field, which is why
+  `private_judge.format_history_records` appends `record["model_tag"]` to 🤖 lines
+  without double-rendering.
+- The forwarded history card (`/sync`, private judge) renders the tag at the end of
+  every 🤖 line.
+- The `/sync` scored cheer (private AC synced into the group scoreboard) appends the
+  tag of the synced private correct record via
+  `private_judge.private_correct_record_model_tag`, matching the in-group
+  `/submit` scoreboard message format.
+
 ## Data Directory
 
 `~/.kouhai-bot/` — mirrors the old `~/.daily-problem/` structure:

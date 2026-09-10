@@ -177,6 +177,8 @@ def test_build_second_judge_messages_contains_review_contract():
     payload = json.loads(messages[1]["content"])
     assert "一审 bot 做出判定时看不到官方题解" in system_text
     assert "不是题解匹配器" in system_text
+    assert "不泄露正解" in system_text
+    assert "不要转述出可直接当正解使用的完整做法" in system_text
     assert "和官方题解完全不同" in system_text
     assert "不是重新审查完整性" in system_text
     assert "这些完整性问题已经由一审处理" in system_text

@@ -64,7 +64,7 @@ Bot 根据任务类型路由到两个模型队列：
 
 > 配置中的 `model_tag` 是一个标记，会附在 bot 的每个需要 llm 接入的请求尾部，以便用户知晓自己的请求是由哪个模型处理的，~~以便开骂~~
 
-> 在我们的测试中，GPT-5.6 系列基本胜任，GLM-5.2/5.3 也相当不错，DeepSeek V4 系列可用；general_model 需要 vision 时，Gemini Flash 系列是便宜好用的选择。
+> 在我们的测试中，GPT-5.6 系列基本胜任，GLM-5.2/5.3 也相当不错，DeepSeek V4 系列可用。general_model 的候选：DeepSeek Flash、MiniMax M3、GPT-5.6 Luna、Gemini Flash 等支持图片输入的模型都是不错的选择。
 
 每个 provider 支持的字段：
 - `name`（必填）：provider 名称

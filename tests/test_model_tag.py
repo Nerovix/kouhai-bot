@@ -207,7 +207,6 @@ def _patched_llm_tags():
     cfg = SimpleNamespace(
         llm_smart_providers=[provider],
         llm_general_providers=[SimpleNamespace(model_tag="『B』")],
-        llm_multimodal_providers=[],
     )
     return patch("kouhai_bot.llm.get_config", return_value=cfg)
 

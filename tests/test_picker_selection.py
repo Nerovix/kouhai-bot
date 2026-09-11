@@ -126,7 +126,6 @@ def test_fetch_statement_retries_after_parse_failure(monkeypatch, tmp_path):
     """A first attempt that yields an unusable page (challenge/redirect
     variant) must be retried once before giving up."""
     _configure_picker_tmp(tmp_path)
-    monkeypatch.setattr(picker, "_multimodal_model_configured", lambda: True)
     fetch_calls = []
     process_calls = []
 
@@ -172,7 +171,6 @@ def test_fetch_statement_retries_after_parse_failure(monkeypatch, tmp_path):
 
 def test_fetch_statement_gives_up_after_second_parse_failure(monkeypatch, tmp_path):
     _configure_picker_tmp(tmp_path)
-    monkeypatch.setattr(picker, "_multimodal_model_configured", lambda: True)
     fetch_calls = []
 
     def fake_fetch(url):
@@ -191,34 +189,9 @@ def test_fetch_statement_gives_up_after_second_parse_failure(monkeypatch, tmp_pa
     assert len(fetch_calls) == 2
 
 
-def test_fetch_statement_skips_image_statement_without_multimodal_model(monkeypatch, tmp_path):
+def test_fetch_statement_caches_image_metadata(monkeypatch, tmp_path):
     _configure_picker_tmp(tmp_path)
 
-    monkeypatch.setattr(picker, "_multimodal_model_configured", lambda: False)
-    monkeypatch.setattr(
-        picker.cf_fetcher,
-        "fetch_html",
-        lambda url: "<div class='problem-statement'>statement</div><script>",
-    )
-    monkeypatch.setattr(
-        picker.cf_statement,
-        "process_problem",
-        lambda contest_id, index, vl_backend="none", **kwargs: {
-            "pid": f"{contest_id}{index}",
-            "text": "Statement [DIAGRAM]",
-            "formulas_found": 0,
-            "graphics_found": 1,
-            "images": [{"src": "https://codeforces.com/image.png", "kind": "graphic"}],
-        },
-    )
-
-    assert picker.fetch_statement(_problem(1, "A")) is None
-
-
-def test_fetch_statement_caches_image_metadata_with_multimodal_model(monkeypatch, tmp_path):
-    _configure_picker_tmp(tmp_path)
-
-    monkeypatch.setattr(picker, "_multimodal_model_configured", lambda: True)
     raw_html = (
         '<div class="problem-statement">'
         '<div class="title">A. Image</div>'

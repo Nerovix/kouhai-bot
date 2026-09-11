@@ -38,7 +38,6 @@ from ..shared import (
     load_problem_statement,
     load_problem_statement_json,
     load_user_submissions,
-    multimodal_model_configured,
     rating_to_points,
     remember_problem_rating,
     parse_json_with_llm_repair,
@@ -967,8 +966,6 @@ class GroupCoordinator:
 
         cfg = get_config()
         images = statement_images(stmt)
-        if images and not multimodal_model_configured():
-            return {"kind": "image_unsupported", "pid": pid}
         summary = (
             get_problem_summary(req.group_id, pid)
             if req.is_private
@@ -1398,15 +1395,6 @@ class GroupCoordinator:
             await self._save_context_record(
                 req,
                 _context_record(req, result="no_statement", problem=result.get("pid", "")),
-            )
-            await self._finish_request(req)
-            return
-        if kind == "image_unsupported":
-            self._log_finished(req, "image_unsupported", problem=result.get("pid", ""))
-            await _send_req_plain(req, "这道题包含图片，当前没有配置多模态模型，暂时没法可靠澄清题面～")
-            await self._save_context_record(
-                req,
-                _context_record(req, result="image_unsupported", problem=result.get("pid", "")),
             )
             await self._finish_request(req)
             return

@@ -256,10 +256,6 @@ async def parse_json_with_llm_repair(
 _MAX_MULTIMODAL_IMAGES = 8
 
 
-def multimodal_model_configured() -> bool:
-    return bool(get_config().llm_multimodal_providers)
-
-
 def load_problem_statement_json(pid: str) -> dict:
     """Load raw problem statement cache JSON."""
     return load_statement_json(pid)
@@ -729,13 +725,13 @@ def remember_problem_rating(group_id: int, pid: str, rating) -> None:
 
 # Results whose live message was delivered to the user: real LLM answers (an
 # incorrect verdict with an empty reply fell back to the reason live) AND
-# failure notices (timeout / service_unavailable / no_statement /
-# image_unsupported all delivered a message before the record was saved).
+# failure notices (timeout / service_unavailable / no_statement all
+# delivered a message before the record was saved).
 # Only pending and superseded never delivered anything. Shared by /bad
 # targeting and the last-interaction cache hook in submit.py.
 REPLIED_RESULTS = {
     "correct", "incorrect", "clarify", "review",
-    "timeout", "service_unavailable", "no_statement", "image_unsupported",
+    "timeout", "service_unavailable", "no_statement",
 }
 
 BAD_REPORTS_FORMAT_VERSION = 1
@@ -1903,9 +1899,6 @@ async def summarize_problem(
     """
     cfg = get_config()
     image_items = _usable_statement_images(images)
-    if image_items and not multimodal_model_configured():
-        logger.warning("summary requested for image statement without llm.multimodal_model")
-        return None, ""
     user_prompt = _build_summary_prompt(stmt_text, input_text, limits_text)
     user_content = await _multimodal_content_or_text(user_prompt, image_items)
     messages = [
@@ -1994,9 +1987,6 @@ async def translate_sample_notes(
         return None, ""
     cfg = get_config()
     image_items = _usable_statement_images(images)
-    if image_items and not multimodal_model_configured():
-        logger.warning("sample notes translation requested with images without llm.multimodal_model")
-        image_items = []
     prompt = (
         "下面是题目中与样例相关的解释（Notes）。\n"
         "请把它忠实翻译为自然、准确的中文；只做翻译，不要总结、点评、补充解释、改写成题解，"
@@ -2059,9 +2049,6 @@ async def translate_editorial_to_zh(
     }
     cfg = get_config()
     image_items = _usable_statement_images(images)
-    if image_items and not multimodal_model_configured():
-        logger.warning("editorial translation requested with images without llm.multimodal_model")
-        image_items = []
     user_prompt = json.dumps(prompt_payload, ensure_ascii=False)
     result = await call_chat_completion_result(
         [

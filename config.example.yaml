@@ -13,7 +13,7 @@ napcat_http_host: "127.0.0.1"  # NapCat HTTP API 地址
 napcat_http_port: 3000     # NapCat HTTP API 端口
 
 # ── LLM 配置 ──
-# Bot 使用三个模型队列，按顺序尝试每个 provider
+# Bot 使用两个模型队列，按顺序尝试每个 provider
 # 每个队列可以配置多个 provider，失败时自动 fallback
 llm:
   # ── smart_model：判题和复盘 ──
@@ -27,7 +27,7 @@ llm:
       reasoning_effort: "high"  # 推理强度：low/medium/high/xhigh
       model_tag: "『GPT5.6』"   # 显示在回复末尾的标记
       stream: true              # 使用 SSE 流式传输（推荐）
-    
+
     # 备选 provider
     # - name: "deepseek"
     #   api_key: "sk-..."
@@ -37,37 +37,25 @@ llm:
     #   model_tag: "『DSv4pro』"
     #   stream: true
 
-  # ── general_model：摘要、澄清、题解爬取 ──
-  # 用于题面摘要、样例解释、题解爬取、/clarify 题意澄清
-  # 可以使用更便宜的模型
+  # ── general_model：判题复盘之外的一切 ──
+  # 题面摘要、样例解释、题解爬取、/clarify（含带图题面）
+  # 可以使用更便宜的模型，但必须支持图片输入（vision），
+  # 因为带图题面的摘要和澄清也走这个队列
   general_model:
-    - name: "openai"
-      api_key: "sk-..."
-      base_url: "https://api.openai.com/v1"
-      model: "gpt-5.6-mini"
-      model_tag: "『GPT5.6mini』"
-      stream: true
-    
-    # 备选 provider
-    # - name: "qwen"
-    #   api_key: "sk-..."
-    #   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    #   model: "qwen-max"
-    #   model_tag: "『Qwen』"
-    #   stream: true  # DashScope 自动使用 SSE
-
-  # ── multimodal_model：处理带图片的题面（可选） ──
-  # 用于处理包含公式图、示意图的 Codeforces 题面
-  # 如果不配置，带图题会被跳过
-  # 注意：即使 general_model 配置的是多模态模型，也必须在这里单独配置一次
-  # 因为 multimodal 任务只会路由到 multimodal_model，不会 fallback 到 general_model
-  multimodal_model:
     - name: "openai"
       api_key: "sk-..."
       base_url: "https://api.openai.com/v1"
       model: "gpt-5.6-vision"
       model_tag: "『GPT5.6v』"
       stream: true
+
+    # 备选 provider
+    # - name: "qwen"
+    #   api_key: "sk-..."
+    #   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    #   model: "qwen-vl-max"
+    #   model_tag: "『QwenVL』"
+    #   stream: true  # DashScope 自动使用 SSE
 
 # ── 群聊配置 ──
 current_group: 987654321  # 服务的 QQ 群号

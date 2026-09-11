@@ -476,7 +476,7 @@ def test_general_model_tasks_preserve_provider_model_tag():
     assert calls[0]["model"] == "general"
 
 
-def test_multimodal_task_uses_multimodal_provider_and_preserves_image_content():
+def test_multimodal_task_uses_general_provider_and_preserves_image_content():
     provider = LlmProviderConfig(
         name="mmx",
         api_key="sk-test",
@@ -484,7 +484,7 @@ def test_multimodal_task_uses_multimodal_provider_and_preserves_image_content():
         model="mmx-vision",
         model_tag="『MMx』",
     )
-    cfg = _openai_cfg(llm_multimodal_providers=[provider])
+    cfg = _openai_cfg(llm_general_providers=[provider])
     content = [
         {"type": "text", "text": "Read this statement."},
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
@@ -519,7 +519,7 @@ def test_summarize_problem_with_images_uses_multimodal_task():
         model="mmx-vision",
         model_tag="『MMx』",
     )
-    cfg = _openai_cfg(llm_multimodal_providers=[provider], summary_timeout_sec=123)
+    cfg = _openai_cfg(llm_general_providers=[provider], summary_timeout_sec=123)
     calls = []
 
     async def fake_call(messages, **kwargs):
@@ -562,7 +562,7 @@ def test_translate_sample_notes_with_images_uses_multimodal_task():
         model="mmx-vision",
         model_tag="『MMx』",
     )
-    cfg = _openai_cfg(llm_multimodal_providers=[provider], summary_timeout_sec=123)
+    cfg = _openai_cfg(llm_general_providers=[provider], summary_timeout_sec=123)
     calls = []
 
     async def fake_call(messages, **kwargs):
@@ -594,7 +594,7 @@ def test_translate_editorial_with_images_uses_multimodal_task():
         model="mmx-vision",
         model_tag="『MMx』",
     )
-    cfg = _openai_cfg(llm_multimodal_providers=[provider], summary_timeout_sec=123)
+    cfg = _openai_cfg(llm_general_providers=[provider], summary_timeout_sec=123)
     calls = []
 
     async def fake_call(messages, **kwargs):

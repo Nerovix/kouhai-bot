@@ -50,7 +50,6 @@ def _prepared(
 def _configure(tmp_path, monkeypatch, rating=(2000, 3000)):
     cfg = SimpleNamespace(
         data_dir=str(tmp_path),
-        llm_multimodal_providers=[],
     )
     statement_dir = tmp_path / "statements"
     statement_dir.mkdir(parents=True, exist_ok=True)
@@ -245,34 +244,6 @@ def test_rating_change_invalidates_persisted_slot(tmp_path, monkeypatch):
         )
         assert await first._ensure_ready() is not None
         rating[:] = [2500, 2700]
-
-        second = NextProblemPrefetcher(GROUP_ID)
-        assert await second.peek() is None
-        assert not second.slot_path.exists()
-
-    asyncio.run(run())
-
-
-def test_multimodal_config_change_invalidates_image_slot(tmp_path, monkeypatch):
-    cfg = _configure(tmp_path, monkeypatch)
-    cfg.llm_multimodal_providers = [object()]
-    image_statement = {
-        "description": "statement",
-        "images": [{"src": "https://example.invalid/diagram.png"}],
-    }
-    monkeypatch.setattr(
-        problem_prefetch,
-        "load_statement_json",
-        lambda _pid, **_kwargs: image_statement,
-    )
-
-    async def run():
-        first = NextProblemPrefetcher(
-            GROUP_ID,
-            prepare=AsyncMock(return_value=_prepared(statement=image_statement)),
-        )
-        assert await first._ensure_ready() is not None
-        cfg.llm_multimodal_providers = []
 
         second = NextProblemPrefetcher(GROUP_ID)
         assert await second.peek() is None

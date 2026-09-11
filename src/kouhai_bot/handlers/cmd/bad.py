@@ -1,4 +1,10 @@
-"""/bad — mark the AI's latest replied interaction as unsatisfactory for replay/debugging."""
+"""/bad — mark the AI's latest delivered reply as unsatisfactory for replay/debugging.
+
+Targeting reads the per-user last-interaction cache only (written by
+_save_context_record whenever a replied record is persisted): the cache is
+scope-local, crosses problem switches, survives /clear, and /sync carries it
+across sides together with the history.
+"""
 
 from __future__ import annotations
 
@@ -8,13 +14,7 @@ from datetime import datetime
 
 from .. import registry
 from ..registry import CommandDef
-from ..shared import (
-    REPLIED_RESULTS,
-    append_bad_report,
-    load_group_last_interaction,
-    load_user_submissions,
-    record_kind,
-)
+from ..shared import append_bad_report, load_group_last_interaction
 from ...napcat.client import (
     build_at,
     build_plain_message,
@@ -30,7 +30,6 @@ from ...private_judge import (
     TZ,
     append_private_bad_report,
     load_private_last_interaction,
-    load_private_submissions,
 )
 from .submit import run_group_state_update
 
@@ -38,56 +37,6 @@ logger = logging.getLogger("kouhai-bot.cmd.bad")
 
 OK_REACTION_ID = "128076"
 NOTE_MAX_LEN = 500
-
-
-def _received_reply(record: dict) -> bool:
-    kind = record_kind(record)
-    if not kind:
-        return False
-    result = str(record.get("result", "") or "")
-    if result not in REPLIED_RESULTS:
-        # pending (still in flight) / superseded (dropped without a reply).
-        return False
-    if result in {"clarify", "review"} and not str(record.get("reply", "") or "").strip():
-        # Defensive: an LLM-answer result with an empty reply never reached
-        # the user (failure paths store their notice outside the record).
-        return False
-    return True
-
-
-def _find_bad_target(history: list[dict]) -> tuple[int, dict] | None:
-    """Latest record that actually received a reply (history is timestamp-ascending)."""
-    for idx in range(len(history) - 1, -1, -1):
-        record = history[idx]
-        if isinstance(record, dict) and _received_reply(record):
-            return idx, record
-    return None
-
-
-def _resolve_target(scope: str, group_id: int, user_id: int) -> dict | None:
-    """The latest DELIVERED reply in this scope, regardless of problem.
-
-    Primary source is the per-user last-interaction cache (survives problem
-    switches and /clear); replies older than the cache deployment fall back
-    to a full-history scan across all problems.
-    """
-    entry = (
-        load_private_last_interaction(user_id)
-        if scope == PRIVATE_SCOPE
-        else load_group_last_interaction(group_id, user_id)
-    )
-    record = entry.get("record") if isinstance(entry, dict) else None
-    if isinstance(record, dict) and _received_reply(record):
-        return record
-
-    history = (
-        load_private_submissions(user_id)
-        if scope == PRIVATE_SCOPE
-        else load_user_submissions(group_id, user_id)
-    )
-    history = sorted(history, key=lambda item: str(item.get("timestamp", "")))
-    target = _find_bad_target(history)
-    return target[1] if target else None
 
 
 async def _send_text(scope: str, group_id: int, user_id: int, text: str) -> None:
@@ -126,8 +75,13 @@ async def handle(group_id: int, user_id: int, sender: dict,
         note = note[:NOTE_MAX_LEN]
 
     try:
-        record = _resolve_target(scope, group_id, user_id)
-        if record is None:
+        entry = (
+            load_private_last_interaction(user_id)
+            if scope == PRIVATE_SCOPE
+            else load_group_last_interaction(group_id, user_id)
+        )
+        record = entry.get("record") if entry else None
+        if not isinstance(record, dict):
             await _send_text(
                 scope, group_id, user_id,
                 "这边还没有可以标注的 AI 回复哦～先 /submit、/clarify 或 /review 一次，"

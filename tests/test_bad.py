@@ -375,35 +375,6 @@ def test_save_context_record_cache_respects_clear_watermark(tmp_path):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# _received_reply classification
-# ═══════════════════════════════════════════════════════════════════════
-
-def test_received_reply_classifies_records():
-    f = bad_cmd._received_reply
-    # Legacy record without "type" still counts via the result fallback.
-    assert f({"result": "correct", "reply": ""})
-    assert f({"result": "incorrect", "reply": "", "reason": "复杂度错了"})
-    assert f({"type": "clarify", "result": "clarify", "reply": "J(x) 是…"})
-    assert f({"type": "review", "result": "review", "reply": "复盘…"})
-    # Failure notices were delivered to the user, so they are markable.
-    assert f({"type": "submit", "result": "timeout"})
-    assert f({"type": "submit", "result": "service_unavailable"})
-    assert f({"type": "submit", "result": "no_statement"})
-    assert f({"type": "submit", "result": "image_unsupported"})
-    assert f({"type": "clarify", "result": "service_unavailable", "reply": ""})
-    # Never-delivered outcomes.
-    assert not f({"type": "submit", "result": "pending"})
-    assert not f({"type": "submit", "result": "superseded"})
-    # Defensive: an LLM-answer result with an empty reply never reached the user.
-    assert not f({"type": "clarify", "result": "clarify", "reply": ""})
-    assert not f({"type": "review", "result": "review", "reply": "   "})
-    # Unknown kinds never count.
-    assert not f({"type": "clear", "result": "cleared"})
-    assert not f({"result": "whatever"})
-    assert not f({"result": "timeout"})  # failure result but not an interaction kind
-
-
-# ═══════════════════════════════════════════════════════════════════════
 # Handler — group scope
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -476,47 +447,6 @@ def test_bad_group_survives_clear(tmp_path):
     assert data["reports"][0]["target"]["record"]["reply"] == "clear 前的回复"
 
 
-def test_bad_group_fallback_scans_history_across_problems(tmp_path):
-    """缓存之前的旧回复（迁移期）：全历史扫描，跨题目取最新已回复。"""
-    _reset_captures()
-    _write_group_state(tmp_path, pid=OTHER_PID)
-    _write_scoreboard(tmp_path, [
-        _record("2026-09-11T19:00:00+08:00", type_="clarify", result="clarify",
-                reply="旧题回复", pid=PID, request_id="local-1"),
-        _record("2026-09-11T20:00:03+08:00", type_="submit", result="correct",
-                reply="新题回复", pid=OTHER_PID, request_id="local-2"),
-        _record("2026-09-11T20:00:04+08:00", type_="submit", result="pending",
-                pid=OTHER_PID, request_id="local-3"),
-    ])
-
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
-
-    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
-    assert data["reports"][0]["target"]["record"]["request_id"] == "local-2"
-    assert data["reports"][0]["target"]["problem"] == OTHER_PID
-
-
-def test_bad_group_corrupt_cache_falls_back_to_history(tmp_path):
-    _reset_captures()
-    _group_cache_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
-    _group_cache_path(tmp_path).write_text("{not json", encoding="utf-8")
-    _write_scoreboard(tmp_path, [
-        _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify",
-                reply="历史里的回复", request_id="local-1"),
-    ])
-
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
-
-    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
-    assert data["reports"][0]["target"]["record"]["reply"] == "历史里的回复"
-
-
 def test_bad_group_marks_delivered_failure_notice(tmp_path):
     """A timeout that delivered '模型服务出故障了' is a markable latest reply."""
     _reset_captures()
@@ -536,21 +466,26 @@ def test_bad_group_marks_delivered_failure_notice(tmp_path):
     assert data["reports"][0]["target"]["record"]["result"] == "timeout"
 
 
-def test_bad_group_no_target(tmp_path):
+def test_bad_group_no_target_without_cache(tmp_path):
+    """Cache-only targeting: stored history alone (e.g. replies that predate
+    the cache) is deliberately NOT consulted — no cache entry, nothing to mark."""
     _reset_captures()
-    # No cache, no replied history (empty and all-never-delivered variants).
-    for records in ([], [
+    _write_group_state(tmp_path)
+    _write_scoreboard(tmp_path, [
         _record("2026-09-11T20:00:01+08:00", type_="submit", result="pending", request_id="local-1"),
         _record("2026-09-11T20:00:02+08:00", type_="submit", result="superseded", request_id="local-2"),
-    ]):
-        _write_scoreboard(tmp_path, records)
-        with ExitStack() as stack:
-            for p in _patches(tmp_path):
-                stack.enter_context(p)
-            asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
-        assert "还没有可以标注的 AI 回复" in _last_group_text(), _sent
-        assert not _group_reports_path(tmp_path).exists()
-        assert not _reacted
+        _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify",
+                reply="历史里的回复", request_id="local-3"),
+    ])
+
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
+
+    assert "还没有可以标注的 AI 回复" in _last_group_text(), _sent
+    assert not _group_reports_path(tmp_path).exists()
+    assert not _reacted
 
 
 def test_bad_group_repeat_appends_new_report(tmp_path):

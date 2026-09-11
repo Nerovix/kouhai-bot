@@ -3091,16 +3091,11 @@ def test_private_bad_dispatches_and_records_report():
         from kouhai_bot.handlers.registry import discover_commands
         from kouhai_bot.private_judge import (
             load_private_bad_reports,
-            save_private_submission,
-            set_private_current_problem,
+            remember_private_last_interaction,
         )
 
         discover_commands()
-        set_private_current_problem(UID, {
-            "today": PID, "contestId": 542, "index": "D",
-            "name": "Superhero's Job", "rating": 2600,
-        })
-        save_private_submission(UID, {
+        remember_private_last_interaction(UID, {
             "timestamp": "2026-09-11T20:00:03+08:00",
             "type": "clarify",
             "content": "J(x) 是什么",
@@ -3131,8 +3126,17 @@ def test_private_bad_dispatches_and_records_report():
 def test_group_bad_dispatches_and_normalizes_command_case():
     _reset_state()
     _setup_problem()
-    _write_scoreboard(GID, {"solves": [], "user_submissions": {str(UID): [
-        {
+
+    with _all_patches():
+        from kouhai_bot.handlers import process_event
+        from kouhai_bot.handlers.registry import discover_commands
+        from kouhai_bot.handlers.shared import (
+            load_bad_reports,
+            remember_group_last_interaction,
+        )
+
+        discover_commands()
+        remember_group_last_interaction(GID, UID, {
             "timestamp": "2026-09-11T20:00:03+08:00",
             "type": "clarify",
             "content": "J(x) 是什么",
@@ -3141,15 +3145,7 @@ def test_group_bad_dispatches_and_normalizes_command_case():
             "reply": "J(x) 是特殊因子和…",
             "problem": PID,
             "request_id": "local-1",
-        },
-    ]}})
-
-    with _all_patches():
-        from kouhai_bot.handlers import process_event
-        from kouhai_bot.handlers.registry import discover_commands
-        from kouhai_bot.handlers.shared import load_bad_reports
-
-        discover_commands()
+        })
         # The dispatcher canonicalizes the command token, so /BAD reaches the
         # handler as /bad with the note intact.
         asyncio.run(process_event(_make_event("/BAD 判错了"), spawn_handlers=False))
@@ -5449,6 +5445,56 @@ def test_sync_private_correct_current_problem_scores_for_normal_user():
     assert ("msg_001", "128076") in _reacted, _reacted
     _cleanup()
     print("✅ sync: private AC scores current group problem for normal user")
+
+
+def test_sync_carries_last_interaction_cache_to_target_side():
+    _reset_state()
+    _setup_problem_for(GID, PID)
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
+    private_record = {
+        "timestamp": "2026-05-14T12:00:00+08:00",
+        "type": "clarify",
+        "content": "J(x) 是什么",
+        "result": "clarify",
+        "reason": "",
+        "reply": "J(x) 是特殊因子和…",
+        "problem": PID,
+        "request_id": "local-1",
+    }
+
+    with _all_patches():
+        from kouhai_bot.handlers.cmd.sync import handle
+        from kouhai_bot.handlers.shared import load_group_last_interaction
+        from kouhai_bot.private_judge import (
+            remember_private_last_interaction,
+            save_private_submission,
+        )
+
+        save_private_submission(UID, private_record)
+        # What the _save_context_record hook would have cached on the private side.
+        remember_private_last_interaction(UID, private_record)
+        asyncio.run(handle(**_kwargs(_make_event("/sync"))))
+        entry = load_group_last_interaction(GID, UID)
+        assert entry is not None
+        assert entry["record"]["request_id"] == "local-1"
+
+        # A private cache pointing at another problem is NOT carried: that
+        # record is not part of what this sync copies.
+        remember_private_last_interaction(UID, {
+            "timestamp": "2026-05-14T13:00:00+08:00",
+            "type": "clarify",
+            "content": "别的题",
+            "result": "clarify",
+            "reason": "",
+            "reply": "别的题的回复",
+            "problem": "100A",
+            "request_id": "local-2",
+        })
+        asyncio.run(handle(**_kwargs(_make_event("/sync"))))
+        entry = load_group_last_interaction(GID, UID)
+        assert entry["record"]["request_id"] == "local-1"
+    _cleanup()
+    print("✅ sync: carries last-interaction cache to the target side")
 
 
 def test_starred_sync_within_cd_only_syncs_clarify_and_rejects_empty_source():

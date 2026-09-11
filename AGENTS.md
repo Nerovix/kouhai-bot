@@ -495,6 +495,8 @@ groups/<gid>/used.json       # used problem IDs
 groups/<gid>/groupctx_*.json # group message context
 groups/<gid>/problem_ratings.json # cached problem rating by pid for weighted scoreboard totals
 private_judge/users/<uid>.json # per-user private judge current problem, history, solved markers, redirect state
+groups/<gid>/bad_reports.json  # /bad feedback reports for the group scope (append-only, see Data Format)
+private_judge/bad_reports/<uid>.json # /bad feedback reports for a user's private-judge scope (append-only)
 annotations/pending/<gid>/<pid>.json # pending human-label bundle for solved problems
 annotations/labeled/<gid>/<pid>.json # completed human-label bundle for solved problems
 statements/<pid>.json        # cached problem statements
@@ -530,6 +532,7 @@ No repository-local runtime queue is used.
 | `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, `random`, or a quoted problem card. Supports rating range (e.g. `/sp 2500-2600`) for targeted difficulty selection |
 | `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite |
 | `/testcd` | testcd.py | `handle` | ❌ | — | Private-only; show whether this user can submit the current group problem or how long remains in dynamic submit CD |
+| `/bad` | bad.py | `handle` | ✅ short group state lock for group writes | — | Mark dissatisfaction with the AI's latest replied interaction for the current problem in the current scope (skips pending/superseded/failed tails); appends a verbatim record snapshot to `bad_reports.json` (group and private stores are separate; `/sync` never moves them); success acks 👌 (128076) exactly like `/clear` (private gets the fallback message); write-only — no in-chat view command yet |
 
 ### Stateful Command Runtime
 
@@ -1018,6 +1021,46 @@ Private judge submission records use the same record shape inside
 `private_judge/users/<uid>.json.user_submissions` so group/private history can be copied
 without conversion. Do not add private-only fields to individual history records unless
 all sync paths intentionally preserve or strip them.
+
+### bad_reports.json (/bad feedback reports)
+
+`groups/<gid>/bad_reports.json` and `private_judge/bad_reports/<uid>.json` —
+append-only stores of `/bad` reports, one entry per invocation (repeat `/bad` on the
+same reply appends a new entry). Shape:
+
+```json
+{
+  "version": 1,
+  "reports": [
+    {
+      "id": 1,                          // max(existing ids)+1 per file; reports never move between files
+      "scope": "group",                 // "group" | "private" — the scope where /bad was issued
+      "group_id": 999999,               // private scope stores cfg.current_group (dispatcher rewrite)
+      "user_id": 42,
+      "reported_at": "2026-09-11T21:03:14.512345+08:00",
+      "note": "复杂度分析说错了",          // optional user note, stripped, capped at 500 chars
+      "cmd_message_id": "msg_001",
+      "target": {
+        "problem": "542D",
+        "record_index": 3,              // 0-based position in the pid-filtered history at report time
+        "record": { /* verbatim snapshot of the submission record, incl. request_id/model_tag */ }
+      }
+    }
+  ]
+}
+```
+
+Rules:
+
+- Never embed `/bad` fields inside `user_submissions` records — that format is
+  frozen (legacy compatibility + `/sync` copies records verbatim between scopes).
+- Group and private `/bad` stores are separate; `/sync` never moves reports.
+- Writes are atomic (`atomic_write_json` in `handlers/shared.py`: tempfile +
+  fsync + `os.replace`); group appends run under `run_group_state_update`.
+- A corrupt bad_reports file makes `load_bad_reports*` raise instead of resetting
+  to empty — a silent reset would destroy the report history on the next append.
+- `target.record` is a full verbatim snapshot (`reply`/`reason` keep model tags),
+  so reports stay replayable even after the underlying history is cleared/synced.
 
 ## Pitfalls & Lessons Learned
 

@@ -12,6 +12,7 @@ import math
 import os
 import random
 import re
+import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -722,6 +723,109 @@ def remember_problem_rating(group_id: int, pid: str, rating) -> None:
         return
     ratings[pid] = rating_value
     save_problem_ratings(group_id, ratings)
+
+
+# ── /bad feedback reports ────────────────────────────────────────────────
+
+BAD_REPORTS_FORMAT_VERSION = 1
+
+
+def atomic_write_json(path: Path | str, payload: dict) -> None:
+    """Atomically replace `path` with `payload`.
+
+    Same discipline as save_private_state in private_judge.py: same-directory
+    tempfile, fsync, os.replace, then fsync the parent directory.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            tmp_name = f.name
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, target)
+        try:
+            dir_fd = os.open(target.parent, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except Exception:
+        if tmp_name:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+        raise
+
+
+def _bad_reports_file(group_id: int) -> Path:
+    cfg = get_config()
+    return Path(cfg.data_dir) / "groups" / str(group_id) / "bad_reports.json"
+
+
+def _empty_bad_reports() -> dict:
+    return {"version": BAD_REPORTS_FORMAT_VERSION, "reports": []}
+
+
+def load_bad_reports_at(path: Path) -> dict:
+    """Load a bad-reports store; corrupt files raise instead of resetting.
+
+    A silent reset would make the next append destroy the whole report
+    history, so failures must surface to the caller.
+    """
+    if not path.exists():
+        return _empty_bad_reports()
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning("failed to load bad reports at %s: %s", path, e)
+        raise ValueError(f"unreadable bad reports file: {path}") from e
+    if not isinstance(data, dict) or not isinstance(data.get("reports"), list):
+        logger.warning("bad reports at %s have unexpected shape", path)
+        raise ValueError(f"malformed bad reports file: {path}")
+    return data
+
+
+def append_bad_report_at(path: Path, report: dict) -> int:
+    """Append one report (assigning the next in-file id) and write atomically."""
+    data = load_bad_reports_at(path)
+    reports = data.setdefault("reports", [])
+    highest = 0
+    for item in reports:
+        if not isinstance(item, dict):
+            continue
+        try:
+            candidate = int(item.get("id", 0))
+        except (TypeError, ValueError):
+            continue
+        highest = max(highest, candidate)
+    entry = dict(report)
+    entry["id"] = highest + 1
+    reports.append(entry)
+    atomic_write_json(path, data)
+    return entry["id"]
+
+
+def load_bad_reports(group_id: int) -> dict:
+    return load_bad_reports_at(_bad_reports_file(group_id))
+
+
+def append_bad_report(group_id: int, report: dict) -> int:
+    return append_bad_report_at(_bad_reports_file(group_id), report)
 
 
 def _problem_id_from_problem(problem: dict) -> str:

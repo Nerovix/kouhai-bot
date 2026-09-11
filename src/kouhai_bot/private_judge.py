@@ -19,9 +19,11 @@ import cloudscraper
 from .config import get_config
 from .llm import append_model_tag
 from .handlers.shared import (
+    append_bad_report_at,
     get_problem_summary,
     get_today_problem,
     high_difficulty_notice,
+    load_bad_reports_at,
     load_scoreboard,
     multimodal_model_configured,
     save_problem_summary,
@@ -235,6 +237,23 @@ def remove_private_submission(user_id: int, request_id: str) -> None:
         return
     state["user_submissions"] = kept
     save_private_state(user_id, state)
+
+
+def _bad_reports_file(user_id: int) -> Path:
+    return _data_dir() / "private_judge" / "bad_reports" / f"{int(user_id)}.json"
+
+
+def load_private_bad_reports(user_id: int) -> dict:
+    return load_bad_reports_at(_bad_reports_file(user_id))
+
+
+def append_private_bad_report(user_id: int, report: dict) -> int:
+    """Store one /bad report for this user's private-judge scope.
+
+    Deliberately a separate file from users/<uid>.json: the state file shape is
+    compatibility-frozen and /sync never moves /bad reports between scopes.
+    """
+    return append_bad_report_at(_bad_reports_file(user_id), report)
 
 
 def replace_private_problem_history(user_id: int, pid: str, records: list[dict]) -> None:

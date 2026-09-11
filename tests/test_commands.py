@@ -598,6 +598,9 @@ def _all_patches():
     stack.enter_context(patch("kouhai_bot.handlers.cmd.sync.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.testcd.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.testcd.send_private_msg", _mock_send_private))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.bad.send_group_msg", _mock_send_group))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.bad.send_private_msg", _mock_send_private))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.bad.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.editorial_followup.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.editorial_followup.send_group_forward_msg", _mock_send_group_forward))
     stack.enter_context(patch("kouhai_bot.private_judge.send_group_msg", _mock_send_group))
@@ -3025,6 +3028,7 @@ def test_help_shows_short_aliases_and_configured_newproblem_cooldown():
     assert "/tag — 查看当前题目的算法标签" in text, text
     assert "/review(/rv) 你的问题 — 默认复盘上一道已通过题；引用题目卡片可复盘旧题；@群友可带入其上下文" in text, text
     assert "/clarify(/clrf) 你的问题 — 向AI澄清题目细节，只回答题目本身不剧透做法" in text, text
+    assert "/bad [简短备注] — 标记对AI最新回复不满意，记录反馈供维护复盘" in text, text
     assert "/setproblem(/sp)" not in text, text
     assert "/sync —" not in text, text
     assert "/testcd —" not in text, text
@@ -3051,6 +3055,7 @@ def test_private_help_only_shows_private_judge_commands():
         for seg in msg if isinstance(seg, dict) and seg.get("type") == "text"
     )
     assert "/setproblem(/sp) [题号|链接|random|难度范围] — 设置 private judge 当前题" in text, text
+    assert "/bad [简短备注] — 标记对AI最新回复不满意，记录反馈供维护复盘" in text, text
     assert "/sync — 在群聊和 private judge 间同步当前群题记录" in text, text
     assert "/testcd — 查看当前群题提交 CD" in text, text
     assert "/newproblem(/np)" not in text, text
@@ -3075,6 +3080,52 @@ def test_private_testcd_allows_submit_when_no_cooldown_and_dispatches():
     assert "你现在可以提交当前群内的题目！" in private_text, private_text
     _cleanup()
     print("✅ private testcd: no cooldown allows submit")
+
+
+def test_private_bad_dispatches_and_records_report():
+    _reset_state()
+    _setup_problem()
+
+    with _all_patches():
+        from kouhai_bot.handlers import process_event
+        from kouhai_bot.handlers.registry import discover_commands
+        from kouhai_bot.private_judge import (
+            load_private_bad_reports,
+            save_private_submission,
+            set_private_current_problem,
+        )
+
+        discover_commands()
+        set_private_current_problem(UID, {
+            "today": PID, "contestId": 542, "index": "D",
+            "name": "Superhero's Job", "rating": 2600,
+        })
+        save_private_submission(UID, {
+            "timestamp": "2026-09-11T20:00:03+08:00",
+            "type": "clarify",
+            "content": "J(x) 是什么",
+            "result": "clarify",
+            "reason": "",
+            "reply": "J(x) 是特殊因子和…",
+            "problem": PID,
+            "request_id": "local-1",
+            "model_tag": "deepseek-v4-flash",
+        })
+        asyncio.run(process_event(_make_private_event("/bad 判错了"), spawn_handlers=False))
+
+        private_text = "\n".join(
+            _last_text_item(item) for item in _private_sent if item["user_id"] == UID
+        )
+        assert "收到～" in private_text, private_text
+        reports = load_private_bad_reports(UID)["reports"]
+        assert len(reports) == 1, reports
+        assert reports[0]["scope"] == "private"
+        assert reports[0]["note"] == "判错了"
+        assert reports[0]["target"]["problem"] == PID
+        assert reports[0]["target"]["record"]["request_id"] == "local-1"
+        assert reports[0]["target"]["record"]["reply"] == "J(x) 是特殊因子和…"
+    _cleanup()
+    print("✅ private /bad: allowlist dispatch and report persistence")
 
 
 def test_private_testcd_shows_remaining_for_starred_user():

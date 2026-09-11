@@ -494,7 +494,11 @@ groups/<gid>/problem_summaries.json # verified, source-bound Chinese summaries k
 groups/<gid>/used.json       # used problem IDs
 groups/<gid>/groupctx_*.json # group message context
 groups/<gid>/problem_ratings.json # cached problem rating by pid for weighted scoreboard totals
+groups/<gid>/bad_reports.json  # /bad feedback reports for the group scope (append-only, see Data Format)
+groups/<gid>/last_interaction.json # per-user latest delivered interaction record (per-scope /bad targeting cache)
 private_judge/users/<uid>.json # per-user private judge current problem, history, solved markers, redirect state
+private_judge/bad_reports/<uid>.json # /bad feedback reports for a user's private-judge scope (append-only)
+private_judge/last_interaction/<uid>.json # latest delivered interaction record (private-scope /bad targeting cache)
 annotations/pending/<gid>/<pid>.json # pending human-label bundle for solved problems
 annotations/labeled/<gid>/<pid>.json # completed human-label bundle for solved problems
 statements/<pid>.json        # cached problem statements
@@ -530,6 +534,7 @@ No repository-local runtime queue is used.
 | `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, `random`, or a quoted problem card. Supports rating range (e.g. `/sp 2500-2600`) for targeted difficulty selection |
 | `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite |
 | `/testcd` | testcd.py | `handle` | ❌ | — | Private-only; show whether this user can submit the current group problem or how long remains in dynamic submit CD |
+| `/bad` | bad.py | `handle` | ✅ short group state lock for group writes | — | Mark dissatisfaction with the AI's latest DELIVERED reply in the current scope, regardless of problem (works after `/newproblem` and survives `/clear`) — resolved exclusively from the per-user last-interaction cache; markable = any record whose live message was delivered (LLM answers incl. reason-fallback incorrect verdicts, and failure notices timeout/service_unavailable/no_statement/image_unsupported), only pending/superseded are skipped; appends a verbatim record snapshot to `bad_reports.json` (group and private stores are separate; `/sync` never moves reports); success acks 👌 (128076) exactly like `/clear` (private gets the fallback message); write-only — no in-chat view command yet |
 
 ### Stateful Command Runtime
 
@@ -624,7 +629,8 @@ Read-only commands (`/problem`, `/tag`, `/scoreboard`, `/help`, `/status`) still
 not enter the state scheduler.
 Private dispatch maps DMs to `CURRENT_GROUP`, requires the sender to be a member of that
 service group, and only allows the private command whitelist: `/setproblem`, `/problem`,
-`/tag`, `/submit`, `/clarify`, `/review`, `/clear`, `/sync`, `/testcd`, `/status`, and `/help`.
+`/tag`, `/submit`, `/clarify`, `/review`, `/bad`, `/clear`, `/sync`, `/testcd`, `/status`,
+and `/help`.
 Private commands do not require @mentions and should not send @ segments back.
 
 Friend request events are not commands and are not logged to command event logs.
@@ -1019,6 +1025,72 @@ Private judge submission records use the same record shape inside
 without conversion. Do not add private-only fields to individual history records unless
 all sync paths intentionally preserve or strip them.
 
+### bad_reports.json (/bad feedback reports)
+
+`groups/<gid>/bad_reports.json` and `private_judge/bad_reports/<uid>.json` —
+append-only stores of `/bad` reports, one entry per invocation (repeat `/bad` on the
+same reply appends a new entry). Shape:
+
+```json
+{
+  "version": 1,
+  "reports": [
+    {
+      "id": 1,                          // max(existing ids)+1 per file; reports never move between files
+      "scope": "group",                 // "group" | "private" — the scope where /bad was issued
+      "group_id": 999999,               // private scope stores cfg.current_group (dispatcher rewrite)
+      "user_id": 42,
+      "reported_at": "2026-09-11T21:03:14.512345+08:00",
+      "note": "复杂度分析说错了",          // optional user note, stripped, capped at 500 chars
+      "cmd_message_id": "msg_001",
+      "target": {
+        "problem": "542D",
+        "record": { /* verbatim snapshot of the submission record, incl. request_id/model_tag */ }
+      }
+      // NOTE: reports written before the last-interaction cache also carry
+      // target.record_index (0-based position in the then-current history) —
+      // legacy field, no longer written.
+    }
+  ]
+}
+```
+
+Rules:
+
+- Never embed `/bad` fields inside `user_submissions` records — that format is
+  frozen (legacy compatibility + `/sync` copies records verbatim between scopes).
+- Group and private `/bad` stores are separate; `/sync` never moves reports.
+- Writes are atomic (`atomic_write_json` in `handlers/shared.py`: tempfile +
+  fsync + `os.replace`); group appends run under `run_group_state_update`.
+- Targeting (scope-local, crosses problem switches, survives `/clear`): the
+  per-user last-interaction cache (`groups/<gid>/last_interaction.json` keyed by
+  uid / `private_judge/last_interaction/<uid>.json`, shape `{"record": {...}}`)
+  is the ONLY source — /bad never scans stored history. The cache is a CACHE:
+  corrupt/missing files read as empty (warn + None), unlike bad_reports which
+  raise. It is updated inside `_save_context_record` (under the coordinator
+  lock, after the clear-watermark guard) whenever a record with a replied
+  result is persisted — so `/clear` never wipes it and stale in-flight
+  finalizes never resurrect it.
+- `/sync` carries the source side's cache entry to the target side together
+  with the history (same "source wins" semantics), but only when the cached
+  record is actually part of what the sync copies: same pid, and clarify-only
+  when a CD-limited starred user syncs clarifies. Reports are never moved.
+- "Replied" = the live message was delivered: results
+  `correct/incorrect/clarify/review` (an empty-reply incorrect verdict fell back
+  to `reason` live) plus the failure notices
+  `timeout/service_unavailable/no_statement/image_unsupported`. Only `pending`
+  and `superseded` records are unmarkable. Classification goes through
+  `shared.record_kind` (single source of truth, also used by
+  `_build_review_history`).
+- To keep `/bad` from seeing a sent-but-unsaved pending tail, the clarify/review
+  finalize paths save the record BEFORE delivering the reply (same order as
+  submit) — preserve that ordering.
+- A corrupt bad_reports file makes `load_bad_reports*` raise instead of resetting
+  to empty — a silent reset would destroy the report history on the next append.
+  (A dict missing the `reports` key is tolerated; the next append repairs the shape.)
+- `target.record` is a full verbatim snapshot (`reply`/`reason` keep model tags),
+  so reports stay replayable even after the underlying history is cleared/synced.
+
 ## Pitfalls & Lessons Learned
 
 ### 1. Stateful scheduler state must be truly shared
@@ -1173,8 +1245,10 @@ could leak.
 
 ### 29. Private judge state writes must be atomic
 `private_judge/users/<uid>.json` is user history, not a disposable cache. Write it via a
-same-directory temp file and `os.replace`, and log JSON/IO load failures before falling
-back to defaults so corruption or permission problems are diagnosable.
+same-directory temp file and `os.replace` (implemented once in
+`shared.atomic_write_json`, which `save_private_state` delegates to), and log JSON/IO
+load failures before falling back to defaults so corruption or permission problems are
+diagnosable.
 
 ## Testing
 

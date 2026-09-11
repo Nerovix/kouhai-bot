@@ -19,8 +19,10 @@ from ...private_judge import (
     get_private_current_pid,
     group_problem_history,
     is_group_problem_solved,
+    load_private_last_interaction,
     load_private_problem_history,
     mark_private_solved,
+    remember_private_last_interaction,
     replace_group_problem_clarifies,
     replace_group_problem_history,
     replace_private_problem_clarifies,
@@ -37,9 +39,11 @@ from ..shared import (
     fetch_group_member_nickname_map,
     format_points,
     get_today_problem,
+    load_group_last_interaction,
     load_known_problem_ratings,
     load_scoreboard,
     rating_to_points,
+    remember_group_last_interaction,
 )
 from .submit import (
     _reveal_problem_source,
@@ -219,12 +223,31 @@ async def handle(group_id: int, user_id: int, sender: dict,
         return
 
     records_to_copy = copy_records(source_records)
+
+    # Carry the source side's last-interaction cache across too, so /bad on
+    # this side after a sync targets the same latest reply the user saw on
+    # the other side (sync = the source session wins wholesale). Only when
+    # the cached record is part of what this sync actually copies: same pid,
+    # and clarify-only records when a CD-limited starred user syncs clarifies.
+    source_entry = (
+        load_private_last_interaction(user_id)
+        if source_scope == PRIVATE_SCOPE
+        else load_group_last_interaction(group_id, user_id)
+    )
+    source_record = source_entry.get("record") if isinstance(source_entry, dict) else None
+    carry_cache_record: dict | None = None
+    if isinstance(source_record, dict) and str(source_record.get("problem", "") or "") == pid:
+        if not starred_limited or source_record.get("type") == "clarify":
+            carry_cache_record = dict(source_record)
+
     if target_scope == GROUP_SCOPE:
         def _replace_group_records() -> None:
             if starred_limited:
                 replace_group_problem_clarifies(group_id, user_id, pid, records_to_copy)
             else:
                 replace_group_problem_history(group_id, user_id, pid, records_to_copy)
+            if carry_cache_record is not None:
+                remember_group_last_interaction(group_id, user_id, carry_cache_record)
 
         await run_group_state_update(group_id, _replace_group_records)
     else:
@@ -232,6 +255,8 @@ async def handle(group_id: int, user_id: int, sender: dict,
             replace_private_problem_clarifies(user_id, pid, records_to_copy)
         else:
             replace_private_problem_history(user_id, pid, records_to_copy)
+        if carry_cache_record is not None:
+            remember_private_last_interaction(user_id, carry_cache_record)
         if source_scope == GROUP_SCOPE and is_group_problem_solved(group_id, pid):
             mark_private_solved(user_id, pid, source="group")
 

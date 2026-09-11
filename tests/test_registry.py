@@ -15,7 +15,7 @@ def test_discover_commands():
     cmds = all_commands()
     names = {c.name for c in cmds}
     expected = {"help", "newproblem", "submit", "problem",
-                "tag", "clarify", "scoreboard", "setproblem", "sync"}
+                "tag", "clarify", "scoreboard", "setproblem", "sync", "bad"}
     missing = expected - names
     assert not missing, f"Missing commands: {missing}"
     assert len(cmds) >= 7

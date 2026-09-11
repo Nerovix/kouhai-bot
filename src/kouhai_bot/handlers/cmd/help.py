@@ -10,6 +10,7 @@ _PRIVATE_HELP_COMMANDS = {
     "submit",
     "clarify",
     "review",
+    "bad",
     "clear",
     "sync",
     "testcd",

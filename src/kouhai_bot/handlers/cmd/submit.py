@@ -42,7 +42,10 @@ from ..shared import (
     rating_to_points,
     remember_problem_rating,
     parse_json_with_llm_repair,
+    record_kind,
+    remember_group_last_interaction,
     remove_user_submission,
+    REPLIED_RESULTS,
     save_scoreboard,
     save_user_submission,
     second_judge_submission_result,
@@ -78,6 +81,7 @@ from ...private_judge import (
     mark_private_solved,
     remove_private_submission,
     replace_private_problem_history,
+    remember_private_last_interaction,
     save_private_submission,
     send_problem_card_private,
     set_private_current_problem,
@@ -376,15 +380,9 @@ def _load_latest_group_summary(group_id: int) -> str:
 
 def _build_review_history(history: list[dict]) -> str:
     def record_type(item: dict) -> str:
-        explicit = item.get("type", "")
-        if explicit in {"submit", "clarify", "review"}:
-            return explicit
-        result = item.get("result", "")
-        if result in {"clarify", "review"}:
-            return result
-        if result in {"correct", "incorrect"}:
-            return "submit"
-        return "unknown"
+        # Canonical classification lives in shared.record_kind; "unknown" is
+        # this formatter's sentinel for records that are none of the three.
+        return record_kind(item) or "unknown"
 
     parts = []
     type_counts = {"clarify": 0, "submit": 0, "review": 0, "unknown": 0}
@@ -740,8 +738,12 @@ class GroupCoordinator:
                 return False
             if req.is_private:
                 save_private_submission(req.user_id, record)
+                if record.get("result") in REPLIED_RESULTS:
+                    remember_private_last_interaction(req.user_id, record)
             else:
                 save_user_submission(req.group_id, req.user_id, record)
+                if record.get("result") in REPLIED_RESULTS:
+                    remember_group_last_interaction(req.group_id, req.user_id, record)
             return True
 
     async def _remove_context_record(self, req: PendingRequest) -> None:
@@ -1443,13 +1445,16 @@ class GroupCoordinator:
             reply = reply[:500] + "…"
         reply = reply.replace("😅", "❤️")
         model_tag = result.get("model_tag", "")
-        await _send_req_plain(req, append_model_tag(reply, model_tag))
 
-        # Store the raw reply + tag field; the tag is display-only metadata.
+        # Store the raw reply + tag field BEFORE delivering it: the record
+        # must already say "replied" once the user can see the answer, so a
+        # concurrent /bad never sees a sent-but-unsaved pending tail (same
+        # order as _finalize_submit).
         await self._save_context_record(
             req,
             _context_record(req, result="clarify", reply=reply, problem=pid, model_tag=model_tag),
         )
+        await _send_req_plain(req, append_model_tag(reply, model_tag))
         self._log_finished(req, "ok", problem=pid)
         await self._finish_request(req)
 
@@ -1491,6 +1496,15 @@ class GroupCoordinator:
         reply = result.get("reply", "").replace("😅", "❤️")
         model_tag = result.get("model_tag", "")
         display_reply = append_model_tag(reply, model_tag)
+
+        # Store the raw reply + tag field BEFORE the (potentially slow,
+        # forward-card) delivery: the record must already say "replied" once
+        # the user can see the answer, so a concurrent /bad never sees a
+        # sent-but-unsaved pending tail (same order as _finalize_submit).
+        await self._save_context_record(
+            req,
+            _context_record(req, result="review", reply=reply, problem=pid, model_tag=model_tag),
+        )
 
         if len(display_reply) > _REVIEW_FORWARD_THRESHOLD:
             cfg = get_config()
@@ -1596,11 +1610,6 @@ class GroupCoordinator:
             )
             await _send_req_plain(req, display_reply)
 
-        # Store the raw reply + tag field; the tag is display-only metadata.
-        await self._save_context_record(
-            req,
-            _context_record(req, result="review", reply=reply, problem=pid, model_tag=model_tag),
-        )
         self._log_finished(req, "ok", problem=pid)
         await self._finish_request(req)
 

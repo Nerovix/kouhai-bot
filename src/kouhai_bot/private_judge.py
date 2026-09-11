@@ -5,10 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import random
 import re
-import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,9 +17,12 @@ import cloudscraper
 from .config import get_config
 from .llm import append_model_tag
 from .handlers.shared import (
+    append_bad_report_at,
+    atomic_write_json,
     get_problem_summary,
     get_today_problem,
     high_difficulty_notice,
+    load_bad_reports_at,
     load_scoreboard,
     multimodal_model_configured,
     save_problem_summary,
@@ -137,39 +138,10 @@ def load_private_state(user_id: int) -> dict[str, Any]:
 
 
 def save_private_state(user_id: int, state: dict[str, Any]) -> None:
-    path = _state_file(user_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_name = ""
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as f:
-            tmp_name = f.name
-            json.dump(state, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_name, path)
-        try:
-            dir_fd = os.open(path.parent, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    except Exception:
-        if tmp_name:
-            try:
-                os.unlink(tmp_name)
-            except FileNotFoundError:
-                pass
-        raise
+    # Atomic write discipline lives in shared.atomic_write_json (tempfile +
+    # fsync + os.replace + dir fsync) — the single implementation for all
+    # stores that need crash safety.
+    atomic_write_json(_state_file(user_id), state)
 
 
 def get_private_current_problem(user_id: int) -> dict | None:
@@ -235,6 +207,51 @@ def remove_private_submission(user_id: int, request_id: str) -> None:
         return
     state["user_submissions"] = kept
     save_private_state(user_id, state)
+
+
+def _bad_reports_file(user_id: int) -> Path:
+    return _data_dir() / "private_judge" / "bad_reports" / f"{int(user_id)}.json"
+
+
+def load_private_bad_reports(user_id: int) -> dict:
+    return load_bad_reports_at(_bad_reports_file(user_id))
+
+
+def append_private_bad_report(user_id: int, report: dict) -> int:
+    """Store one /bad report for this user's private-judge scope.
+
+    Deliberately a separate file from users/<uid>.json: the state file shape is
+    compatibility-frozen and /sync never moves /bad reports between scopes.
+    """
+    return append_bad_report_at(_bad_reports_file(user_id), report)
+
+
+def _last_interaction_file(user_id: int) -> Path:
+    return _data_dir() / "private_judge" / "last_interaction" / f"{int(user_id)}.json"
+
+
+def load_private_last_interaction(user_id: int) -> dict | None:
+    """Latest delivered interaction record in this user's private scope.
+
+    A cache (unlike bad_reports): corrupt/missing files log a warning and
+    return None, and /bad falls back to scanning stored history.
+    """
+    path = _last_interaction_file(user_id)
+    if not path.exists():
+        return None
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning("failed to load last interaction at %s: %s", path, e)
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get("record"), dict) else None
+
+
+def remember_private_last_interaction(user_id: int, record: dict) -> None:
+    """Record the latest delivered interaction (called under the per-user
+    coordinator lock from _save_context_record)."""
+    atomic_write_json(_last_interaction_file(user_id), {"record": dict(record)})
 
 
 def replace_private_problem_history(user_id: int, pid: str, records: list[dict]) -> None:

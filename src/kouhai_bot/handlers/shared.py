@@ -12,6 +12,7 @@ import math
 import os
 import random
 import re
+import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -724,6 +725,177 @@ def remember_problem_rating(group_id: int, pid: str, rating) -> None:
     save_problem_ratings(group_id, ratings)
 
 
+# ── /bad feedback reports ────────────────────────────────────────────────
+
+# Results whose live message was delivered to the user: real LLM answers (an
+# incorrect verdict with an empty reply fell back to the reason live) AND
+# failure notices (timeout / service_unavailable / no_statement /
+# image_unsupported all delivered a message before the record was saved).
+# Only pending and superseded never delivered anything. Shared by /bad
+# targeting and the last-interaction cache hook in submit.py.
+REPLIED_RESULTS = {
+    "correct", "incorrect", "clarify", "review",
+    "timeout", "service_unavailable", "no_statement", "image_unsupported",
+}
+
+BAD_REPORTS_FORMAT_VERSION = 1
+
+
+def atomic_write_json(path: Path | str, payload: dict) -> None:
+    """Atomically replace `path` with `payload`.
+
+    Same discipline as save_private_state in private_judge.py: same-directory
+    tempfile, fsync, os.replace, then fsync the parent directory.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            tmp_name = f.name
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, target)
+        # Durability of the rename itself. A failure here (EINVAL/EBADF on
+        # some FUSE/NFS mounts) must not mask the already-completed replace
+        # as a write failure — the caller would retry and duplicate data.
+        try:
+            dir_fd = os.open(target.parent, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        except OSError as e:
+            logger.warning("dir fsync failed after atomic write of %s: %s", target, e)
+        finally:
+            os.close(dir_fd)
+    except Exception:
+        if tmp_name:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+        raise
+
+
+def _bad_reports_file(group_id: int) -> Path:
+    cfg = get_config()
+    return Path(cfg.data_dir) / "groups" / str(group_id) / "bad_reports.json"
+
+
+def _empty_bad_reports() -> dict:
+    return {"version": BAD_REPORTS_FORMAT_VERSION, "reports": []}
+
+
+def load_bad_reports_at(path: Path) -> dict:
+    """Load a bad-reports store; corrupt files raise instead of resetting.
+
+    A silent reset would make the next append destroy the whole report
+    history, so failures must surface to the caller.
+    """
+    if not path.exists():
+        return _empty_bad_reports()
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning("failed to load bad reports at %s: %s", path, e)
+        raise ValueError(f"unreadable bad reports file: {path}") from e
+    if not isinstance(data, dict):
+        logger.warning("bad reports at %s have unexpected shape", path)
+        raise ValueError(f"malformed bad reports file: {path}")
+    reports = data.get("reports")
+    if reports is None:
+        # dict without the key (e.g. operator-created {}): tolerated, the
+        # next append rewrites the file in the proper shape.
+        data["reports"] = []
+    elif not isinstance(reports, list):
+        logger.warning("bad reports at %s have non-list reports", path)
+        raise ValueError(f"malformed bad reports file: {path}")
+    return data
+
+
+def append_bad_report_at(path: Path, report: dict) -> int:
+    """Append one report (assigning the next in-file id) and write atomically."""
+    data = load_bad_reports_at(path)
+    reports = data.setdefault("reports", [])
+    highest = 0
+    for item in reports:
+        if not isinstance(item, dict):
+            continue
+        try:
+            candidate = int(item.get("id", 0))
+        except (TypeError, ValueError):
+            continue
+        highest = max(highest, candidate)
+    entry = dict(report)
+    entry["id"] = highest + 1
+    reports.append(entry)
+    atomic_write_json(path, data)
+    return entry["id"]
+
+
+def load_bad_reports(group_id: int) -> dict:
+    return load_bad_reports_at(_bad_reports_file(group_id))
+
+
+def append_bad_report(group_id: int, report: dict) -> int:
+    return append_bad_report_at(_bad_reports_file(group_id), report)
+
+
+# ── last-interaction cache (/bad targeting across problems and /clear) ────
+
+
+def _last_interaction_file(group_id: int) -> Path:
+    cfg = get_config()
+    return Path(cfg.data_dir) / "groups" / str(group_id) / "last_interaction.json"
+
+
+def load_group_last_interaction(group_id: int, user_id: int) -> dict | None:
+    """Latest delivered interaction record of one user in the group scope.
+
+    Unlike bad_reports this is a cache: a corrupt/missing file logs a warning
+    and returns None, and /bad falls back to scanning stored history.
+    """
+    path = _last_interaction_file(group_id)
+    if not path.exists():
+        return None
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning("failed to load last interaction at %s: %s", path, e)
+        return None
+    entry = data.get(str(user_id)) if isinstance(data, dict) else None
+    return entry if isinstance(entry, dict) and isinstance(entry.get("record"), dict) else None
+
+
+def remember_group_last_interaction(group_id: int, user_id: int, record: dict) -> None:
+    """Record one user's latest delivered interaction (called under the group
+    coordinator lock from _save_context_record — a single writer per group)."""
+    path = _last_interaction_file(group_id)
+    data: dict = {}
+    if path.exists():
+        try:
+            with path.open(encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        except Exception as e:
+            logger.warning("failed to load last interaction at %s; resetting: %s", path, e)
+    data[str(user_id)] = {"record": dict(record)}
+    atomic_write_json(path, data)
+
+
 def _problem_id_from_problem(problem: dict) -> str:
     contest_id = problem.get("contestId")
     index = problem.get("index")
@@ -982,6 +1154,25 @@ def get_judge_prompt() -> str:
         with open(prompt_path, encoding="utf-8") as f:
             return f.read()
     return "You are a competitive programming judge."
+
+
+def record_kind(record: dict) -> str:
+    """Canonical interaction kind of a history record.
+
+    Explicit "type" wins; legacy records without it fall back to "result"
+    (clarify/review verbatim, correct/incorrect → submit). "" when the record
+    is none of the three interaction kinds. Single source of truth for
+    /bad targeting and _build_review_history — keep them from drifting.
+    """
+    explicit = record.get("type", "")
+    if explicit in {"submit", "clarify", "review"}:
+        return explicit
+    result = record.get("result", "")
+    if result in {"clarify", "review"}:
+        return result
+    if result in {"correct", "incorrect"}:
+        return "submit"
+    return ""
 
 
 def _dialogue_kind(item_type: str, result: str) -> str:

@@ -47,7 +47,7 @@ NapCat (QQ) ──WS──> worker.py
   Group and private help are both delivered as merged-forward cards, with direct text
   only as fallback.
 - **Scheduler current-group config**: `~/.kouhai-bot/scheduler_config.json` stores job list + time overrides for `CURRENT_GROUP`. Jobs are defined in `scheduler/jobs.py`.
-- **Multimodal statements**: `problems/fetcher.py` collects CF `tex-formula` and `tex-graphics` image metadata with statement text. Formula images and diagrams are attached to new-problem summary and `/clarify` requests, which route through `llm.general_model` like every other non-judge task; those providers must therefore accept image inputs. (A legacy `llm.multimodal_model` config section is ignored with a warning.)
+- **Multimodal statements**: `problems/fetcher.py` collects CF `tex-formula` and `tex-graphics` image metadata with statement text. Formula images and diagrams are attached to new-problem summary and `/clarify` requests, which route through `llm.general_model` like every other non-judge task; those providers must therefore accept image inputs. (A legacy `llm.multimodal_model` config section is deduplicated by name and appended to the general queue with a warning.)
 - **Unified CF HTML transport**: `problems/cf_fetcher.py` is the single transport for
   Codeforces problem statement and blog HTML. It tries `cloudscraper` first and falls
   back to headless Playwright Chromium after HTTP 403, timeout/connection failure,
@@ -534,7 +534,7 @@ No repository-local runtime queue is used.
 | `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, `random`, or a quoted problem card. Supports rating range (e.g. `/sp 2500-2600`) for targeted difficulty selection |
 | `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite |
 | `/testcd` | testcd.py | `handle` | ❌ | — | Private-only; show whether this user can submit the current group problem or how long remains in dynamic submit CD |
-| `/bad` | bad.py | `handle` | ✅ short group state lock for group writes | — | Mark dissatisfaction with the AI's latest DELIVERED reply in the current scope, regardless of problem (works after `/newproblem` and survives `/clear`) — resolved exclusively from the per-user last-interaction cache; markable = any record whose live message was delivered (LLM answers incl. reason-fallback incorrect verdicts, and failure notices timeout/service_unavailable/no_statement/image_unsupported), only pending/superseded are skipped; appends a verbatim record snapshot to `bad_reports.json` (group and private stores are separate; `/sync` never moves reports); success acks 👌 (128076) exactly like `/clear` (private gets the fallback message); write-only — no in-chat view command yet |
+| `/bad` | bad.py | `handle` | ✅ short group state lock for group writes | — | Mark dissatisfaction with the AI's latest DELIVERED reply in the current scope, regardless of problem (works after `/newproblem` and survives `/clear`) — resolved exclusively from the per-user last-interaction cache; markable = any record whose live message was delivered (LLM answers incl. reason-fallback incorrect verdicts, and failure notices timeout/service_unavailable/no_statement), only pending/superseded are skipped; appends a verbatim record snapshot to `bad_reports.json` (group and private stores are separate; `/sync` never moves reports); success acks 👌 (128076) exactly like `/clear` (private gets the fallback message); write-only — no in-chat view command yet |
 
 ### Stateful Command Runtime
 
@@ -1078,7 +1078,7 @@ Rules:
 - "Replied" = the live message was delivered: results
   `correct/incorrect/clarify/review` (an empty-reply incorrect verdict fell back
   to `reason` live) plus the failure notices
-  `timeout/service_unavailable/no_statement/image_unsupported`. Only `pending`
+  `timeout/service_unavailable/no_statement`. Only `pending`
   and `superseded` records are unmarkable. Classification goes through
   `shared.record_kind` (single source of truth, also used by
   `_build_review_history`).

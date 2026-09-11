@@ -165,20 +165,31 @@ def build_provider_queues_from_yaml(
     Raises RuntimeError if required queues are empty or required fields are missing.
     ``general_model`` providers must accept image inputs: image-bearing
     summaries/clarify route through the same queue as text tasks.
-    A legacy ``multimodal_model`` section is ignored with a warning.
+    A legacy ``multimodal_model`` section is appended to the general queue
+    (deduplicated by provider name) with a warning.
     """
-    if llm_section.get("multimodal_model"):
-        logger.warning(
-            "config.yaml: llm.multimodal_model is deprecated and ignored; "
-            "merge its providers into llm.general_model"
-        )
-    return (
-        _build_provider_list(
-            llm_section.get("smart_model", []),
-            section_name="smart_model",
-        ),
-        _build_provider_list(
-            llm_section.get("general_model", []),
-            section_name="general_model",
-        ),
+    smart = _build_provider_list(
+        llm_section.get("smart_model", []),
+        section_name="smart_model",
     )
+    general = _build_provider_list(
+        llm_section.get("general_model", []),
+        section_name="general_model",
+    )
+    legacy_raw = llm_section.get("multimodal_model", [])
+    if legacy_raw in (None, ""):
+        legacy_raw = []
+    if legacy_raw:
+        legacy = _build_provider_list(legacy_raw, section_name="multimodal_model")
+        existing_names = {p.name for p in general}
+        merged = [p for p in legacy if p.name not in existing_names]
+        skipped = len(legacy) - len(merged)
+        logger.warning(
+            "config.yaml: llm.multimodal_model is deprecated; %s provider(s) "
+            "appended to the end of llm.general_model%s — merge them into "
+            "llm.general_model and remove the section",
+            len(merged),
+            f" ({skipped} duplicate name(s) skipped)" if skipped else "",
+        )
+        general = general + merged
+    return (smart, general)

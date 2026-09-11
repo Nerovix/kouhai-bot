@@ -497,7 +497,7 @@ def write_state_for_problem(problem: dict) -> dict:
 
 def pick(with_statement: bool = False, write_state: bool = True) -> dict:
     """Pick today's problem, mark as used, return the problem dict.
-    If with_statement and fetch_statement returns None (image problem, fetch error),
+    If with_statement and fetch_statement returns None (fetch error),
     retry up to 10 times, marking failed picks as used."""
     MAX_RETRIES = 10
     for attempt in range(MAX_RETRIES):

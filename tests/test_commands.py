@@ -2503,7 +2503,7 @@ def test_private_clarify_uses_private_problem_summary():
     print("✅ private clarify: uses pid-specific summary")
 
 
-def test_clarify_image_statement_uses_multimodal_model():
+def test_clarify_image_statement_attaches_images_via_general_queue():
     _reset_state()
     _setup_problem_for(GID, PID)
     _write_statement(PID, {

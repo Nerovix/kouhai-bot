@@ -725,13 +725,13 @@ def remember_problem_rating(group_id: int, pid: str, rating) -> None:
 
 # Results whose live message was delivered to the user: real LLM answers (an
 # incorrect verdict with an empty reply fell back to the reason live) AND
-# failure notices (timeout / service_unavailable / no_statement /
-# image_unsupported all delivered a message before the record was saved).
+# failure notices (timeout / service_unavailable / no_statement all
+# delivered a message before the record was saved).
 # Only pending and superseded never delivered anything. Shared by /bad
 # targeting and the last-interaction cache hook in submit.py.
 REPLIED_RESULTS = {
     "correct", "incorrect", "clarify", "review",
-    "timeout", "service_unavailable", "no_statement", "image_unsupported",
+    "timeout", "service_unavailable", "no_statement",
 }
 
 BAD_REPORTS_FORMAT_VERSION = 1

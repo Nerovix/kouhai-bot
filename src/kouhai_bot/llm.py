@@ -186,6 +186,11 @@ def _provider_is_dashscope(provider_name: str, base_url: str) -> bool:
     )
 
 
+# Tasks served by the smart queue; every other task name (including the
+# multimodal_* markers for image-bearing requests) routes to general.
+_SMART_TASKS = frozenset({"judge", "review"})
+
+
 def _apply_rating_gate(
     providers: list[LlmProviderConfig],
     problem_rating: int | None,
@@ -201,7 +206,7 @@ def _apply_rating_gate(
     """
     if (
         problem_rating is None
-        or task_name not in {"judge", "review"}
+        or task_name not in _SMART_TASKS
         or provider_name_pinned
     ):
         return list(providers)
@@ -625,7 +630,7 @@ async def chat_completion(
     """
     cfg = get_config()
     task_name = (task or "").strip().lower()
-    if task_name in {"judge", "review"}:
+    if task_name in _SMART_TASKS:
         providers = cfg.llm_smart_providers
     else:
         # All non-judge tasks share one queue; multimodal_* task names only

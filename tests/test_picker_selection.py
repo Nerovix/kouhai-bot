@@ -189,9 +189,7 @@ def test_fetch_statement_gives_up_after_second_parse_failure(monkeypatch, tmp_pa
     assert len(fetch_calls) == 2
 
 
-def test_fetch_statement_caches_image_metadata_without_configured_multimodal_queue(
-    monkeypatch, tmp_path,
-):
+def test_fetch_statement_caches_image_metadata(monkeypatch, tmp_path):
     _configure_picker_tmp(tmp_path)
 
     raw_html = (

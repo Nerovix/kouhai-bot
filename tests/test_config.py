@@ -87,20 +87,28 @@ def test_config_allows_missing_qwen_model(monkeypatch, tmp_path):
     assert cfg.qwen_model == ""
 
 
-def test_config_ignores_legacy_multimodal_model_queue(monkeypatch, tmp_path):
+def test_config_appends_legacy_multimodal_model_queue_to_general(monkeypatch, tmp_path):
     data = yaml.safe_load(_make_yaml())
     data["llm"]["multimodal_model"] = [
+        # same name as the general entry → deduplicated away
+        {
+            "name": "general-test",
+            "api_key": "sk-mm",
+            "base_url": "http://localhost:8080/v1",
+            "model": "legacy-dup",
+        },
         {
             "name": "mmx",
             "api_key": "sk-mm",
             "base_url": "http://localhost:8080/v1",
             "model": "mmx-vision",
             "model_tag": "『MMx』",
-        }
+        },
     ]
     cfg = _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
     assert not hasattr(cfg, "llm_multimodal_providers")
-    assert [p.name for p in cfg.llm_general_providers] == ["general-test"]
+    assert [p.name for p in cfg.llm_general_providers] == ["general-test", "mmx"]
+    assert cfg.llm_general_providers[1].model == "mmx-vision"
 
 
 def test_config_requires_provider_name(monkeypatch, tmp_path):

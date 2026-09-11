@@ -727,6 +727,17 @@ def remember_problem_rating(group_id: int, pid: str, rating) -> None:
 
 # ── /bad feedback reports ────────────────────────────────────────────────
 
+# Results whose live message was delivered to the user: real LLM answers (an
+# incorrect verdict with an empty reply fell back to the reason live) AND
+# failure notices (timeout / service_unavailable / no_statement /
+# image_unsupported all delivered a message before the record was saved).
+# Only pending and superseded never delivered anything. Shared by /bad
+# targeting and the last-interaction cache hook in submit.py.
+REPLIED_RESULTS = {
+    "correct", "incorrect", "clarify", "review",
+    "timeout", "service_unavailable", "no_statement", "image_unsupported",
+}
+
 BAD_REPORTS_FORMAT_VERSION = 1
 
 
@@ -839,6 +850,50 @@ def load_bad_reports(group_id: int) -> dict:
 
 def append_bad_report(group_id: int, report: dict) -> int:
     return append_bad_report_at(_bad_reports_file(group_id), report)
+
+
+# ── last-interaction cache (/bad targeting across problems and /clear) ────
+
+
+def _last_interaction_file(group_id: int) -> Path:
+    cfg = get_config()
+    return Path(cfg.data_dir) / "groups" / str(group_id) / "last_interaction.json"
+
+
+def load_group_last_interaction(group_id: int, user_id: int) -> dict | None:
+    """Latest delivered interaction record of one user in the group scope.
+
+    Unlike bad_reports this is a cache: a corrupt/missing file logs a warning
+    and returns None, and /bad falls back to scanning stored history.
+    """
+    path = _last_interaction_file(group_id)
+    if not path.exists():
+        return None
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning("failed to load last interaction at %s: %s", path, e)
+        return None
+    entry = data.get(str(user_id)) if isinstance(data, dict) else None
+    return entry if isinstance(entry, dict) and isinstance(entry.get("record"), dict) else None
+
+
+def remember_group_last_interaction(group_id: int, user_id: int, record: dict) -> None:
+    """Record one user's latest delivered interaction (called under the group
+    coordinator lock from _save_context_record — a single writer per group)."""
+    path = _last_interaction_file(group_id)
+    data: dict = {}
+    if path.exists():
+        try:
+            with path.open(encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        except Exception as e:
+            logger.warning("failed to load last interaction at %s; resetting: %s", path, e)
+    data[str(user_id)] = {"record": dict(record)}
+    atomic_write_json(path, data)
 
 
 def _problem_id_from_problem(problem: dict) -> str:

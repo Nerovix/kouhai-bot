@@ -43,7 +43,9 @@ from ..shared import (
     remember_problem_rating,
     parse_json_with_llm_repair,
     record_kind,
+    remember_group_last_interaction,
     remove_user_submission,
+    REPLIED_RESULTS,
     save_scoreboard,
     save_user_submission,
     second_judge_submission_result,
@@ -79,6 +81,7 @@ from ...private_judge import (
     mark_private_solved,
     remove_private_submission,
     replace_private_problem_history,
+    remember_private_last_interaction,
     save_private_submission,
     send_problem_card_private,
     set_private_current_problem,
@@ -735,8 +738,12 @@ class GroupCoordinator:
                 return False
             if req.is_private:
                 save_private_submission(req.user_id, record)
+                if record.get("result") in REPLIED_RESULTS:
+                    remember_private_last_interaction(req.user_id, record)
             else:
                 save_user_submission(req.group_id, req.user_id, record)
+                if record.get("result") in REPLIED_RESULTS:
+                    remember_group_last_interaction(req.group_id, req.user_id, record)
             return True
 
     async def _remove_context_record(self, req: PendingRequest) -> None:

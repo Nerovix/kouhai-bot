@@ -1,8 +1,10 @@
-"""Tests for /bad — record dissatisfaction with the AI's latest replied interaction.
+"""Tests for /bad — record dissatisfaction with the AI's latest delivered reply.
 
-The report must snapshot the target record verbatim into bad_reports.json
-(group: groups/<gid>/, private: private_judge/bad_reports/<uid>.json), append
-on repeat, and never touch the frozen user_submissions stores.
+Targeting goes through the per-user last-interaction cache (survives problem
+switches and /clear), falling back to a full-history scan for replies older
+than the cache. Reports snapshot the target record verbatim into
+bad_reports.json (group: groups/<gid>/, private: private_judge/bad_reports/)
+and never touch the frozen user_submissions stores.
 """
 
 import sys, os, json, asyncio
@@ -13,12 +15,18 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kouhai_bot.handlers.cmd import bad as bad_cmd
-from kouhai_bot.handlers.shared import append_bad_report, load_bad_reports
+from kouhai_bot.handlers.cmd.submit import PendingRequest, _get_coordinator
+from kouhai_bot.handlers.shared import (
+    append_bad_report,
+    load_bad_reports,
+    load_group_last_interaction,
+    remember_group_last_interaction,
+)
 from kouhai_bot.private_judge import (
     append_private_bad_report,
     load_private_bad_reports,
-    save_private_submission,
-    set_private_current_problem,
+    load_private_last_interaction,
+    remember_private_last_interaction,
 )
 
 GID = 999999
@@ -143,6 +151,20 @@ def _record(ts, *, type_="submit", result="", reply="", reason="", pid=PID,
     return record
 
 
+def _seed_group_cache(tmp_path, record, user_id=UID):
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+        remember_group_last_interaction(GID, user_id, record)
+
+
+def _seed_private_cache(tmp_path, record):
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+        remember_private_last_interaction(UID, record)
+
+
 def _write_group_state(tmp_path, pid=PID):
     d = tmp_path / "groups" / str(GID)
     d.mkdir(parents=True, exist_ok=True)
@@ -163,12 +185,20 @@ def _group_reports_path(tmp_path):
     return tmp_path / "groups" / str(GID) / "bad_reports.json"
 
 
+def _group_cache_path(tmp_path):
+    return tmp_path / "groups" / str(GID) / "last_interaction.json"
+
+
 def _private_reports_path(tmp_path):
     return tmp_path / "private_judge" / "bad_reports" / f"{UID}.json"
 
 
+def _private_cache_path(tmp_path):
+    return tmp_path / "private_judge" / "last_interaction" / f"{UID}.json"
+
+
 # ═══════════════════════════════════════════════════════════════════════
-# Storage helpers
+# bad_reports storage
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_append_bad_report_assigns_incrementing_ids_and_shape(tmp_path):
@@ -199,6 +229,7 @@ def test_append_private_bad_report_shape_and_state_untouched(tmp_path):
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
+        from kouhai_bot.private_judge import save_private_submission
         save_private_submission(UID, {"request_id": "a", "result": "correct", "problem": PID})
         state_before = (tmp_path / "private_judge" / "users" / f"{UID}.json").read_text(encoding="utf-8")
         report_id = append_private_bad_report(UID, {"scope": "private", "note": "判错了"})
@@ -238,18 +269,13 @@ def test_corrupt_bad_reports_raise_and_are_not_overwritten(tmp_path):
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
-        try:
-            load_bad_reports(GID)
-            raised = False
-        except ValueError:
-            raised = True
-        assert raised
-        try:
-            append_bad_report(GID, {"scope": "group", "note": ""})
-            append_raised = False
-        except ValueError:
-            append_raised = True
-        assert append_raised
+        for fn in (load_bad_reports, append_bad_report):
+            try:
+                fn(GID) if fn is load_bad_reports else fn(GID, {"scope": "group", "note": ""})
+                raised = False
+            except ValueError:
+                raised = True
+            assert raised
     assert corrupt.read_text(encoding="utf-8") == "{not json"
 
 
@@ -259,14 +285,97 @@ def test_atomic_write_leaves_no_tmp_files(tmp_path):
             stack.enter_context(p)
         append_bad_report(GID, {"scope": "group", "note": ""})
         append_private_bad_report(UID, {"scope": "private", "note": ""})
-    leftovers = list(tmp_path.rglob("*.tmp*")) + [
-        p for p in tmp_path.rglob(".*.tmp*")
-    ]
+    leftovers = list(tmp_path.rglob("*.tmp*"))
     assert not leftovers, leftovers
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# _received_reply / _record_kind
+# last-interaction cache helpers
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_group_last_interaction_is_per_user(tmp_path):
+    record_a = _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="A")
+    record_b = _record("2026-09-11T20:01:03+08:00", type_="submit", result="correct", reply="B")
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+        remember_group_last_interaction(GID, 1, record_a)
+        remember_group_last_interaction(GID, 2, record_b)
+        entry_1 = load_group_last_interaction(GID, 1)
+        entry_2 = load_group_last_interaction(GID, 2)
+    assert entry_1["record"]["reply"] == "A"
+    assert entry_2["record"]["reply"] == "B"
+
+
+def test_corrupt_last_interaction_cache_reads_as_missing(tmp_path):
+    _group_cache_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    _group_cache_path(tmp_path).write_text("{not json", encoding="utf-8")
+    _private_cache_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    _private_cache_path(tmp_path).write_text("[1,2]", encoding="utf-8")
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+        assert load_group_last_interaction(GID, UID) is None
+        assert load_private_last_interaction(UID) is None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# _save_context_record hook
+# ═══════════════════════════════════════════════════════════════════════
+
+def _pending_req(*, scope="group", seq=1, command="clarify"):
+    return PendingRequest(
+        kind=command, group_id=GID, user_id=UID,
+        sender={"nickname": "Alice"}, message_id="msg_001", command=command,
+        nickname="Alice", scope=scope, payload="问题", target_pid=PID, seq=seq,
+    )
+
+
+def test_save_context_record_updates_cache_for_replied_results(tmp_path):
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+
+        async def _scenario():
+            coord = _get_coordinator(GID)
+            replied = _record("2026-09-11T20:00:03+08:00", type_="clarify",
+                              result="clarify", reply="J(x) 是…", request_id="local-1")
+            await coord._save_context_record(_pending_req(), replied)
+            pending = _record("2026-09-11T20:00:04+08:00", type_="submit",
+                              result="pending", request_id="local-2")
+            await coord._save_context_record(_pending_req(seq=2, command="submit"), pending)
+            private_rec = _record("2026-09-11T20:00:05+08:00", type_="review",
+                                  result="review", reply="复盘…", request_id="local-3")
+            await coord._save_context_record(_pending_req(scope="private"), private_rec)
+
+        asyncio.run(_scenario())
+        group_cached = load_group_last_interaction(GID, UID)
+        private_cached = load_private_last_interaction(UID)
+    assert group_cached["record"]["request_id"] == "local-1"  # pending write did not replace it
+    assert private_cached["record"]["request_id"] == "local-3"
+
+
+def test_save_context_record_cache_respects_clear_watermark(tmp_path):
+    """A request finalized after /clear must not resurrect a cache entry."""
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+
+        async def _scenario():
+            coord = _get_coordinator(GID)
+            coord.clear_watermarks[("group", GID, UID, PID)] = 5
+            replied = _record("2026-09-11T20:00:03+08:00", type_="clarify",
+                              result="clarify", reply="…", request_id="local-1")
+            return await coord._save_context_record(_pending_req(seq=1), replied)
+
+        ok = asyncio.run(_scenario())
+        cached = load_group_last_interaction(GID, UID)
+    assert ok is False
+    assert cached is None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# _received_reply classification
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_received_reply_classifies_records():
@@ -298,21 +407,18 @@ def test_received_reply_classifies_records():
 # Handler — group scope
 # ═══════════════════════════════════════════════════════════════════════
 
-def test_bad_group_targets_latest_replied_record(tmp_path):
+def test_bad_group_marks_cached_record_verbatim(tmp_path):
     _reset_captures()
     _write_group_state(tmp_path)
-    records = [
-        _record("2026-09-11T20:00:01+08:00", type_="submit", result="pending",
-                request_id="local-1"),
-        _record("2026-09-11T20:00:02+08:00", type_="submit", result="superseded",
-                request_id="local-2"),
-        _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify",
-                reply="J(x) 是特殊因子和…", request_id="local-3", model_tag="deepseek-v4-flash"),
-        _record("2026-09-11T20:00:04+08:00", type_="submit", result="incorrect",
-                reply="", reason="复杂度分析说 O(2^n)", request_id="local-4",
-                model_tag="deepseek-v4-pro", content="我 submission 的内容"),
-    ]
-    _write_scoreboard(tmp_path, records)
+    record = _record(
+        "2026-09-11T20:00:04+08:00", type_="submit", result="incorrect",
+        reply="", reason="复杂度分析说 O(2^n)", request_id="local-4",
+        model_tag="deepseek-v4-pro", content="我 submission 的内容",
+    )
+    _seed_group_cache(tmp_path, record)
+    _write_scoreboard(tmp_path, [
+        _record("2026-09-11T20:00:01+08:00", type_="submit", result="pending", request_id="local-1"),
+    ])
     scoreboard_before = (tmp_path / "groups" / str(GID) / "scoreboard.json").read_text(encoding="utf-8")
 
     with ExitStack() as stack:
@@ -329,17 +435,129 @@ def test_bad_group_targets_latest_replied_record(tmp_path):
     assert report["note"] == "判错了吧"
     assert report["cmd_message_id"] == "msg_001"
     assert report["target"]["problem"] == PID
-    assert report["target"]["record_index"] == 3
-    assert report["target"]["record"] == records[3]  # verbatim snapshot
+    assert report["target"]["record"] == record  # verbatim snapshot
     assert (tmp_path / "groups" / str(GID) / "scoreboard.json").read_text(encoding="utf-8") == scoreboard_before
+
+
+def test_bad_group_crosses_problem_switch(tmp_path):
+    """刷新题后仍可标注上一题的回复。"""
+    _reset_captures()
+    _write_group_state(tmp_path, pid=OTHER_PID)  # problem already refreshed
+    record = _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify",
+                     reply="旧题的回复", pid=PID, request_id="local-1")
+    _seed_group_cache(tmp_path, record)
+
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad 刷题前的回复"))))
+
+    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
+    assert data["reports"][0]["target"]["problem"] == PID
+    assert data["reports"][0]["target"]["record"]["reply"] == "旧题的回复"
+
+
+def test_bad_group_survives_clear(tmp_path):
+    """/clear 只清 history，不清 last-interaction 缓存。"""
+    _reset_captures()
+    _write_group_state(tmp_path)
+    record = _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify",
+                     reply="clear 前的回复", request_id="local-1")
+    _seed_group_cache(tmp_path, record)
+    # /clear wiped the history: scoreboard has nothing for this user anymore.
+    _write_scoreboard(tmp_path, [])
+
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
+
+    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
+    assert data["reports"][0]["target"]["record"]["reply"] == "clear 前的回复"
+
+
+def test_bad_group_fallback_scans_history_across_problems(tmp_path):
+    """缓存之前的旧回复（迁移期）：全历史扫描，跨题目取最新已回复。"""
+    _reset_captures()
+    _write_group_state(tmp_path, pid=OTHER_PID)
+    _write_scoreboard(tmp_path, [
+        _record("2026-09-11T19:00:00+08:00", type_="clarify", result="clarify",
+                reply="旧题回复", pid=PID, request_id="local-1"),
+        _record("2026-09-11T20:00:03+08:00", type_="submit", result="correct",
+                reply="新题回复", pid=OTHER_PID, request_id="local-2"),
+        _record("2026-09-11T20:00:04+08:00", type_="submit", result="pending",
+                pid=OTHER_PID, request_id="local-3"),
+    ])
+
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
+
+    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
+    assert data["reports"][0]["target"]["record"]["request_id"] == "local-2"
+    assert data["reports"][0]["target"]["problem"] == OTHER_PID
+
+
+def test_bad_group_corrupt_cache_falls_back_to_history(tmp_path):
+    _reset_captures()
+    _group_cache_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    _group_cache_path(tmp_path).write_text("{not json", encoding="utf-8")
+    _write_scoreboard(tmp_path, [
+        _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify",
+                reply="历史里的回复", request_id="local-1"),
+    ])
+
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
+
+    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
+    assert data["reports"][0]["target"]["record"]["reply"] == "历史里的回复"
+
+
+def test_bad_group_marks_delivered_failure_notice(tmp_path):
+    """A timeout that delivered '模型服务出故障了' is a markable latest reply."""
+    _reset_captures()
+    _write_group_state(tmp_path)
+    _seed_group_cache(tmp_path, _record(
+        "2026-09-11T20:00:02+08:00", type_="submit", result="timeout", request_id="local-2",
+    ))
+
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad 超时了"))))
+
+    assert _reacted == [("msg_001", "128076")], _reacted
+    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
+    assert data["reports"][0]["note"] == "超时了"
+    assert data["reports"][0]["target"]["record"]["result"] == "timeout"
+
+
+def test_bad_group_no_target(tmp_path):
+    _reset_captures()
+    # No cache, no replied history (empty and all-never-delivered variants).
+    for records in ([], [
+        _record("2026-09-11T20:00:01+08:00", type_="submit", result="pending", request_id="local-1"),
+        _record("2026-09-11T20:00:02+08:00", type_="submit", result="superseded", request_id="local-2"),
+    ]):
+        _write_scoreboard(tmp_path, records)
+        with ExitStack() as stack:
+            for p in _patches(tmp_path):
+                stack.enter_context(p)
+            asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
+        assert "还没有可以标注的 AI 回复" in _last_group_text(), _sent
+        assert not _group_reports_path(tmp_path).exists()
+        assert not _reacted
 
 
 def test_bad_group_repeat_appends_new_report(tmp_path):
     _reset_captures()
-    _write_group_state(tmp_path)
-    _write_scoreboard(tmp_path, [
-        _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…"),
-    ])
+    _seed_group_cache(tmp_path, _record(
+        "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…",
+    ))
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
@@ -355,10 +573,9 @@ def test_bad_group_repeat_appends_new_report(tmp_path):
 def test_bad_group_concurrent_reports_get_sequential_ids(tmp_path):
     """Two in-flight /bad must not interleave the read-modify-write of bad_reports.json."""
     _reset_captures()
-    _write_group_state(tmp_path)
-    _write_scoreboard(tmp_path, [
-        _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…"),
-    ])
+    _seed_group_cache(tmp_path, _record(
+        "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…",
+    ))
 
     async def _run_two():
         await asyncio.gather(
@@ -377,96 +594,11 @@ def test_bad_group_concurrent_reports_get_sequential_ids(tmp_path):
     assert len(_reacted) == 2
 
 
-def test_bad_group_ignores_other_problem_records(tmp_path):
-    _reset_captures()
-    _write_group_state(tmp_path)
-    records = [
-        _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="当前题回复"),
-        _record("2026-09-11T20:30:00+08:00", type_="clarify", result="clarify",
-                reply="别的题更新回复", pid=OTHER_PID),
-    ]
-    _write_scoreboard(tmp_path, records)
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
-    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
-    assert data["reports"][0]["target"]["record"]["reply"] == "当前题回复"
-    assert data["reports"][0]["target"]["record_index"] == 0
-
-
-def test_bad_group_no_current_problem(tmp_path):
-    _reset_captures()
-    _write_scoreboard(tmp_path, [
-        _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…"),
-    ])
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
-    assert "还没有今日题目哦" in _last_group_text(), _sent
-    assert not _group_reports_path(tmp_path).exists()
-    assert not _reacted
-
-
-def test_bad_group_no_history_for_problem(tmp_path):
-    _reset_captures()
-    _write_group_state(tmp_path, pid=OTHER_PID)
-    _write_scoreboard(tmp_path, [
-        _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…"),
-    ])
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
-    assert "还没有和 AI 的交流记录" in _last_group_text(), _sent
-    assert not _group_reports_path(tmp_path).exists()
-
-
-def test_bad_group_no_replied_records(tmp_path):
-    _reset_captures()
-    _write_group_state(tmp_path)
-    _write_scoreboard(tmp_path, [
-        _record("2026-09-11T20:00:01+08:00", type_="submit", result="pending", request_id="local-1"),
-        _record("2026-09-11T20:00:02+08:00", type_="submit", result="superseded",
-                request_id="local-2"),
-    ])
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
-    assert "还没有收到 AI 回复" in _last_group_text(), _sent
-    assert not _group_reports_path(tmp_path).exists()
-
-
-def test_bad_group_marks_delivered_failure_notice(tmp_path):
-    """A timeout that delivered '模型服务出故障了' is a markable latest reply."""
-    _reset_captures()
-    _write_group_state(tmp_path)
-    _write_scoreboard(tmp_path, [
-        _record("2026-09-11T20:00:01+08:00", type_="clarify", result="clarify",
-                reply="J(x) 是特殊因子和…", request_id="local-1"),
-        _record("2026-09-11T20:00:02+08:00", type_="submit", result="timeout",
-                request_id="local-2"),
-    ])
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad 超时了"))))
-
-    assert _reacted == [("msg_001", "128076")], _reacted
-    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
-    assert data["reports"][0]["note"] == "超时了"
-    assert data["reports"][0]["target"]["record_index"] == 1
-    assert data["reports"][0]["target"]["record"]["result"] == "timeout"
-
-
 def test_bad_group_corrupt_store_shows_failure(tmp_path):
     _reset_captures()
-    _write_group_state(tmp_path)
-    _write_scoreboard(tmp_path, [
-        _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…"),
-    ])
+    _seed_group_cache(tmp_path, _record(
+        "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…",
+    ))
     _group_reports_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
     _group_reports_path(tmp_path).write_text("{not json", encoding="utf-8")
     with ExitStack() as stack:
@@ -482,29 +614,13 @@ def test_bad_group_corrupt_store_shows_failure(tmp_path):
 # Handler — private scope
 # ═══════════════════════════════════════════════════════════════════════
 
-def _setup_private_problem(tmp_path):
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        set_private_current_problem(UID, {
-            "today": PID, "contestId": 542, "index": "D",
-            "name": "Superhero's Job", "rating": 2600,
-        })
-
-
-def test_bad_private_skips_pending_tail(tmp_path):
+def test_bad_private_marks_cached_record(tmp_path):
     _reset_captures()
-    _setup_private_problem(tmp_path)
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        save_private_submission(UID, _record(
-            "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify",
-            reply="J(x) 是特殊因子和…", request_id="local-3", model_tag="deepseek-v4-flash",
-        ))
-        save_private_submission(UID, _record(
-            "2026-09-11T20:00:04+08:00", type_="submit", result="pending", request_id="local-4",
-        ))
+    _seed_private_cache(tmp_path, _record(
+        "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify",
+        reply="J(x) 是特殊因子和…", request_id="local-3", model_tag="deepseek-v4-flash",
+    ))
+
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
@@ -517,17 +633,16 @@ def test_bad_private_skips_pending_tail(tmp_path):
     assert report["scope"] == "private"
     assert report["group_id"] == GID  # dispatcher rewrites private group_id to current_group
     assert report["note"] == "不对"
-    assert report["target"]["record_index"] == 0
     assert report["target"]["record"]["request_id"] == "local-3"
 
 
-def test_bad_private_no_current_problem(tmp_path):
+def test_bad_private_no_target(tmp_path):
     _reset_captures()
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
         asyncio.run(bad_cmd.handle(**_kwargs(_private_event("/bad"))))
-    assert "/setproblem" in _last_private_text(), _private_sent
+    assert "还没有可以标注的 AI 回复" in _last_private_text(), _private_sent
     assert not _private_reports_path(tmp_path).exists()
 
 
@@ -537,11 +652,10 @@ def test_bad_private_no_current_problem(tmp_path):
 
 def test_bad_note_parsing_and_truncation(tmp_path):
     _reset_captures()
-    _write_group_state(tmp_path)
     long_note = "长" * 600
-    _write_scoreboard(tmp_path, [
-        _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…"),
-    ])
+    _seed_group_cache(tmp_path, _record(
+        "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…",
+    ))
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)

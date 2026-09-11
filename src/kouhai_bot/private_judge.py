@@ -226,6 +226,34 @@ def append_private_bad_report(user_id: int, report: dict) -> int:
     return append_bad_report_at(_bad_reports_file(user_id), report)
 
 
+def _last_interaction_file(user_id: int) -> Path:
+    return _data_dir() / "private_judge" / "last_interaction" / f"{int(user_id)}.json"
+
+
+def load_private_last_interaction(user_id: int) -> dict | None:
+    """Latest delivered interaction record in this user's private scope.
+
+    A cache (unlike bad_reports): corrupt/missing files log a warning and
+    return None, and /bad falls back to scanning stored history.
+    """
+    path = _last_interaction_file(user_id)
+    if not path.exists():
+        return None
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning("failed to load last interaction at %s: %s", path, e)
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get("record"), dict) else None
+
+
+def remember_private_last_interaction(user_id: int, record: dict) -> None:
+    """Record the latest delivered interaction (called under the per-user
+    coordinator lock from _save_context_record)."""
+    atomic_write_json(_last_interaction_file(user_id), {"record": dict(record)})
+
+
 def replace_private_problem_history(user_id: int, pid: str, records: list[dict]) -> None:
     state = load_private_state(user_id)
     target = str(pid or "")

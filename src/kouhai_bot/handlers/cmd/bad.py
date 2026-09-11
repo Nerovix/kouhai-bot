@@ -8,7 +8,13 @@ from datetime import datetime
 
 from .. import registry
 from ..registry import CommandDef
-from ..shared import append_bad_report, get_today_problem, record_kind
+from ..shared import (
+    REPLIED_RESULTS,
+    append_bad_report,
+    load_group_last_interaction,
+    load_user_submissions,
+    record_kind,
+)
 from ...napcat.client import (
     build_at,
     build_plain_message,
@@ -23,9 +29,8 @@ from ...private_judge import (
     PRIVATE_SCOPE,
     TZ,
     append_private_bad_report,
-    get_private_current_pid,
-    group_problem_history,
-    load_private_problem_history,
+    load_private_last_interaction,
+    load_private_submissions,
 )
 from .submit import run_group_state_update
 
@@ -34,24 +39,13 @@ logger = logging.getLogger("kouhai-bot.cmd.bad")
 OK_REACTION_ID = "128076"
 NOTE_MAX_LEN = 500
 
-# Results whose live message reached the user: real LLM answers (an
-# incorrect verdict with an empty reply fell back to the reason live, see
-# format_history_records) AND failure notices — timeout /
-# service_unavailable / no_statement / image_unsupported all delivered a
-# message before the record was saved. Only pending and superseded never
-# delivered anything the user could complain about.
-_REPLIED_RESULTS = {
-    "correct", "incorrect", "clarify", "review",
-    "timeout", "service_unavailable", "no_statement", "image_unsupported",
-}
-
 
 def _received_reply(record: dict) -> bool:
     kind = record_kind(record)
     if not kind:
         return False
     result = str(record.get("result", "") or "")
-    if result not in _REPLIED_RESULTS:
+    if result not in REPLIED_RESULTS:
         # pending (still in flight) / superseded (dropped without a reply).
         return False
     if result in {"clarify", "review"} and not str(record.get("reply", "") or "").strip():
@@ -68,6 +62,32 @@ def _find_bad_target(history: list[dict]) -> tuple[int, dict] | None:
         if isinstance(record, dict) and _received_reply(record):
             return idx, record
     return None
+
+
+def _resolve_target(scope: str, group_id: int, user_id: int) -> dict | None:
+    """The latest DELIVERED reply in this scope, regardless of problem.
+
+    Primary source is the per-user last-interaction cache (survives problem
+    switches and /clear); replies older than the cache deployment fall back
+    to a full-history scan across all problems.
+    """
+    entry = (
+        load_private_last_interaction(user_id)
+        if scope == PRIVATE_SCOPE
+        else load_group_last_interaction(group_id, user_id)
+    )
+    record = entry.get("record") if isinstance(entry, dict) else None
+    if isinstance(record, dict) and _received_reply(record):
+        return record
+
+    history = (
+        load_private_submissions(user_id)
+        if scope == PRIVATE_SCOPE
+        else load_user_submissions(group_id, user_id)
+    )
+    history = sorted(history, key=lambda item: str(item.get("timestamp", "")))
+    target = _find_bad_target(history)
+    return target[1] if target else None
 
 
 async def _send_text(scope: str, group_id: int, user_id: int, text: str) -> None:
@@ -106,42 +126,14 @@ async def handle(group_id: int, user_id: int, sender: dict,
         note = note[:NOTE_MAX_LEN]
 
     try:
-        if scope == PRIVATE_SCOPE:
-            pid = get_private_current_pid(user_id)
-        else:
-            problem = get_today_problem(group_id)
-            pid = str(problem.get("today", "") or "") if problem else ""
-
-        if not pid:
-            if scope == PRIVATE_SCOPE:
-                await _send_text(
-                    scope, group_id, user_id,
-                    "当前还没有 private judge 题目～先发 /setproblem 设置一道题吧。",
-                )
-            else:
-                await _send_text(scope, group_id, user_id, "还没有今日题目哦～")
-            return
-
-        if scope == PRIVATE_SCOPE:
-            history = load_private_problem_history(user_id, pid)
-        else:
-            history = group_problem_history(group_id, user_id, pid)
-
-        if not history:
+        record = _resolve_target(scope, group_id, user_id)
+        if record is None:
             await _send_text(
                 scope, group_id, user_id,
-                "这题这边还没有和 AI 的交流记录哦～先 /submit、/clarify 或 /review 一次再 /bad 吧。",
+                "这边还没有可以标注的 AI 回复哦～先 /submit、/clarify 或 /review 一次，"
+                "收到回复后再来 /bad 吧。",
             )
             return
-
-        target = _find_bad_target(history)
-        if target is None:
-            await _send_text(
-                scope, group_id, user_id,
-                "这题最近的交互还没有收到 AI 回复（可能还在处理中），等回复后再 /bad 哦～",
-            )
-            return
-        record_index, record = target
 
         report = {
             "scope": scope,
@@ -151,8 +143,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
             "note": note,
             "cmd_message_id": str(message_id or ""),
             "target": {
-                "problem": pid,
-                "record_index": int(record_index),
+                "problem": str(record.get("problem", "") or ""),
                 "record": dict(record),
             },
         }

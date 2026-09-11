@@ -495,8 +495,10 @@ groups/<gid>/used.json       # used problem IDs
 groups/<gid>/groupctx_*.json # group message context
 groups/<gid>/problem_ratings.json # cached problem rating by pid for weighted scoreboard totals
 groups/<gid>/bad_reports.json  # /bad feedback reports for the group scope (append-only, see Data Format)
+groups/<gid>/last_interaction.json # per-user latest delivered interaction record (per-scope /bad targeting cache)
 private_judge/users/<uid>.json # per-user private judge current problem, history, solved markers, redirect state
 private_judge/bad_reports/<uid>.json # /bad feedback reports for a user's private-judge scope (append-only)
+private_judge/last_interaction/<uid>.json # latest delivered interaction record (private-scope /bad targeting cache)
 annotations/pending/<gid>/<pid>.json # pending human-label bundle for solved problems
 annotations/labeled/<gid>/<pid>.json # completed human-label bundle for solved problems
 statements/<pid>.json        # cached problem statements
@@ -532,7 +534,7 @@ No repository-local runtime queue is used.
 | `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, `random`, or a quoted problem card. Supports rating range (e.g. `/sp 2500-2600`) for targeted difficulty selection |
 | `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite |
 | `/testcd` | testcd.py | `handle` | ❌ | — | Private-only; show whether this user can submit the current group problem or how long remains in dynamic submit CD |
-| `/bad` | bad.py | `handle` | ✅ short group state lock for group writes | — | Mark dissatisfaction with the AI's latest replied interaction for the current problem in the current scope — any record whose live message was delivered (LLM answers incl. reason-fallback incorrect verdicts, and failure notices timeout/service_unavailable/no_statement/image_unsupported); only pending/superseded tails are skipped; appends a verbatim record snapshot to `bad_reports.json` (group and private stores are separate; `/sync` never moves them); success acks 👌 (128076) exactly like `/clear` (private gets the fallback message); write-only — no in-chat view command yet |
+| `/bad` | bad.py | `handle` | ✅ short group state lock for group writes | — | Mark dissatisfaction with the AI's latest DELIVERED reply in the current scope, regardless of problem (works after `/newproblem` and survives `/clear`) — resolved from the per-user last-interaction cache, falling back to a full-history scan for pre-cache replies; markable = any record whose live message was delivered (LLM answers incl. reason-fallback incorrect verdicts, and failure notices timeout/service_unavailable/no_statement/image_unsupported), only pending/superseded are skipped; appends a verbatim record snapshot to `bad_reports.json` (group and private stores are separate; `/sync` never moves them); success acks 👌 (128076) exactly like `/clear` (private gets the fallback message); write-only — no in-chat view command yet |
 
 ### Stateful Command Runtime
 
@@ -1043,9 +1045,11 @@ same reply appends a new entry). Shape:
       "cmd_message_id": "msg_001",
       "target": {
         "problem": "542D",
-        "record_index": 3,              // 0-based position in the pid-filtered history at report time
         "record": { /* verbatim snapshot of the submission record, incl. request_id/model_tag */ }
       }
+      // NOTE: reports written before the last-interaction cache also carry
+      // target.record_index (0-based position in the then-current history) —
+      // legacy field, no longer written.
     }
   ]
 }
@@ -1058,6 +1062,15 @@ Rules:
 - Group and private `/bad` stores are separate; `/sync` never moves reports.
 - Writes are atomic (`atomic_write_json` in `handlers/shared.py`: tempfile +
   fsync + `os.replace`); group appends run under `run_group_state_update`.
+- Targeting (scope-local, crosses problem switches, survives `/clear`): the
+  per-user last-interaction cache (`groups/<gid>/last_interaction.json` keyed by
+  uid / `private_judge/last_interaction/<uid>.json`, shape `{"record": {...}}`)
+  is authoritative; if empty/corrupt, /bad falls back to scanning the user's
+  full stored history across all problems. The cache is a CACHE: corrupt files
+  read as missing (warn + None), unlike bad_reports which raise. It is updated
+  inside `_save_context_record` (under the coordinator lock, after the
+  clear-watermark guard) whenever a record with a replied result is persisted —
+  so `/clear` never wipes it and stale in-flight finalizes never resurrect it.
 - "Replied" = the live message was delivered: results
   `correct/incorrect/clarify/review` (an empty-reply incorrect verdict fell back
   to `reason` live) plus the failure notices

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import get_config
-from ..llm import ChatCompletionResult, append_model_tag, chat_completion, strip_leaked_thinking, strip_model_tags
+from ..llm import ChatCompletionResult, chat_completion, strip_leaked_thinking, strip_model_tags
 from ..problem_content import (
     format_problem_statement_for_llm,
     load_statement_json,

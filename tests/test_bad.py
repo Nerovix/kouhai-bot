@@ -335,6 +335,31 @@ def test_bad_group_repeat_appends_new_report(tmp_path):
     assert data["reports"][1]["cmd_message_id"] == "msg_002"
 
 
+def test_bad_group_concurrent_reports_get_sequential_ids(tmp_path):
+    """Two in-flight /bad must not interleave the read-modify-write of bad_reports.json."""
+    _reset_captures()
+    _write_group_state(tmp_path)
+    _write_scoreboard(tmp_path, [
+        _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…"),
+    ])
+
+    async def _run_two():
+        await asyncio.gather(
+            bad_cmd.handle(**_kwargs(_group_event("/bad 第一条"))),
+            bad_cmd.handle(**_kwargs(_group_event("/bad 第二条", message_id="msg_002"))),
+        )
+
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+        asyncio.run(_run_two())
+
+    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
+    assert sorted(r["id"] for r in data["reports"]) == [1, 2]
+    assert {r["note"] for r in data["reports"]} == {"第一条", "第二条"}
+    assert len(_reacted) == 2
+
+
 def test_bad_group_ignores_other_problem_records(tmp_path):
     _reset_captures()
     _write_group_state(tmp_path)

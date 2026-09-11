@@ -494,8 +494,8 @@ groups/<gid>/problem_summaries.json # verified, source-bound Chinese summaries k
 groups/<gid>/used.json       # used problem IDs
 groups/<gid>/groupctx_*.json # group message context
 groups/<gid>/problem_ratings.json # cached problem rating by pid for weighted scoreboard totals
-private_judge/users/<uid>.json # per-user private judge current problem, history, solved markers, redirect state
 groups/<gid>/bad_reports.json  # /bad feedback reports for the group scope (append-only, see Data Format)
+private_judge/users/<uid>.json # per-user private judge current problem, history, solved markers, redirect state
 private_judge/bad_reports/<uid>.json # /bad feedback reports for a user's private-judge scope (append-only)
 annotations/pending/<gid>/<pid>.json # pending human-label bundle for solved problems
 annotations/labeled/<gid>/<pid>.json # completed human-label bundle for solved problems

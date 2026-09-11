@@ -3128,6 +3128,43 @@ def test_private_bad_dispatches_and_records_report():
     print("✅ private /bad: allowlist dispatch and report persistence")
 
 
+def test_group_bad_dispatches_and_normalizes_command_case():
+    _reset_state()
+    _setup_problem()
+    _write_scoreboard(GID, {"solves": [], "user_submissions": {str(UID): [
+        {
+            "timestamp": "2026-09-11T20:00:03+08:00",
+            "type": "clarify",
+            "content": "J(x) 是什么",
+            "result": "clarify",
+            "reason": "",
+            "reply": "J(x) 是特殊因子和…",
+            "problem": PID,
+            "request_id": "local-1",
+        },
+    ]}})
+
+    with _all_patches():
+        from kouhai_bot.handlers import process_event
+        from kouhai_bot.handlers.registry import discover_commands
+        from kouhai_bot.handlers.shared import load_bad_reports
+
+        discover_commands()
+        # The dispatcher canonicalizes the command token, so /BAD reaches the
+        # handler as /bad with the note intact.
+        asyncio.run(process_event(_make_event("/BAD 判错了"), spawn_handlers=False))
+
+        assert _reacted == [("msg_001", "128076")], _reacted
+        reports = load_bad_reports(GID)["reports"]
+        assert len(reports) == 1, reports
+        assert reports[0]["scope"] == "group"
+        assert reports[0]["note"] == "判错了"
+        assert reports[0]["target"]["problem"] == PID
+        assert reports[0]["target"]["record"]["request_id"] == "local-1"
+    _cleanup()
+    print("✅ group /bad: dispatch case normalization and report persistence")
+
+
 def test_private_testcd_shows_remaining_for_starred_user():
     _reset_state()
     _setup_problem_for(GID, PID)

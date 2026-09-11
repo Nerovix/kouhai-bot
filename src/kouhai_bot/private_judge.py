@@ -5,10 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import random
 import re
-import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +18,7 @@ from .config import get_config
 from .llm import append_model_tag
 from .handlers.shared import (
     append_bad_report_at,
+    atomic_write_json,
     get_problem_summary,
     get_today_problem,
     high_difficulty_notice,
@@ -139,39 +138,10 @@ def load_private_state(user_id: int) -> dict[str, Any]:
 
 
 def save_private_state(user_id: int, state: dict[str, Any]) -> None:
-    path = _state_file(user_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_name = ""
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as f:
-            tmp_name = f.name
-            json.dump(state, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_name, path)
-        try:
-            dir_fd = os.open(path.parent, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    except Exception:
-        if tmp_name:
-            try:
-                os.unlink(tmp_name)
-            except FileNotFoundError:
-                pass
-        raise
+    # Atomic write discipline lives in shared.atomic_write_json (tempfile +
+    # fsync + os.replace + dir fsync) — the single implementation for all
+    # stores that need crash safety.
+    atomic_write_json(_state_file(user_id), state)
 
 
 def get_private_current_problem(user_id: int) -> dict | None:

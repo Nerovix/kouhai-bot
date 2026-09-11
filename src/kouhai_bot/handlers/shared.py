@@ -754,12 +754,17 @@ def atomic_write_json(path: Path | str, payload: dict) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_name, target)
+        # Durability of the rename itself. A failure here (EINVAL/EBADF on
+        # some FUSE/NFS mounts) must not mask the already-completed replace
+        # as a write failure — the caller would retry and duplicate data.
         try:
             dir_fd = os.open(target.parent, os.O_RDONLY)
         except OSError:
             return
         try:
             os.fsync(dir_fd)
+        except OSError as e:
+            logger.warning("dir fsync failed after atomic write of %s: %s", target, e)
         finally:
             os.close(dir_fd)
     except Exception:
@@ -794,8 +799,16 @@ def load_bad_reports_at(path: Path) -> dict:
     except Exception as e:
         logger.warning("failed to load bad reports at %s: %s", path, e)
         raise ValueError(f"unreadable bad reports file: {path}") from e
-    if not isinstance(data, dict) or not isinstance(data.get("reports"), list):
+    if not isinstance(data, dict):
         logger.warning("bad reports at %s have unexpected shape", path)
+        raise ValueError(f"malformed bad reports file: {path}")
+    reports = data.get("reports")
+    if reports is None:
+        # dict without the key (e.g. operator-created {}): tolerated, the
+        # next append rewrites the file in the proper shape.
+        data["reports"] = []
+    elif not isinstance(reports, list):
+        logger.warning("bad reports at %s have non-list reports", path)
         raise ValueError(f"malformed bad reports file: {path}")
     return data
 
@@ -1086,6 +1099,25 @@ def get_judge_prompt() -> str:
         with open(prompt_path, encoding="utf-8") as f:
             return f.read()
     return "You are a competitive programming judge."
+
+
+def record_kind(record: dict) -> str:
+    """Canonical interaction kind of a history record.
+
+    Explicit "type" wins; legacy records without it fall back to "result"
+    (clarify/review verbatim, correct/incorrect → submit). "" when the record
+    is none of the three interaction kinds. Single source of truth for
+    /bad targeting and _build_review_history — keep them from drifting.
+    """
+    explicit = record.get("type", "")
+    if explicit in {"submit", "clarify", "review"}:
+        return explicit
+    result = record.get("result", "")
+    if result in {"clarify", "review"}:
+        return result
+    if result in {"correct", "incorrect"}:
+        return "submit"
+    return ""
 
 
 def _dialogue_kind(item_type: str, result: str) -> str:

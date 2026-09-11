@@ -217,6 +217,20 @@ def test_load_bad_reports_missing_file_returns_empty(tmp_path):
     assert data == {"version": 1, "reports": []}
 
 
+def test_bad_reports_without_reports_key_are_repaired_by_append(tmp_path):
+    """An operator-created {} file must not permanently brick /bad."""
+    path = tmp_path / "groups" / str(GID) / "bad_reports.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": 1}), encoding="utf-8")
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+        report_id = append_bad_report(GID, {"scope": "group", "note": "修复形状"})
+        data = load_bad_reports(GID)
+    assert report_id == 1
+    assert [r["note"] for r in data["reports"]] == ["修复形状"]
+
+
 def test_corrupt_bad_reports_raise_and_are_not_overwritten(tmp_path):
     _write_group_state(tmp_path)
     corrupt = tmp_path / "groups" / str(GID) / "bad_reports.json"
@@ -262,19 +276,22 @@ def test_received_reply_classifies_records():
     assert f({"result": "incorrect", "reply": "", "reason": "复杂度错了"})
     assert f({"type": "clarify", "result": "clarify", "reply": "J(x) 是…"})
     assert f({"type": "review", "result": "review", "reply": "复盘…"})
-    # Never-replied outcomes.
+    # Failure notices were delivered to the user, so they are markable.
+    assert f({"type": "submit", "result": "timeout"})
+    assert f({"type": "submit", "result": "service_unavailable"})
+    assert f({"type": "submit", "result": "no_statement"})
+    assert f({"type": "submit", "result": "image_unsupported"})
+    assert f({"type": "clarify", "result": "service_unavailable", "reply": ""})
+    # Never-delivered outcomes.
     assert not f({"type": "submit", "result": "pending"})
     assert not f({"type": "submit", "result": "superseded"})
-    assert not f({"type": "submit", "result": "no_statement"})
-    assert not f({"type": "submit", "result": "service_unavailable"})
-    assert not f({"type": "submit", "result": "timeout"})
-    assert not f({"type": "submit", "result": "image_unsupported"})
-    # Defensive: clarify/review with an empty reply never reached the user.
+    # Defensive: an LLM-answer result with an empty reply never reached the user.
     assert not f({"type": "clarify", "result": "clarify", "reply": ""})
     assert not f({"type": "review", "result": "review", "reply": "   "})
     # Unknown kinds never count.
     assert not f({"type": "clear", "result": "cleared"})
     assert not f({"result": "whatever"})
+    assert not f({"result": "timeout"})  # failure result but not an interaction kind
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -411,7 +428,7 @@ def test_bad_group_no_replied_records(tmp_path):
     _write_group_state(tmp_path)
     _write_scoreboard(tmp_path, [
         _record("2026-09-11T20:00:01+08:00", type_="submit", result="pending", request_id="local-1"),
-        _record("2026-09-11T20:00:02+08:00", type_="submit", result="service_unavailable",
+        _record("2026-09-11T20:00:02+08:00", type_="submit", result="superseded",
                 request_id="local-2"),
     ])
     with ExitStack() as stack:
@@ -420,6 +437,28 @@ def test_bad_group_no_replied_records(tmp_path):
         asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
     assert "还没有收到 AI 回复" in _last_group_text(), _sent
     assert not _group_reports_path(tmp_path).exists()
+
+
+def test_bad_group_marks_delivered_failure_notice(tmp_path):
+    """A timeout that delivered '模型服务出故障了' is a markable latest reply."""
+    _reset_captures()
+    _write_group_state(tmp_path)
+    _write_scoreboard(tmp_path, [
+        _record("2026-09-11T20:00:01+08:00", type_="clarify", result="clarify",
+                reply="J(x) 是特殊因子和…", request_id="local-1"),
+        _record("2026-09-11T20:00:02+08:00", type_="submit", result="timeout",
+                request_id="local-2"),
+    ])
+    with ExitStack() as stack:
+        for p in _patches(tmp_path):
+            stack.enter_context(p)
+        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad 超时了"))))
+
+    assert _reacted == [("msg_001", "128076")], _reacted
+    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
+    assert data["reports"][0]["note"] == "超时了"
+    assert data["reports"][0]["target"]["record_index"] == 1
+    assert data["reports"][0]["target"]["record"]["result"] == "timeout"
 
 
 def test_bad_group_corrupt_store_shows_failure(tmp_path):

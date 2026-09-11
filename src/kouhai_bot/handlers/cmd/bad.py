@@ -8,7 +8,7 @@ from datetime import datetime
 
 from .. import registry
 from ..registry import CommandDef
-from ..shared import append_bad_report, get_today_problem
+from ..shared import append_bad_report, get_today_problem, record_kind
 from ...napcat.client import (
     build_at,
     build_plain_message,
@@ -33,38 +33,32 @@ logger = logging.getLogger("kouhai-bot.cmd.bad")
 
 OK_REACTION_ID = "128076"
 NOTE_MAX_LEN = 500
-_REPLIED_RESULTS = {"correct", "incorrect", "clarify", "review"}
 
-
-def _record_kind(record: dict) -> str:
-    # Same fallback chain as _build_review_history in submit.py and
-    # _dialogue_kind in shared.py — legacy records predate the "type" field.
-    explicit = record.get("type", "")
-    if explicit in {"submit", "clarify", "review"}:
-        return explicit
-    result = record.get("result", "")
-    if result in {"clarify", "review"}:
-        return result
-    if result in {"correct", "incorrect"}:
-        return "submit"
-    return ""
+# Results whose live message reached the user: real LLM answers (an
+# incorrect verdict with an empty reply fell back to the reason live, see
+# format_history_records) AND failure notices — timeout /
+# service_unavailable / no_statement / image_unsupported all delivered a
+# message before the record was saved. Only pending and superseded never
+# delivered anything the user could complain about.
+_REPLIED_RESULTS = {
+    "correct", "incorrect", "clarify", "review",
+    "timeout", "service_unavailable", "no_statement", "image_unsupported",
+}
 
 
 def _received_reply(record: dict) -> bool:
-    kind = _record_kind(record)
+    kind = record_kind(record)
     if not kind:
         return False
-    if str(record.get("result", "") or "") not in _REPLIED_RESULTS:
-        # pending / superseded / no_statement / image_unsupported /
-        # service_unavailable / timeout never produced a delivered reply.
+    result = str(record.get("result", "") or "")
+    if result not in _REPLIED_RESULTS:
+        # pending (still in flight) / superseded (dropped without a reply).
         return False
-    if kind in {"clarify", "review"} and not str(record.get("reply", "") or "").strip():
-        # Defensive: a clarify/review result with an empty reply never
-        # reached the user.
+    if result in {"clarify", "review"} and not str(record.get("reply", "") or "").strip():
+        # Defensive: an LLM-answer result with an empty reply never reached
+        # the user (failure paths store their notice outside the record).
         return False
     return True
-    # submit + incorrect with an empty reply still counts: the live message
-    # fell back to the reason (see format_history_records in private_judge.py).
 
 
 def _find_bad_target(history: list[dict]) -> tuple[int, dict] | None:
@@ -144,7 +138,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
         if target is None:
             await _send_text(
                 scope, group_id, user_id,
-                "这题最近的交互还没有收到 AI 回复（可能还在处理或出错了），等回复后再 /bad 哦～",
+                "这题最近的交互还没有收到 AI 回复（可能还在处理中），等回复后再 /bad 哦～",
             )
             return
         record_index, record = target

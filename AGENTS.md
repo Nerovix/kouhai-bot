@@ -532,7 +532,7 @@ No repository-local runtime queue is used.
 | `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, `random`, or a quoted problem card. Supports rating range (e.g. `/sp 2500-2600`) for targeted difficulty selection |
 | `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite |
 | `/testcd` | testcd.py | `handle` | ❌ | — | Private-only; show whether this user can submit the current group problem or how long remains in dynamic submit CD |
-| `/bad` | bad.py | `handle` | ✅ short group state lock for group writes | — | Mark dissatisfaction with the AI's latest replied interaction for the current problem in the current scope (skips pending/superseded/failed tails); appends a verbatim record snapshot to `bad_reports.json` (group and private stores are separate; `/sync` never moves them); success acks 👌 (128076) exactly like `/clear` (private gets the fallback message); write-only — no in-chat view command yet |
+| `/bad` | bad.py | `handle` | ✅ short group state lock for group writes | — | Mark dissatisfaction with the AI's latest replied interaction for the current problem in the current scope — any record whose live message was delivered (LLM answers incl. reason-fallback incorrect verdicts, and failure notices timeout/service_unavailable/no_statement/image_unsupported); only pending/superseded tails are skipped; appends a verbatim record snapshot to `bad_reports.json` (group and private stores are separate; `/sync` never moves them); success acks 👌 (128076) exactly like `/clear` (private gets the fallback message); write-only — no in-chat view command yet |
 
 ### Stateful Command Runtime
 
@@ -627,7 +627,8 @@ Read-only commands (`/problem`, `/tag`, `/scoreboard`, `/help`, `/status`) still
 not enter the state scheduler.
 Private dispatch maps DMs to `CURRENT_GROUP`, requires the sender to be a member of that
 service group, and only allows the private command whitelist: `/setproblem`, `/problem`,
-`/tag`, `/submit`, `/clarify`, `/review`, `/clear`, `/sync`, `/testcd`, `/status`, and `/help`.
+`/tag`, `/submit`, `/clarify`, `/review`, `/bad`, `/clear`, `/sync`, `/testcd`, `/status`,
+and `/help`.
 Private commands do not require @mentions and should not send @ segments back.
 
 Friend request events are not commands and are not logged to command event logs.
@@ -1057,8 +1058,19 @@ Rules:
 - Group and private `/bad` stores are separate; `/sync` never moves reports.
 - Writes are atomic (`atomic_write_json` in `handlers/shared.py`: tempfile +
   fsync + `os.replace`); group appends run under `run_group_state_update`.
+- "Replied" = the live message was delivered: results
+  `correct/incorrect/clarify/review` (an empty-reply incorrect verdict fell back
+  to `reason` live) plus the failure notices
+  `timeout/service_unavailable/no_statement/image_unsupported`. Only `pending`
+  and `superseded` records are unmarkable. Classification goes through
+  `shared.record_kind` (single source of truth, also used by
+  `_build_review_history`).
+- To keep `/bad` from seeing a sent-but-unsaved pending tail, the clarify/review
+  finalize paths save the record BEFORE delivering the reply (same order as
+  submit) — preserve that ordering.
 - A corrupt bad_reports file makes `load_bad_reports*` raise instead of resetting
   to empty — a silent reset would destroy the report history on the next append.
+  (A dict missing the `reports` key is tolerated; the next append repairs the shape.)
 - `target.record` is a full verbatim snapshot (`reply`/`reason` keep model tags),
   so reports stay replayable even after the underlying history is cleared/synced.
 
@@ -1216,8 +1228,10 @@ could leak.
 
 ### 29. Private judge state writes must be atomic
 `private_judge/users/<uid>.json` is user history, not a disposable cache. Write it via a
-same-directory temp file and `os.replace`, and log JSON/IO load failures before falling
-back to defaults so corruption or permission problems are diagnosable.
+same-directory temp file and `os.replace` (implemented once in
+`shared.atomic_write_json`, which `save_private_state` delegates to), and log JSON/IO
+load failures before falling back to defaults so corruption or permission problems are
+diagnosable.
 
 ## Testing
 

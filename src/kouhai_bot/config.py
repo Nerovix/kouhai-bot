@@ -109,7 +109,6 @@ class BotConfig:
     # --- LLM fallback ---
     llm_smart_providers: list[LlmProviderConfig] = field(default_factory=list)
     llm_general_providers: list[LlmProviderConfig] = field(default_factory=list)
-    llm_multimodal_providers: list[LlmProviderConfig] = field(default_factory=list)
     llm_max_retries: int = 2
     llm_retry_base_delay_sec: float = 1.0
     llm_retry_max_delay_sec: float = 8.0
@@ -176,7 +175,6 @@ class BotConfig:
         (
             c.llm_smart_providers,
             c.llm_general_providers,
-            c.llm_multimodal_providers,
         ) = build_provider_queues_from_yaml(llm)
         c.llm_max_retries = int(llm.get("max_retries", c.llm_max_retries))
         c.llm_retry_base_delay_sec = float(

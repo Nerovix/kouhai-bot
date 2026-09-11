@@ -87,7 +87,7 @@ def test_config_allows_missing_qwen_model(monkeypatch, tmp_path):
     assert cfg.qwen_model == ""
 
 
-def test_config_loads_optional_multimodal_model_queue(monkeypatch, tmp_path):
+def test_config_ignores_legacy_multimodal_model_queue(monkeypatch, tmp_path):
     data = yaml.safe_load(_make_yaml())
     data["llm"]["multimodal_model"] = [
         {
@@ -99,8 +99,8 @@ def test_config_loads_optional_multimodal_model_queue(monkeypatch, tmp_path):
         }
     ]
     cfg = _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
-    assert [p.name for p in cfg.llm_multimodal_providers] == ["mmx"]
-    assert cfg.llm_multimodal_providers[0].model == "mmx-vision"
+    assert not hasattr(cfg, "llm_multimodal_providers")
+    assert [p.name for p in cfg.llm_general_providers] == ["general-test"]
 
 
 def test_config_requires_provider_name(monkeypatch, tmp_path):

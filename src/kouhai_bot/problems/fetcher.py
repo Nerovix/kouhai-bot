@@ -681,7 +681,7 @@ def main():
         print(f"URL: {result['url']}")
         print(f"Formulas: {result['formulas_found']} found, {result['formulas_processed']} processed")
         if result["has_non_formula_images"]:
-            print("⚠ Contains statement images (diagrams) — requires multimodal model")
+            print("⚠ Contains statement images (diagrams) — requires a vision-capable llm.general_model provider")
         if result["formulas_failed"]:
             print(f"⚠ {result['formulas_failed']} formula(s) failed")
         for fr in result.get("formula_details", []):

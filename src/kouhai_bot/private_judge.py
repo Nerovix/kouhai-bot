@@ -24,7 +24,6 @@ from .handlers.shared import (
     high_difficulty_notice,
     load_bad_reports_at,
     load_scoreboard,
-    multimodal_model_configured,
     save_problem_summary,
     save_problem_card_ref,
     sanitize_cached_problem_card_payload,
@@ -63,10 +62,6 @@ _CONTEST_PATH_RE = re.compile(
     r"(?:^|/)contest/(\d+)/problem/([A-Za-z0-9]+)(?:[/?#]|$)",
     re.I,
 )
-
-
-class NonFormulaImageProblem(RuntimeError):
-    """Raised when a statement is unavailable because image context is unsupported."""
 
 
 def _data_dir() -> Path:
@@ -429,29 +424,7 @@ def _ensure_statement(problem: dict) -> dict:
     stmt = picker.fetch_statement(problem)
     if isinstance(stmt, dict):
         return stmt
-    if _has_images(problem) and not multimodal_model_configured():
-        raise NonFormulaImageProblem(_problem_id(problem) or "unknown")
     return {}
-
-
-def _has_images(problem: dict) -> bool:
-    from .problems import picker
-
-    contest_id = problem.get("contestId")
-    index = problem.get("index")
-    if contest_id in (None, "") or not index:
-        return False
-    try:
-        result = picker.cf_statement.process_problem(contest_id, index, vl_backend="none")
-    except Exception as e:
-        logger.warning(
-            "failed to inspect statement images for %s%s: %s",
-            contest_id,
-            index,
-            e,
-        )
-        return False
-    return bool(result.get("formulas_found", 0) or result.get("graphics_found", 0))
 
 
 def resolve_problem_by_pid(pid: str) -> dict:

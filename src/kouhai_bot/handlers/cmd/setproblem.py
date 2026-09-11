@@ -11,7 +11,6 @@ from ..registry import CommandDef
 from ...editorial_followup import schedule_prefetch_editorial
 from ...napcat.client import build_plain_message, send_group_msg, send_private_msg
 from ...private_judge import (
-    NonFormulaImageProblem,
     copy_records,
     current_group_pid,
     group_problem_history,
@@ -190,18 +189,6 @@ async def handle(group_id: int, user_id: int, sender: dict,
             await send_private_msg(user_id, build_plain_message(f"正在设置 CF{pid}，稍等一下～"))
         try:
             problem = await asyncio.to_thread(resolve_problem_by_pid, pid)
-        except NonFormulaImageProblem:
-            if from_quoted_card:
-                await send_private_msg(user_id, build_plain_message(
-                    "这道题的题面里包含图片，但当前没有配置多模态模型，"
-                    "可能看不完整题意。建议先换一道题～"
-                ))
-            else:
-                await send_private_msg(user_id, build_plain_message(
-                    f"CF{pid} 的题面里包含图片，但当前没有配置多模态模型，"
-                    "可能看不完整题意。建议先换一道题～"
-                ))
-            return
         except Exception as e:
             logger.warning("private setproblem resolve failed for %s: %s", pid, e, exc_info=True)
             if from_quoted_card:

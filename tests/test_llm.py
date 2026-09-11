@@ -34,7 +34,7 @@ def _queues(smart_model):
 
 
 def test_provider_rating_bounds_parse_from_yaml():
-    smart, _general, _multimodal = build_provider_queues_from_yaml(_queues([
+    smart, _general = build_provider_queues_from_yaml(_queues([
         {
             "name": "bounded",
             "api_key": "key",

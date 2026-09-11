@@ -78,7 +78,6 @@ def configured_model_tags() -> list[str]:
     queues = (
         getattr(cfg, "llm_smart_providers", None),
         getattr(cfg, "llm_general_providers", None),
-        getattr(cfg, "llm_multimodal_providers", None),
     )
     for providers in queues:
         for provider in providers or []:
@@ -628,9 +627,10 @@ async def chat_completion(
     task_name = (task or "").strip().lower()
     if task_name in {"judge", "review"}:
         providers = cfg.llm_smart_providers
-    elif task_name in {"multimodal", "multimodal_summary", "multimodal_clarify"}:
-        providers = cfg.llm_multimodal_providers
     else:
+        # All non-judge tasks share one queue; multimodal_* task names only
+        # mark that the request carries image parts, so general providers
+        # must accept image inputs.
         providers = cfg.llm_general_providers
     unfiltered_providers = providers
     gated_providers = _apply_rating_gate(

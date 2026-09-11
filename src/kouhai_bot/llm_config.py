@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger("kouhai-bot.llm_config")
 
 
 def _parse_bool(value: Any, *, default: bool = False) -> bool:
@@ -156,16 +159,19 @@ def build_provider_queues_from_yaml(
 ) -> tuple[
     list[LlmProviderConfig],
     list[LlmProviderConfig],
-    list[LlmProviderConfig],
 ]:
     """Build provider fallback queues from the YAML ``llm`` section.
 
     Raises RuntimeError if required queues are empty or required fields are missing.
-    ``multimodal_model`` is optional; an empty/missing section disables image tasks.
+    ``general_model`` providers must accept image inputs: image-bearing
+    summaries/clarify route through the same queue as text tasks.
+    A legacy ``multimodal_model`` section is ignored with a warning.
     """
-    multimodal_raw = llm_section.get("multimodal_model", [])
-    if multimodal_raw in (None, ""):
-        multimodal_raw = []
+    if llm_section.get("multimodal_model"):
+        logger.warning(
+            "config.yaml: llm.multimodal_model is deprecated and ignored; "
+            "merge its providers into llm.general_model"
+        )
     return (
         _build_provider_list(
             llm_section.get("smart_model", []),
@@ -174,13 +180,5 @@ def build_provider_queues_from_yaml(
         _build_provider_list(
             llm_section.get("general_model", []),
             section_name="general_model",
-        ),
-        (
-            _build_provider_list(
-                multimodal_raw,
-                section_name="multimodal_model",
-            )
-            if multimodal_raw
-            else []
         ),
     )

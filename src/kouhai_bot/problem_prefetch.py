@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from .config import get_config
-from .handlers.shared import get_today_problem, load_scoreboard, statement_images
+from .handlers.shared import get_today_problem, load_scoreboard
 from .problem_content import load_statement_json, statement_fingerprint
 from .problem_preparation import (
     PreparedProblem,
@@ -172,8 +172,6 @@ class NextProblemPrefetcher:
             return False, "statement_missing"
         if statement_fingerprint(statement) != prepared.statement_sha256:
             return False, "statement_changed"
-        if statement_images(statement) and not get_config().llm_multimodal_providers:
-            return False, "multimodal_unavailable"
         return True, ""
 
     def _load_slot_locked(self) -> PrefetchedProblem | None:

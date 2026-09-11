@@ -47,7 +47,7 @@ NapCat (QQ) ──WS──> worker.py
   Group and private help are both delivered as merged-forward cards, with direct text
   only as fallback.
 - **Scheduler current-group config**: `~/.kouhai-bot/scheduler_config.json` stores job list + time overrides for `CURRENT_GROUP`. Jobs are defined in `scheduler/jobs.py`.
-- **Multimodal statements**: `problems/fetcher.py` collects CF `tex-formula` and `tex-graphics` image metadata with statement text. Formula images and diagrams are passed to `llm.multimodal_model` for new-problem summaries and `/clarify`; without that queue, picker logs and skips image-bearing problems.
+- **Multimodal statements**: `problems/fetcher.py` collects CF `tex-formula` and `tex-graphics` image metadata with statement text. Formula images and diagrams are attached to new-problem summary and `/clarify` requests, which route through `llm.general_model` like every other non-judge task; those providers must therefore accept image inputs. (A legacy `llm.multimodal_model` config section is ignored with a warning.)
 - **Unified CF HTML transport**: `problems/cf_fetcher.py` is the single transport for
   Codeforces problem statement and blog HTML. It tries `cloudscraper` first and falls
   back to headless Playwright Chromium after HTTP 403, timeout/connection failure,
@@ -116,8 +116,7 @@ NapCat (QQ) ──WS──> worker.py
   normally only builds/sends the QQ card; if startup preparation is still cold it awaits
   the same single-flight task. A claim prevents refill until publication finishes, then
   release wakes the worker loop. READY-slot validation covers rating-range changes,
-  current/solved problems, statement presence and fingerprint, and multimodal
-  availability. Summary generation is a side-effect-free complete action: only a
+  current/solved problems, statement presence and fingerprint. Summary generation is a side-effect-free complete action: only a
   semantically audited result is stored; after the existing two failed attempts the
   availability fallback is explicitly stored as `summary_status=incomplete` and the
   problem can still be posted without a summary. Background preparation is not reported
@@ -151,8 +150,10 @@ NapCat (QQ) ──WS──> worker.py
   duration=6 → 22:00–04:00).
 - **LLM fallback**: `llm.py` — providers are tried in list order from independent
   queues in `config.yaml`: `llm.smart_model` for judge/review and
-  `llm.general_model` for pure-text clarify/summary/editorial and other tasks.
-  Optional `llm.multimodal_model` handles image-bearing problem summaries and `/clarify`. Each
+  `llm.general_model` for everything else (clarify, summaries, editorial
+  translation, JSON repair, and other tasks). `multimodal_*` task names only mark
+  that the request carries image parts; they route to `llm.general_model` too, so
+  those providers must accept image inputs. Each
   provider is retried internally (`llm.max_retries`) before moving to the next.
   All providers use the OpenAI-compatible `/chat/completions` format.
   DashScope/阿里云百炼 providers are called with HTTP+SSE streaming to avoid the
@@ -230,10 +231,9 @@ All providers use the OpenAI-compatible `/chat/completions` endpoint.
 | `llm.review_timeout_sec` | int | 600 | Review LLM timeout |
 | `llm.summary_timeout_sec` | int | 120 | Summary + editorial translation timeout |
 | `llm.smart_model` | list | — | Ordered fallback provider list for `/submit` judge and `/review` (**required, min 1**) |
-| `llm.general_model` | list | — | Ordered fallback provider list for pure-text `/clarify`, summaries, editorial translation, sample-note translation, and other LLM tasks (**required, min 1**) |
-| `llm.multimodal_model` | list | `[]` | Optional ordered fallback provider list for image-bearing problem summaries and `/clarify` |
+| `llm.general_model` | list | — | Ordered fallback provider list for `/clarify` (incl. image-bearing statements), summaries, editorial translation, sample-note translation, and other LLM tasks; providers must accept image inputs (**required, min 1**) |
 
-Each provider in `llm.smart_model`, `llm.general_model`, or `llm.multimodal_model`:
+Each provider in `llm.smart_model` or `llm.general_model`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -769,9 +769,9 @@ commands are rejected in private with a friendly message.
   review as available. It sends a private problem card, preferring the current group's
   cached forward-card payload when the pid is the current group problem. Generated
   private cards must not expose the original CF id, title, contest id, or rating in the
-  card title. If an explicit pid/link fails because the statement contains images
-  and no `llm.multimodal_model` queue is configured, tell the user the bot has limited
-  ability on image-dependent statements and suggest choosing another problem.
+  card title. If an explicit pid/link fetch fails, tell the user the statement
+  cannot be fetched right now and suggest trying again later or choosing another
+  problem.
 - `/problem` in private resends the selected private problem card. `/tag`, `/status`,
   `/clear`, `/submit`, `/clarify`, and `/review` all operate on private state and do
   not emit group @mentions. `/testcd` is private-only and reports the current service-group

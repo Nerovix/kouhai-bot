@@ -136,15 +136,6 @@ def _problem_id(p: dict) -> str:
     return f"{p['contestId']}{p['index']}"
 
 
-def _multimodal_model_configured() -> bool:
-    try:
-        from ..config import get_config
-
-        return bool(get_config().llm_multimodal_providers)
-    except Exception:
-        return False
-
-
 # ── Selection ───────────────────────────────────────────────────────────
 
 def _cache_all_path() -> str:
@@ -303,10 +294,9 @@ def _extract_samples(ps_html: str) -> list[dict]:
 def fetch_statement(problem: dict) -> object:
     """
     Fetch full problem statement from Codeforces.
-    Image metadata is preserved for multimodal summary/clarify. If images are
-    present but no multimodal model queue is configured, the problem is skipped.
+    Image metadata is preserved for multimodal summary/clarify.
     Returns dict with keys: name, time_limit, memory_limit, description,
-    input, samples, notes, images. Or None on failure / unsupported image problem.
+    input, samples, notes, images. Or None on failure.
     Caches locally so we only process each problem once.
     """
     contest_id = problem.get("contestId")
@@ -355,12 +345,6 @@ def fetch_statement(problem: dict) -> object:
             if cached_changed:
                 with open(cache_file, "w") as f:
                     json.dump(cached, f, ensure_ascii=False)
-            if cached.get("images") and not _multimodal_model_configured():
-                print(
-                    f"Warning: {pid} cached statement has image(s), but llm.multimodal_model is not configured; skipping",
-                    file=sys.stderr,
-                )
-                return None
             return cached
 
     # Fetch once, then share the same rendered document between statement/image
@@ -400,12 +384,6 @@ def fetch_statement(problem: dict) -> object:
             return None
 
         images = cf_result.get("images", [])
-        if images and not _multimodal_model_configured():
-            print(
-                f"Warning: {pid} has {len(images)} image(s), but llm.multimodal_model is not configured; skipping",
-                file=sys.stderr,
-            )
-            return None
 
         # Step 2: Parse metadata from that same HTML document.
         html = raw_html

@@ -469,8 +469,9 @@ Persistence and derived surfaces (all user-visible LLM output carries the tag):
   every QQ send path (submit correct/incorrect, clarify, review, sync cheer). Besides
   rstripping, it refuses to double a tag the text already ends with (the same echo
   case, at render time).
-- The forwarded history card (`private_judge.format_history_records`, used by `/sync`
-  and private judge) renders the tag at the end of every 🤖 line, and for empty-reply
+- The forwarded history card (`private_judge.build_history_card_nodes` for the
+  per-sender chat-record nodes; `format_history_records` is kept for the plain-text
+  fallback) renders the tag at the end of every bot message, and for empty-reply
   incorrect verdicts falls back to `reason` + `。再想想？🤔` exactly like the live
   message in `submit.py:_finalize_submit`. Legacy records whose `reply` already
   embeds the tag render it once (no field → no append).
@@ -533,7 +534,7 @@ No repository-local runtime queue is used.
 | `/review` (`/rv`) | review.py | `handle` | ✅ state scheduler | `llm.smart_model` queue | Discuss the latest solved group/private problem by default; quoted group problem cards can target older problems |
 | `/status` | stubs.py | `handle_status` | ❌ | — | Check whether this group or private judge has active stateful work |
 | `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, `random`, or a quoted problem card. Supports rating range (e.g. `/sp 2500-2600`) for targeted difficulty selection |
-| `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite |
+| `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite; the history card is a per-sender chat-record forward (user/bot nodes with real identities; plain-text `👤/🤖` fallback when the forward call fails) |
 | `/testcd` | testcd.py | `handle` | ❌ | — | Private-only; show whether this user can submit the current group problem or how long remains in dynamic submit CD |
 | `/feedback` (`/fb`) | feedback.py | `handle` | ✅ short group state lock for group writes | — | Mark dissatisfaction with the AI's latest DELIVERED reply in the current scope, regardless of problem (works after `/newproblem` and survives `/clear`) — resolved exclusively from the per-user last-interaction cache; markable = any record whose live message was delivered (LLM answers incl. reason-fallback incorrect verdicts, and failure notices timeout/service_unavailable/no_statement), only pending/superseded are skipped; appends a verbatim record snapshot to `bad_reports.json` (group and private stores are separate; `/sync` never moves reports); success acks 👌 (128076) exactly like `/clear` (private gets the fallback message); write-only — no in-chat view command yet; renamed from `/bad` (QQ clients turn a bare `/bad` into an emoji, so it could never reach the bot) |
 
@@ -783,11 +784,15 @@ commands are rejected in private with a friendly message.
   If the source side has no relevant records, it aborts and does not overwrite the
   target side. It rejects while there is an active group or private stateful request
   for the same user/problem.
-- `/sync` sends the source history as one forward-card-style history card to the target
-  chat after copying. The card title is `<群昵称>在当前的历史记录如下：`; each record shows
-  only user-visible content as `👤：...` followed by `🤖：...` on the next line, omitting
-  internal type/result/reason fields. If the history is too long for one node, chunk it
-  like long `/review` output. If the source is empty, it sends only the friendly abort
+- `/sync` sends the source history as a per-sender **chat-record** merged forward to the
+  target chat after copying: every visible message becomes its own node — user bubbles
+  carry the user's QQ id + group display name (real avatar), bot bubbles the bot's own
+  account (its group display name, fallback `AI助手`), so the card reads like a QQ 聊天记录.
+  Node text omits internal type/result/reason fields; empty-reply incorrect verdicts
+  mirror the live `reason。再想想？🤔` fallback; messages longer than
+  `PRIVATE_FORWARD_THRESHOLD` are split across same-sender nodes. If the forward call
+  fails, it degrades to plain-text chunks of the legacy `👤：/🤖：` rendering
+  (`format_history_records`). If the source is empty, it sends only the friendly abort
   message. On successful group sync, react to the triggering message with `👌`
   (`id=128076`) instead of sending a generic success message; private sync sends no
   extra success text.

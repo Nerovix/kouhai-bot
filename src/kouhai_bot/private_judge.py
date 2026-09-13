@@ -32,6 +32,7 @@ from .handlers.shared import (
 )
 from .napcat.client import (
     build_plain_message,
+    build_text,
     send_group_forward_msg,
     send_group_msg,
     send_private_forward_msg,
@@ -591,16 +592,6 @@ async def _send_forward_nodes_private(user_id: int, node_ids: list[str]) -> int 
     )
 
 
-async def _send_forward_nodes_group(group_id: int, node_ids: list[str]) -> int | None:
-    if not node_ids:
-        return None
-    await asyncio.sleep(0.5)
-    return await send_group_forward_msg(
-        group_id,
-        [{"type": "node", "data": {"id": str(node_id)}} for node_id in node_ids],
-    )
-
-
 async def _send_high_difficulty_notice_private(user_id: int, problem: dict) -> None:
     notice = high_difficulty_notice(problem)
     if not notice:
@@ -699,26 +690,71 @@ def _chunk_text(text: str, size: int = PRIVATE_FORWARD_THRESHOLD) -> list[str]:
     return [text[i:i + size] for i in range(0, len(text), size)] or [text]
 
 
-def format_history_records(records: list[dict], *, user_display_name: str) -> str:
-    name = _one_line(user_display_name) or "这位群友"
-    lines = [f"{name}在当前的历史记录如下："]
+def _history_lines(records: list[dict]) -> list[tuple[str, str]]:
+    """Speaker-tagged one-line messages for the history card, in record order.
+
+    ("user", text) for the user-visible submission body, ("bot", text) for the
+    bot's reply. Judge records persist the model tag as a dedicated field;
+    clarify/review records embed it in `reply` at save time — append_model_tag's
+    dedup guard keeps either convention from rendering twice. Empty-reply
+    incorrect verdicts fell back to the reason in the live message, so the card
+    mirrors that here.
+    """
+    lines: list[tuple[str, str]] = []
     for item in records:
         content = _one_line(item.get("content", ""))
-        # Judge records persist the model tag as a dedicated field; clarify/review
-        # records embed it in `reply` at save time — append_model_tag's dedup
-        # guard keeps either convention from rendering twice. Empty-reply
-        # incorrect verdicts fell back to the reason in the live message, so
-        # the card mirrors that here.
         bot_text = _one_line(item.get("reply", ""))
         if not bot_text and item.get("result") == "incorrect":
             reason = _one_line(item.get("reason", ""))
             if reason:
                 bot_text = f"{reason}。再想想？🤔"
         if content:
-            lines.append(f"👤：{content}")
+            lines.append(("user", content))
         if bot_text:
-            lines.append(append_model_tag(f"🤖：{bot_text}", _one_line(item.get("model_tag", ""))))
+            lines.append(("bot", append_model_tag(bot_text, _one_line(item.get("model_tag", "")))))
+    return lines
+
+
+def format_history_records(records: list[dict], *, user_display_name: str) -> str:
+    """Legacy plain-text rendering of the history card (forward-failure fallback)."""
+    name = _one_line(user_display_name) or "这位群友"
+    lines = [f"{name}在当前的历史记录如下："]
+    for speaker, text in _history_lines(records):
+        lines.append(f"👤：{text}" if speaker == "user" else f"🤖：{text}")
     return "\n".join(lines)
+
+
+def build_history_card_nodes(
+    *,
+    records: list[dict],
+    user_id: int,
+    user_display_name: str,
+    bot_qq: int,
+    bot_display_name: str = "",
+) -> list[dict]:
+    """Per-sender QQ 聊天记录 nodes for the merged-forward history card.
+
+    Every visible message becomes its own node so the card renders as chat
+    bubbles: user messages carry the user's QQ id + display name (their real
+    nickname/avatar in the card), bot messages the bot's own account. Text
+    longer than PRIVATE_FORWARD_THRESHOLD spills into same-sender follow-up
+    nodes.
+    """
+    user_name = _one_line(user_display_name) or "这位群友"
+    bot_name = _one_line(bot_display_name) or "AI助手"
+    nodes: list[dict] = []
+    for speaker, text in _history_lines(records):
+        uid, name = (int(bot_qq), bot_name) if speaker == "bot" else (int(user_id), user_name)
+        for chunk in _chunk_text(text):
+            nodes.append({
+                "type": "node",
+                "data": {
+                    "user_id": uid,
+                    "nickname": name,
+                    "content": [build_text(chunk)],
+                },
+            })
+    return nodes
 
 
 async def send_history_card(
@@ -728,25 +764,31 @@ async def send_history_card(
     group_id: int,
     records: list[dict],
     user_display_name: str,
+    bot_display_name: str = "",
 ) -> bool:
-    text = format_history_records(records, user_display_name=user_display_name)
-    chunks = _chunk_text(text)
+    """Deliver the /sync history as a per-sender chat-record forward card.
+
+    A single `send_*_forward_msg` call with custom nodes (no self-send dance);
+    if the forward call fails, degrade to the legacy plain-text `👤/🤖` chunks
+    so the history still reaches the chat.
+    """
     cfg = get_config()
-    node_ids: list[str] = []
-    for chunk in chunks:
-        resp = await send_private_msg(cfg.bot_qq, build_plain_message(chunk))
-        if not resp:
-            node_ids = []
-            break
-        node_ids.append(str(resp))
-    if node_ids:
+    nodes = build_history_card_nodes(
+        records=records,
+        user_id=user_id,
+        user_display_name=user_display_name,
+        bot_qq=cfg.bot_qq,
+        bot_display_name=bot_display_name,
+    )
+    if nodes:
         if destination == GROUP_SCOPE:
-            if await _send_forward_nodes_group(group_id, node_ids):
-                return True
+            sent = await send_group_forward_msg(group_id, nodes)
         else:
-            if await _send_forward_nodes_private(user_id, node_ids):
-                return True
-    for chunk in chunks:
+            sent = await send_private_forward_msg(user_id, nodes)
+        if sent:
+            return True
+        logger.warning("history card forward failed; falling back to plain text")
+    for chunk in _chunk_text(format_history_records(records, user_display_name=user_display_name)):
         if destination == GROUP_SCOPE:
             await send_group_msg(group_id, build_plain_message(chunk))
         else:

@@ -29,7 +29,7 @@ _PRIVATE_ALLOWED_COMMANDS = {
     "submit",
     "clarify",
     "review",
-    "bad",
+    "feedback",
     "clear",
     "sync",
     "testcd",

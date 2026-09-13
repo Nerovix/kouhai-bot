@@ -15,7 +15,7 @@ def test_discover_commands():
     cmds = all_commands()
     names = {c.name for c in cmds}
     expected = {"help", "newproblem", "submit", "problem",
-                "tag", "clarify", "scoreboard", "setproblem", "sync", "bad"}
+                "tag", "clarify", "scoreboard", "setproblem", "sync", "feedback"}
     missing = expected - names
     assert not missing, f"Missing commands: {missing}"
     assert len(cmds) >= 7
@@ -50,6 +50,7 @@ def test_alias_lookup():
         "pb": "problem",
         "np": "newproblem",
         "sp": "setproblem",
+        "fb": "feedback",
     }
     for alias, canonical in expected.items():
         cmd = get(alias)
@@ -57,3 +58,4 @@ def test_alias_lookup():
         assert cmd.name == canonical
         assert get(canonical) is cmd
     assert get("提交") is None  # old alias remains unsupported
+    assert get("bad") is None  # renamed to /feedback — bare /bad becomes a QQ emoji

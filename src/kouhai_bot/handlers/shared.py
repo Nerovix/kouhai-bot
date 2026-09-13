@@ -721,13 +721,13 @@ def remember_problem_rating(group_id: int, pid: str, rating) -> None:
     save_problem_ratings(group_id, ratings)
 
 
-# ── /bad feedback reports ────────────────────────────────────────────────
+# ── /feedback reports ────────────────────────────────────────────────
 
 # Results whose live message was delivered to the user: real LLM answers (an
 # incorrect verdict with an empty reply fell back to the reason live) AND
 # failure notices (timeout / service_unavailable / no_statement all
 # delivered a message before the record was saved).
-# Only pending and superseded never delivered anything. Shared by /bad
+# Only pending and superseded never delivered anything. Shared by /feedback
 # targeting and the last-interaction cache hook in submit.py.
 REPLIED_RESULTS = {
     "correct", "incorrect", "clarify", "review",
@@ -848,7 +848,7 @@ def append_bad_report(group_id: int, report: dict) -> int:
     return append_bad_report_at(_bad_reports_file(group_id), report)
 
 
-# ── last-interaction cache (/bad targeting across problems and /clear) ────
+# ── last-interaction cache (/feedback targeting across problems and /clear) ────
 
 
 def _last_interaction_file(group_id: int) -> Path:
@@ -860,7 +860,7 @@ def load_group_last_interaction(group_id: int, user_id: int) -> dict | None:
     """Latest delivered interaction record of one user in the group scope.
 
     Unlike bad_reports this is a cache: a corrupt/missing file logs a warning
-    and returns None, and /bad falls back to scanning stored history.
+    and returns None, and targeting never falls back to scanning stored history.
     """
     path = _last_interaction_file(group_id)
     if not path.exists():
@@ -1158,7 +1158,7 @@ def record_kind(record: dict) -> str:
     Explicit "type" wins; legacy records without it fall back to "result"
     (clarify/review verbatim, correct/incorrect → submit). "" when the record
     is none of the three interaction kinds. Single source of truth for
-    /bad targeting and _build_review_history — keep them from drifting.
+    /feedback targeting and _build_review_history — keep them from drifting.
     """
     explicit = record.get("type", "")
     if explicit in {"submit", "clarify", "review"}:

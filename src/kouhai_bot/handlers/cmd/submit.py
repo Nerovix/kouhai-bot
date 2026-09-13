@@ -1436,7 +1436,7 @@ class GroupCoordinator:
 
         # Store the raw reply + tag field BEFORE delivering it: the record
         # must already say "replied" once the user can see the answer, so a
-        # concurrent /bad never sees a sent-but-unsaved pending tail (same
+        # concurrent /feedback never sees a sent-but-unsaved pending tail (same
         # order as _finalize_submit).
         await self._save_context_record(
             req,
@@ -1487,7 +1487,7 @@ class GroupCoordinator:
 
         # Store the raw reply + tag field BEFORE the (potentially slow,
         # forward-card) delivery: the record must already say "replied" once
-        # the user can see the answer, so a concurrent /bad never sees a
+        # the user can see the answer, so a concurrent /feedback never sees a
         # sent-but-unsaved pending tail (same order as _finalize_submit).
         await self._save_context_record(
             req,

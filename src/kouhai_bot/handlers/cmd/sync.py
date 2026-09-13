@@ -224,7 +224,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
 
     records_to_copy = copy_records(source_records)
 
-    # Carry the source side's last-interaction cache across too, so /bad on
+    # Carry the source side's last-interaction cache across too, so /feedback on
     # this side after a sync targets the same latest reply the user saw on
     # the other side (sync = the source session wins wholesale). Only when
     # the cached record is part of what this sync actually copies: same pid,

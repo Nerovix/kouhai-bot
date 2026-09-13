@@ -213,10 +213,10 @@ def load_private_bad_reports(user_id: int) -> dict:
 
 
 def append_private_bad_report(user_id: int, report: dict) -> int:
-    """Store one /bad report for this user's private-judge scope.
+    """Store one /feedback report for this user's private-judge scope.
 
     Deliberately a separate file from users/<uid>.json: the state file shape is
-    compatibility-frozen and /sync never moves /bad reports between scopes.
+    compatibility-frozen and /sync never moves /feedback reports between scopes.
     """
     return append_bad_report_at(_bad_reports_file(user_id), report)
 
@@ -229,7 +229,7 @@ def load_private_last_interaction(user_id: int) -> dict | None:
     """Latest delivered interaction record in this user's private scope.
 
     A cache (unlike bad_reports): corrupt/missing files log a warning and
-    return None, and /bad falls back to scanning stored history.
+    return None, and targeting never falls back to scanning stored history.
     """
     path = _last_interaction_file(user_id)
     if not path.exists():

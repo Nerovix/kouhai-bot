@@ -1,9 +1,13 @@
-"""/bad — mark the AI's latest delivered reply as unsatisfactory for replay/debugging.
+"""/feedback — mark the AI's latest delivered reply as unsatisfactory for replay/debugging.
 
 Targeting reads the per-user last-interaction cache only (written by
 _save_context_record whenever a replied record is persisted): the cache is
 scope-local, crosses problem switches, survives /clear, and /sync carries it
 across sides together with the history.
+
+Renamed from /bad: QQ clients translate a bare "/bad" into an emoji before the
+message is ever sent, so the command was unusable from QQ. Reports still land
+in the bad_reports.json stores (store names unchanged).
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ from ...private_judge import (
 )
 from .submit import run_group_state_update
 
-logger = logging.getLogger("kouhai-bot.cmd.bad")
+logger = logging.getLogger("kouhai-bot.cmd.feedback")
 
 OK_REACTION_ID = "128076"
 NOTE_MAX_LEN = 500
@@ -54,7 +58,7 @@ async def _ack_recorded(scope: str, group_id: int, user_id: int, message_id: str
     try:
         await react_emoji(message_id, OK_REACTION_ID)
     except Exception as e:
-        logger.warning("failed to react to recorded /bad feedback %s: %s", message_id, e)
+        logger.warning("failed to react to recorded /feedback %s: %s", message_id, e)
 
 
 async def handle(group_id: int, user_id: int, sender: dict,
@@ -62,14 +66,17 @@ async def handle(group_id: int, user_id: int, sender: dict,
                  event: dict) -> None:
     scope = PRIVATE_SCOPE if event.get("message_type") == "private" else GROUP_SCOPE
 
-    match = re.fullmatch(r"/bad(?:\s+(.+))?", raw_text.strip(), re.DOTALL)
+    # The dispatcher rewrites the token to the canonical command name, so
+    # aliases and mixed case ("/fb", "/FEEDBACK ...") arrive here as
+    # "/feedback ...".
+    match = re.fullmatch(r"/feedback(?:\s+(.+))?", raw_text.strip(), re.DOTALL)
     if match is None:
-        await _send_text(scope, group_id, user_id, "用法：/bad [简短备注]～")
+        await _send_text(scope, group_id, user_id, "用法：/feedback [简短备注]～")
         return
     note = (match.group(1) or "").strip()
     if len(note) > NOTE_MAX_LEN:
         logger.warning(
-            "truncating /bad note from %d to %d chars (user %s)",
+            "truncating /feedback note from %d to %d chars (user %s)",
             len(note), NOTE_MAX_LEN, user_id,
         )
         note = note[:NOTE_MAX_LEN]
@@ -85,7 +92,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
             await _send_text(
                 scope, group_id, user_id,
                 "这边还没有可以标注的 AI 回复哦～先 /submit、/clarify 或 /review 一次，"
-                "收到回复后再来 /bad 吧。",
+                "收到回复后再来 /feedback 吧。",
             )
             return
 
@@ -113,7 +120,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
             )
     except Exception:
         logger.error(
-            "failed to record /bad feedback (scope=%s user=%s)",
+            "failed to record /feedback report (scope=%s user=%s)",
             scope, user_id, exc_info=True,
         )
         await _send_text(scope, group_id, user_id, "记录反馈失败了，联系一下管理员帮帮忙吧～")
@@ -124,8 +131,8 @@ async def handle(group_id: int, user_id: int, sender: dict,
 
 def register() -> None:
     registry.register(CommandDef(
-        name="bad",
-        aliases=[],
+        name="feedback",
+        aliases=["fb"],
         description="标记对AI最新回复不满意，记录反馈供维护复盘",
         usage="[简短备注]",
         handler=handle,

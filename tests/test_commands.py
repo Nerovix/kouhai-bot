@@ -598,9 +598,9 @@ def _all_patches():
     stack.enter_context(patch("kouhai_bot.handlers.cmd.sync.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.testcd.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.testcd.send_private_msg", _mock_send_private))
-    stack.enter_context(patch("kouhai_bot.handlers.cmd.bad.send_group_msg", _mock_send_group))
-    stack.enter_context(patch("kouhai_bot.handlers.cmd.bad.send_private_msg", _mock_send_private))
-    stack.enter_context(patch("kouhai_bot.handlers.cmd.bad.react_emoji", _mock_react))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.feedback.send_group_msg", _mock_send_group))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.feedback.send_private_msg", _mock_send_private))
+    stack.enter_context(patch("kouhai_bot.handlers.cmd.feedback.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.editorial_followup.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.editorial_followup.send_group_forward_msg", _mock_send_group_forward))
     stack.enter_context(patch("kouhai_bot.private_judge.send_group_msg", _mock_send_group))
@@ -3002,7 +3002,7 @@ def test_help_shows_short_aliases_and_configured_newproblem_cooldown():
     assert "/tag — 查看当前题目的算法标签" in text, text
     assert "/review(/rv) 你的问题 — 默认复盘上一道已通过题；引用题目卡片可复盘旧题；@群友可带入其上下文" in text, text
     assert "/clarify(/clrf) 你的问题 — 向AI澄清题目细节，只回答题目本身不剧透做法" in text, text
-    assert "/bad [简短备注] — 标记对AI最新回复不满意，记录反馈供维护复盘" in text, text
+    assert "/feedback(/fb) [简短备注] — 标记对AI最新回复不满意，记录反馈供维护复盘" in text, text
     assert "/setproblem(/sp)" not in text, text
     assert "/sync —" not in text, text
     assert "/testcd —" not in text, text
@@ -3029,7 +3029,7 @@ def test_private_help_only_shows_private_judge_commands():
         for seg in msg if isinstance(seg, dict) and seg.get("type") == "text"
     )
     assert "/setproblem(/sp) [题号|链接|random|难度范围] — 设置 private judge 当前题" in text, text
-    assert "/bad [简短备注] — 标记对AI最新回复不满意，记录反馈供维护复盘" in text, text
+    assert "/feedback(/fb) [简短备注] — 标记对AI最新回复不满意，记录反馈供维护复盘" in text, text
     assert "/sync — 在群聊和 private judge 间同步当前群题记录" in text, text
     assert "/testcd — 查看当前群题提交 CD" in text, text
     assert "/newproblem(/np)" not in text, text
@@ -3056,7 +3056,7 @@ def test_private_testcd_allows_submit_when_no_cooldown_and_dispatches():
     print("✅ private testcd: no cooldown allows submit")
 
 
-def test_private_bad_dispatches_and_records_report():
+def test_private_feedback_dispatches_and_records_report():
     _reset_state()
     _setup_problem()
 
@@ -3080,7 +3080,8 @@ def test_private_bad_dispatches_and_records_report():
             "request_id": "local-1",
             "model_tag": "deepseek-v4-flash",
         })
-        asyncio.run(process_event(_make_private_event("/bad 判错了"), spawn_handlers=False))
+        # The /fb alias must resolve to the canonical /feedback command.
+        asyncio.run(process_event(_make_private_event("/fb 判错了"), spawn_handlers=False))
 
         private_text = "\n".join(
             _last_text_item(item) for item in _private_sent if item["user_id"] == UID
@@ -3094,10 +3095,10 @@ def test_private_bad_dispatches_and_records_report():
         assert reports[0]["target"]["record"]["request_id"] == "local-1"
         assert reports[0]["target"]["record"]["reply"] == "J(x) 是特殊因子和…"
     _cleanup()
-    print("✅ private /bad: allowlist dispatch and report persistence")
+    print("✅ private /feedback(/fb): allowlist dispatch and report persistence")
 
 
-def test_group_bad_dispatches_and_normalizes_command_case():
+def test_group_feedback_dispatches_and_normalizes_command_case():
     _reset_state()
     _setup_problem()
 
@@ -3120,9 +3121,9 @@ def test_group_bad_dispatches_and_normalizes_command_case():
             "problem": PID,
             "request_id": "local-1",
         })
-        # The dispatcher canonicalizes the command token, so /BAD reaches the
-        # handler as /bad with the note intact.
-        asyncio.run(process_event(_make_event("/BAD 判错了"), spawn_handlers=False))
+        # The dispatcher canonicalizes the command token, so /FEEDBACK reaches
+        # the handler as /feedback with the note intact.
+        asyncio.run(process_event(_make_event("/FEEDBACK 判错了"), spawn_handlers=False))
 
         assert _reacted == [("msg_001", "128076")], _reacted
         reports = load_bad_reports(GID)["reports"]
@@ -3132,7 +3133,7 @@ def test_group_bad_dispatches_and_normalizes_command_case():
         assert reports[0]["target"]["problem"] == PID
         assert reports[0]["target"]["record"]["request_id"] == "local-1"
     _cleanup()
-    print("✅ group /bad: dispatch case normalization and report persistence")
+    print("✅ group /feedback: dispatch case normalization and report persistence")
 
 
 def test_private_testcd_shows_remaining_for_starred_user():

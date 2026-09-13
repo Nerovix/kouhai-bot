@@ -1,8 +1,8 @@
-"""Tests for /bad — record dissatisfaction with the AI's latest delivered reply.
+"""Tests for /feedback — record dissatisfaction with the AI's latest delivered reply.
 
-Targeting goes through the per-user last-interaction cache (survives problem
-switches and /clear), falling back to a full-history scan for replies older
-than the cache. Reports snapshot the target record verbatim into
+Targeting goes through the per-user last-interaction cache only (survives
+problem switches and /clear; stored history is never scanned as a fallback).
+Reports snapshot the target record verbatim into
 bad_reports.json (group: groups/<gid>/, private: private_judge/bad_reports/)
 and never touch the frozen user_submissions stores.
 """
@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from kouhai_bot.handlers.cmd import bad as bad_cmd
+from kouhai_bot.handlers.cmd import feedback as feedback_cmd
 from kouhai_bot.handlers.cmd.submit import PendingRequest, _get_coordinator
 from kouhai_bot.handlers.shared import (
     append_bad_report,
@@ -60,18 +60,18 @@ def _reset_captures():
 
 
 def _patches(tmp_path):
-    """Patch config paths + the send/react bindings bad.py resolves at import."""
+    """Patch config paths + the send/react bindings feedback.py resolves at import."""
     cfg = SimpleNamespace(data_dir=str(tmp_path))
     return [
         patch("kouhai_bot.handlers.shared.get_config", return_value=cfg),
         patch("kouhai_bot.private_judge.get_config", return_value=cfg),
-        patch.object(bad_cmd, "send_group_msg", _mock_send_group),
-        patch.object(bad_cmd, "send_private_msg", _mock_send_private),
-        patch.object(bad_cmd, "react_emoji", _mock_react),
+        patch.object(feedback_cmd, "send_group_msg", _mock_send_group),
+        patch.object(feedback_cmd, "send_private_msg", _mock_send_private),
+        patch.object(feedback_cmd, "react_emoji", _mock_react),
     ]
 
 
-def _group_event(text="/bad", message_id="msg_001"):
+def _group_event(text="/feedback", message_id="msg_001"):
     return {
         "type": "message",
         "message_type": "group",
@@ -84,7 +84,7 @@ def _group_event(text="/bad", message_id="msg_001"):
     }
 
 
-def _private_event(text="/bad", message_id="priv_001"):
+def _private_event(text="/feedback", message_id="priv_001"):
     return {
         "type": "message",
         "message_type": "private",
@@ -249,7 +249,7 @@ def test_load_bad_reports_missing_file_returns_empty(tmp_path):
 
 
 def test_bad_reports_without_reports_key_are_repaired_by_append(tmp_path):
-    """An operator-created {} file must not permanently brick /bad."""
+    """An operator-created {} file must not permanently brick /feedback."""
     path = tmp_path / "groups" / str(GID) / "bad_reports.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"version": 1}), encoding="utf-8")
@@ -378,7 +378,7 @@ def test_save_context_record_cache_respects_clear_watermark(tmp_path):
 # Handler — group scope
 # ═══════════════════════════════════════════════════════════════════════
 
-def test_bad_group_marks_cached_record_verbatim(tmp_path):
+def test_feedback_group_marks_cached_record_verbatim(tmp_path):
     _reset_captures()
     _write_group_state(tmp_path)
     record = _record(
@@ -395,7 +395,7 @@ def test_bad_group_marks_cached_record_verbatim(tmp_path):
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad 判错了吧"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback 判错了吧"))))
 
     assert _reacted == [("msg_001", "128076")], _reacted
     assert not _sent, _sent  # success ack in group is react-only
@@ -410,7 +410,7 @@ def test_bad_group_marks_cached_record_verbatim(tmp_path):
     assert (tmp_path / "groups" / str(GID) / "scoreboard.json").read_text(encoding="utf-8") == scoreboard_before
 
 
-def test_bad_group_crosses_problem_switch(tmp_path):
+def test_feedback_group_crosses_problem_switch(tmp_path):
     """刷新题后仍可标注上一题的回复。"""
     _reset_captures()
     _write_group_state(tmp_path, pid=OTHER_PID)  # problem already refreshed
@@ -421,14 +421,14 @@ def test_bad_group_crosses_problem_switch(tmp_path):
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad 刷题前的回复"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback 刷题前的回复"))))
 
     data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
     assert data["reports"][0]["target"]["problem"] == PID
     assert data["reports"][0]["target"]["record"]["reply"] == "旧题的回复"
 
 
-def test_bad_group_survives_clear(tmp_path):
+def test_feedback_group_survives_clear(tmp_path):
     """/clear 只清 history，不清 last-interaction 缓存。"""
     _reset_captures()
     _write_group_state(tmp_path)
@@ -441,13 +441,13 @@ def test_bad_group_survives_clear(tmp_path):
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback"))))
 
     data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
     assert data["reports"][0]["target"]["record"]["reply"] == "clear 前的回复"
 
 
-def test_bad_group_marks_delivered_failure_notice(tmp_path):
+def test_feedback_group_marks_delivered_failure_notice(tmp_path):
     """A timeout that delivered '模型服务出故障了' is a markable latest reply."""
     _reset_captures()
     _write_group_state(tmp_path)
@@ -458,7 +458,7 @@ def test_bad_group_marks_delivered_failure_notice(tmp_path):
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad 超时了"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback 超时了"))))
 
     assert _reacted == [("msg_001", "128076")], _reacted
     data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
@@ -466,7 +466,7 @@ def test_bad_group_marks_delivered_failure_notice(tmp_path):
     assert data["reports"][0]["target"]["record"]["result"] == "timeout"
 
 
-def test_bad_group_no_target_without_cache(tmp_path):
+def test_feedback_group_no_target_without_cache(tmp_path):
     """Cache-only targeting: stored history alone (e.g. replies that predate
     the cache) is deliberately NOT consulted — no cache entry, nothing to mark."""
     _reset_captures()
@@ -481,14 +481,14 @@ def test_bad_group_no_target_without_cache(tmp_path):
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback"))))
 
     assert "还没有可以标注的 AI 回复" in _last_group_text(), _sent
     assert not _group_reports_path(tmp_path).exists()
     assert not _reacted
 
 
-def test_bad_group_repeat_appends_new_report(tmp_path):
+def test_feedback_group_repeat_appends_new_report(tmp_path):
     _reset_captures()
     _seed_group_cache(tmp_path, _record(
         "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…",
@@ -496,8 +496,8 @@ def test_bad_group_repeat_appends_new_report(tmp_path):
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad 补充：说错了", message_id="msg_002"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback 补充：说错了", message_id="msg_002"))))
     data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
     assert [r["id"] for r in data["reports"]] == [1, 2]
     assert data["reports"][0]["note"] == ""
@@ -505,8 +505,8 @@ def test_bad_group_repeat_appends_new_report(tmp_path):
     assert data["reports"][1]["cmd_message_id"] == "msg_002"
 
 
-def test_bad_group_concurrent_reports_get_sequential_ids(tmp_path):
-    """Two in-flight /bad must not interleave the read-modify-write of bad_reports.json."""
+def test_feedback_group_concurrent_reports_get_sequential_ids(tmp_path):
+    """Two in-flight /feedback must not interleave the read-modify-write of bad_reports.json."""
     _reset_captures()
     _seed_group_cache(tmp_path, _record(
         "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…",
@@ -514,8 +514,8 @@ def test_bad_group_concurrent_reports_get_sequential_ids(tmp_path):
 
     async def _run_two():
         await asyncio.gather(
-            bad_cmd.handle(**_kwargs(_group_event("/bad 第一条"))),
-            bad_cmd.handle(**_kwargs(_group_event("/bad 第二条", message_id="msg_002"))),
+            feedback_cmd.handle(**_kwargs(_group_event("/feedback 第一条"))),
+            feedback_cmd.handle(**_kwargs(_group_event("/feedback 第二条", message_id="msg_002"))),
         )
 
     with ExitStack() as stack:
@@ -529,7 +529,7 @@ def test_bad_group_concurrent_reports_get_sequential_ids(tmp_path):
     assert len(_reacted) == 2
 
 
-def test_bad_group_corrupt_store_shows_failure(tmp_path):
+def test_feedback_group_corrupt_store_shows_failure(tmp_path):
     _reset_captures()
     _seed_group_cache(tmp_path, _record(
         "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…",
@@ -539,7 +539,7 @@ def test_bad_group_corrupt_store_shows_failure(tmp_path):
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback"))))
     assert "记录反馈失败了" in _last_group_text(), _sent
     assert not _reacted
     assert _group_reports_path(tmp_path).read_text(encoding="utf-8") == "{not json"
@@ -549,7 +549,7 @@ def test_bad_group_corrupt_store_shows_failure(tmp_path):
 # Handler — private scope
 # ═══════════════════════════════════════════════════════════════════════
 
-def test_bad_private_marks_cached_record(tmp_path):
+def test_feedback_private_marks_cached_record(tmp_path):
     _reset_captures()
     _seed_private_cache(tmp_path, _record(
         "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify",
@@ -559,7 +559,7 @@ def test_bad_private_marks_cached_record(tmp_path):
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_private_event("/bad 不对"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_private_event("/feedback 不对"))))
 
     assert "收到～" in _last_private_text(), _private_sent  # clear-style private reaction fallback
     data = json.loads(_private_reports_path(tmp_path).read_text(encoding="utf-8"))
@@ -571,12 +571,12 @@ def test_bad_private_marks_cached_record(tmp_path):
     assert report["target"]["record"]["request_id"] == "local-3"
 
 
-def test_bad_private_no_target(tmp_path):
+def test_feedback_private_no_target(tmp_path):
     _reset_captures()
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_private_event("/bad"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_private_event("/feedback"))))
     assert "还没有可以标注的 AI 回复" in _last_private_text(), _private_sent
     assert not _private_reports_path(tmp_path).exists()
 
@@ -585,7 +585,7 @@ def test_bad_private_no_target(tmp_path):
 # Note parsing
 # ═══════════════════════════════════════════════════════════════════════
 
-def test_bad_note_parsing_and_truncation(tmp_path):
+def test_feedback_note_parsing_and_truncation(tmp_path):
     _reset_captures()
     long_note = "长" * 600
     _seed_group_cache(tmp_path, _record(
@@ -594,9 +594,9 @@ def test_bad_note_parsing_and_truncation(tmp_path):
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad"))))
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/bad   多余空白  ", message_id="msg_002"))))
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event(f"/bad {long_note}", message_id="msg_003"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback   多余空白  ", message_id="msg_002"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event(f"/feedback {long_note}", message_id="msg_003"))))
     data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
     notes = [r["note"] for r in data["reports"]]
     assert notes[0] == ""
@@ -604,14 +604,14 @@ def test_bad_note_parsing_and_truncation(tmp_path):
     assert notes[2] == "长" * 500
 
 
-def test_bad_usage_error_both_scopes(tmp_path):
+def test_feedback_usage_error_both_scopes(tmp_path):
     _reset_captures()
     with ExitStack() as stack:
         for p in _patches(tmp_path):
             stack.enter_context(p)
-        asyncio.run(bad_cmd.handle(**_kwargs(_group_event("/BAD 大写"))))
-        asyncio.run(bad_cmd.handle(**_kwargs(_private_event("/bad!"))))
-    assert "用法：/bad" in _last_group_text(), _sent
+        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/BAD 大写"))))
+        asyncio.run(feedback_cmd.handle(**_kwargs(_private_event("/feedback!"))))
+    assert "用法：/feedback" in _last_group_text(), _sent
     assert not _group_reports_path(tmp_path).exists()
-    assert "用法：/bad" in _last_private_text(), _private_sent
+    assert "用法：/feedback" in _last_private_text(), _private_sent
     assert not _private_reports_path(tmp_path).exists()

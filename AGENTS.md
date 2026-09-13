@@ -40,7 +40,8 @@ NapCat (QQ) ──WS──> worker.py
 ## Key Design Decisions
 
 - **Command auto-discovery**: Each command in `handlers/cmd/*.py` calls `register()` at module load. The `registry.discover_commands()` scans with `pkgutil.iter_modules`. Adding a new command = create a `.py` file with a `register()` function.
-- **Limited aliases**: Only six short aliases are supported: `/newproblem`→`/np`, `/problem`→`/pb`, `/submit`→`/sbm`, `/review`→`/rv`, `/clarify`→`/clrf`, `/setproblem`→`/sp`. Old aliases such as `/sb`, `/排名`, and Chinese aliases remain unsupported. New commands default to `aliases=[]` unless explicitly approved.
+- **Limited aliases**: Only seven short aliases are supported: `/newproblem`→`/np`, `/problem`→`/pb`, `/submit`→`/sbm`, `/review`→`/rv`, `/clarify`→`/clrf`, `/setproblem`→`/sp`, `/feedback`→`/fb`. Old aliases such as `/sb`, `/排名`, and Chinese aliases remain unsupported. New commands default to `aliases=[]` unless explicitly approved.
+- **Command rename**: `/bad` → `/feedback` (2026-09) — QQ clients convert a bare `/bad` into an emoji before sending, so the old name could never reach the bot; it is removed rather than kept as an alias, and the report stores keep their `bad_reports` file names.
 - **Poke (拍一拍) routing**: `handlers/notice.py` always pokes back, then branches on solve state — if the current problem is **unsolved**, the poke resends the current problem card (same effect as `/pb`, via `stubs.resend_current_problem_group`, no cooldown); if **solved** (or no current problem), it quietly refreshes via `enqueue_new_problem(command="poke", force=False, quiet=True)`.
 - **Help auto-generation**: `handlers/cmd/help.py` reads `registry.all_commands()` and builds the help text dynamically. Descriptions must match old bridge.py wording.
   `usage` field = args suffix in /help display (e.g. `usage="你的做法"` → `/submit 你的做法`). Group help hides private-only details for `/setproblem`, `/sync`, and `/testcd` and only briefly mentions private judge; private help lists the private-judge command set.
@@ -494,11 +495,11 @@ groups/<gid>/problem_summaries.json # verified, source-bound Chinese summaries k
 groups/<gid>/used.json       # used problem IDs
 groups/<gid>/groupctx_*.json # group message context
 groups/<gid>/problem_ratings.json # cached problem rating by pid for weighted scoreboard totals
-groups/<gid>/bad_reports.json  # /bad feedback reports for the group scope (append-only, see Data Format)
-groups/<gid>/last_interaction.json # per-user latest delivered interaction record (per-scope /bad targeting cache)
+groups/<gid>/bad_reports.json  # /feedback reports for the group scope (append-only, see Data Format)
+groups/<gid>/last_interaction.json # per-user latest delivered interaction record (per-scope /feedback targeting cache)
 private_judge/users/<uid>.json # per-user private judge current problem, history, solved markers, redirect state
-private_judge/bad_reports/<uid>.json # /bad feedback reports for a user's private-judge scope (append-only)
-private_judge/last_interaction/<uid>.json # latest delivered interaction record (private-scope /bad targeting cache)
+private_judge/bad_reports/<uid>.json # /feedback reports for a user's private-judge scope (append-only)
+private_judge/last_interaction/<uid>.json # latest delivered interaction record (private-scope /feedback targeting cache)
 annotations/pending/<gid>/<pid>.json # pending human-label bundle for solved problems
 annotations/labeled/<gid>/<pid>.json # completed human-label bundle for solved problems
 statements/<pid>.json        # cached problem statements
@@ -534,7 +535,7 @@ No repository-local runtime queue is used.
 | `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, `random`, or a quoted problem card. Supports rating range (e.g. `/sp 2500-2600`) for targeted difficulty selection |
 | `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite |
 | `/testcd` | testcd.py | `handle` | ❌ | — | Private-only; show whether this user can submit the current group problem or how long remains in dynamic submit CD |
-| `/bad` | bad.py | `handle` | ✅ short group state lock for group writes | — | Mark dissatisfaction with the AI's latest DELIVERED reply in the current scope, regardless of problem (works after `/newproblem` and survives `/clear`) — resolved exclusively from the per-user last-interaction cache; markable = any record whose live message was delivered (LLM answers incl. reason-fallback incorrect verdicts, and failure notices timeout/service_unavailable/no_statement), only pending/superseded are skipped; appends a verbatim record snapshot to `bad_reports.json` (group and private stores are separate; `/sync` never moves reports); success acks 👌 (128076) exactly like `/clear` (private gets the fallback message); write-only — no in-chat view command yet |
+| `/feedback` (`/fb`) | feedback.py | `handle` | ✅ short group state lock for group writes | — | Mark dissatisfaction with the AI's latest DELIVERED reply in the current scope, regardless of problem (works after `/newproblem` and survives `/clear`) — resolved exclusively from the per-user last-interaction cache; markable = any record whose live message was delivered (LLM answers incl. reason-fallback incorrect verdicts, and failure notices timeout/service_unavailable/no_statement), only pending/superseded are skipped; appends a verbatim record snapshot to `bad_reports.json` (group and private stores are separate; `/sync` never moves reports); success acks 👌 (128076) exactly like `/clear` (private gets the fallback message); write-only — no in-chat view command yet; renamed from `/bad` (QQ clients turn a bare `/bad` into an emoji, so it could never reach the bot) |
 
 ### Stateful Command Runtime
 
@@ -629,7 +630,7 @@ Read-only commands (`/problem`, `/tag`, `/scoreboard`, `/help`, `/status`) still
 not enter the state scheduler.
 Private dispatch maps DMs to `CURRENT_GROUP`, requires the sender to be a member of that
 service group, and only allows the private command whitelist: `/setproblem`, `/problem`,
-`/tag`, `/submit`, `/clarify`, `/review`, `/bad`, `/clear`, `/sync`, `/testcd`, `/status`,
+`/tag`, `/submit`, `/clarify`, `/review`, `/feedback`, `/clear`, `/sync`, `/testcd`, `/status`,
 and `/help`.
 Private commands do not require @mentions and should not send @ segments back.
 
@@ -1025,10 +1026,10 @@ Private judge submission records use the same record shape inside
 without conversion. Do not add private-only fields to individual history records unless
 all sync paths intentionally preserve or strip them.
 
-### bad_reports.json (/bad feedback reports)
+### bad_reports.json (/feedback reports)
 
 `groups/<gid>/bad_reports.json` and `private_judge/bad_reports/<uid>.json` —
-append-only stores of `/bad` reports, one entry per invocation (repeat `/bad` on the
+append-only stores of `/feedback` reports, one entry per invocation (repeat `/feedback` on the
 same reply appends a new entry). Shape:
 
 ```json
@@ -1037,7 +1038,7 @@ same reply appends a new entry). Shape:
   "reports": [
     {
       "id": 1,                          // max(existing ids)+1 per file; reports never move between files
-      "scope": "group",                 // "group" | "private" — the scope where /bad was issued
+      "scope": "group",                 // "group" | "private" — the scope where /feedback was issued
       "group_id": 999999,               // private scope stores cfg.current_group (dispatcher rewrite)
       "user_id": 42,
       "reported_at": "2026-09-11T21:03:14.512345+08:00",
@@ -1057,15 +1058,15 @@ same reply appends a new entry). Shape:
 
 Rules:
 
-- Never embed `/bad` fields inside `user_submissions` records — that format is
+- Never embed `/feedback` fields inside `user_submissions` records — that format is
   frozen (legacy compatibility + `/sync` copies records verbatim between scopes).
-- Group and private `/bad` stores are separate; `/sync` never moves reports.
+- Group and private `/feedback` stores are separate; `/sync` never moves reports.
 - Writes are atomic (`atomic_write_json` in `handlers/shared.py`: tempfile +
   fsync + `os.replace`); group appends run under `run_group_state_update`.
 - Targeting (scope-local, crosses problem switches, survives `/clear`): the
   per-user last-interaction cache (`groups/<gid>/last_interaction.json` keyed by
   uid / `private_judge/last_interaction/<uid>.json`, shape `{"record": {...}}`)
-  is the ONLY source — /bad never scans stored history. The cache is a CACHE:
+  is the ONLY source — /feedback never scans stored history. The cache is a CACHE:
   corrupt/missing files read as empty (warn + None), unlike bad_reports which
   raise. It is updated inside `_save_context_record` (under the coordinator
   lock, after the clear-watermark guard) whenever a record with a replied
@@ -1082,7 +1083,7 @@ Rules:
   and `superseded` records are unmarkable. Classification goes through
   `shared.record_kind` (single source of truth, also used by
   `_build_review_history`).
-- To keep `/bad` from seeing a sent-but-unsaved pending tail, the clarify/review
+- To keep `/feedback` from seeing a sent-but-unsaved pending tail, the clarify/review
   finalize paths save the record BEFORE delivering the reply (same order as
   submit) — preserve that ordering.
 - A corrupt bad_reports file makes `load_bad_reports*` raise instead of resetting

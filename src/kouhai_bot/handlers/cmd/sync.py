@@ -9,6 +9,7 @@ from collections import Counter
 from .. import registry
 from ..registry import CommandDef
 from ...napcat.client import build_at, build_plain_message, build_text, react_emoji, send_group_msg, send_private_msg
+from ...config import get_config
 from ...llm import append_model_tag
 from ...private_judge import (
     GROUP_SCOPE,
@@ -65,15 +66,19 @@ def _only_clarifies(records: list[dict]) -> list[dict]:
     return [item for item in records if item.get("type") == "clarify"]
 
 
-async def _history_display_name(group_id: int, user_id: int, sender: dict) -> str:
+async def _history_display_names(group_id: int, user_id: int, sender: dict) -> tuple[str, str]:
+    """(user, bot) display names for the history chat-record card.
+
+    One member-list fetch; the user falls back to the sender payload, the bot
+    to an empty string (the card layer substitutes a generic name).
+    """
     try:
         nickname_map = await fetch_group_member_nickname_map(group_id)
-        name = nickname_map.get(str(user_id))
-        if name:
-            return name
     except Exception:
-        pass
-    return sender.get("card") or sender.get("nickname") or str(user_id)
+        nickname_map = {}
+    user_name = nickname_map.get(str(user_id)) or sender.get("card") or sender.get("nickname") or str(user_id)
+    bot_name = nickname_map.get(str(get_config().bot_qq), "")
+    return user_name, bot_name
 
 
 async def _send_text(scope: str, group_id: int, user_id: int, text: str) -> None:
@@ -260,12 +265,14 @@ async def handle(group_id: int, user_id: int, sender: dict,
         if source_scope == GROUP_SCOPE and is_group_problem_solved(group_id, pid):
             mark_private_solved(user_id, pid, source="group")
 
+    history_user_name, history_bot_name = await _history_display_names(group_id, user_id, sender)
     await send_history_card(
         destination=target_scope,
         user_id=user_id,
         group_id=group_id,
         records=source_records,
-        user_display_name=await _history_display_name(group_id, user_id, sender),
+        user_display_name=history_user_name,
+        bot_display_name=history_bot_name,
     )
 
     extra = ""

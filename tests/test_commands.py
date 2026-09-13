@@ -5598,6 +5598,7 @@ def test_sync_history_card_uses_friendly_visible_format():
     _reset_state()
     _setup_problem_for(GID, PID)
     _group_members[GID][0]["card"] = "AliceCard"
+    _group_members[GID].append({"user_id": 1, "nickname": "KouhaiBot", "card": ""})
     private_records = [
         {
             "timestamp": "2026-05-14T12:00:00+08:00",
@@ -5627,21 +5628,23 @@ def test_sync_history_card_uses_friendly_visible_format():
             save_private_submission(UID, record)
         asyncio.run(handle(**_kwargs(_make_event("/sync"))))
 
-    history_text = "\n".join(
-        _last_text_item(item)
-        for item in _private_sent
-        if item["user_id"] == 1
-    )
-    assert "AliceCard在当前的历史记录如下：" in history_text, history_text
-    assert "👤：first line second line\n🤖：bot reply visible" in history_text, history_text
-    assert "👤：what is n?\n🤖：n is input" in history_text, history_text
-    assert "secret reason" not in history_text and "hidden clarify reason" not in history_text
-    assert "submit" not in history_text and "incorrect" not in history_text
     assert _forwarded, "Expected history to be forwarded to group"
+    assert len(_forwarded) == 1, _forwarded
+    nodes = _forwarded[0]["messages"]
+    assert [node["data"]["user_id"] for node in nodes] == [UID, 1, UID, 1], nodes
+    assert [node["data"]["nickname"] for node in nodes] == ["AliceCard", "KouhaiBot", "AliceCard", "KouhaiBot"], nodes
+    node_texts = [_node_text(node) for node in nodes]
+    assert node_texts == ["first line second line", "bot reply visible", "what is n?", "n is input"], node_texts
+    joined = "\n".join(node_texts)
+    assert "secret reason" not in joined and "hidden clarify reason" not in joined
+    assert "submit" not in joined and "incorrect" not in joined
+    # The chat-record card replaces the old self-send dance: nothing lands in
+    # the bot's own inbox anymore.
+    assert not [item for item in _private_sent if item["user_id"] == 1], _private_sent
     assert not any("已同步完成" in _last_text_item(item) for item in _sent), _sent
     assert ("msg_001", "128076") in _reacted, _reacted
     _cleanup()
-    print("✅ sync: history card uses friendly visible format")
+    print("✅ sync: history card renders as per-sender chat-record nodes")
 
 
 def test_sync_history_card_chunks_long_history():
@@ -5665,15 +5668,15 @@ def test_sync_history_card_chunks_long_history():
         asyncio.run(handle(**_kwargs(_make_event("/sync"))))
 
     assert _forwarded, "Expected history forward card"
-    assert len(_forwarded[0]["messages"]) >= 3, _forwarded
-    chunk_text = "".join(
-        _last_text_item(item)
-        for item in _private_sent
-        if item["user_id"] == 1
-    )
-    assert long_text in chunk_text, "Long history should not be truncated"
+    nodes = _forwarded[0]["messages"]
+    # 6500-char message -> 3000/3000/500 same-sender nodes + the bot reply node.
+    assert len(nodes) == 4, nodes
+    user_nodes = [node for node in nodes if node["data"]["user_id"] == UID]
+    assert len(user_nodes) == 3, user_nodes
+    assert "".join(_node_text(node) for node in user_nodes) == long_text
+    assert all(len(_node_text(node)) <= 3000 for node in nodes)
     _cleanup()
-    print("✅ sync: long history card is chunked")
+    print("✅ sync: long history card is chunked across nodes")
 
 
 def test_private_sync_from_solved_group_marks_private_review_state():
@@ -5730,6 +5733,14 @@ def _last_text_item(item: dict) -> str:
             for seg in msg if isinstance(seg, dict) and seg.get("type") == "text"
         )
     return str(msg)
+
+
+def _node_text(node: dict) -> str:
+    content = node.get("data", {}).get("content") or []
+    return "".join(
+        seg.get("data", {}).get("text", "")
+        for seg in content if isinstance(seg, dict) and seg.get("type") == "text"
+    )
 
 
 if __name__ == "__main__":

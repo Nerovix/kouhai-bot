@@ -469,8 +469,9 @@ Persistence and derived surfaces (all user-visible LLM output carries the tag):
   every QQ send path (submit correct/incorrect, clarify, review, sync cheer). Besides
   rstripping, it refuses to double a tag the text already ends with (the same echo
   case, at render time).
-- The forwarded history card (`private_judge.format_history_records`, used by `/sync`
-  and private judge) renders the tag at the end of every 🤖 line, and for empty-reply
+- The forwarded history card (`private_judge.build_history_card_nodes` for the
+  per-sender chat-record nodes; `format_history_records` is kept for the plain-text
+  fallback) renders the tag at the end of every bot message, and for empty-reply
   incorrect verdicts falls back to `reason` + `。再想想？🤔` exactly like the live
   message in `submit.py:_finalize_submit`. Legacy records whose `reply` already
   embeds the tag render it once (no field → no append).
@@ -783,11 +784,15 @@ commands are rejected in private with a friendly message.
   If the source side has no relevant records, it aborts and does not overwrite the
   target side. It rejects while there is an active group or private stateful request
   for the same user/problem.
-- `/sync` sends the source history as one forward-card-style history card to the target
-  chat after copying. The card title is `<群昵称>在当前的历史记录如下：`; each record shows
-  only user-visible content as `👤：...` followed by `🤖：...` on the next line, omitting
-  internal type/result/reason fields. If the history is too long for one node, chunk it
-  like long `/review` output. If the source is empty, it sends only the friendly abort
+- `/sync` sends the source history as a per-sender **chat-record** merged forward to the
+  target chat after copying: every visible message becomes its own node — user bubbles
+  carry the user's QQ id + group display name (real avatar), bot bubbles the bot's own
+  account (its group display name, fallback `AI助手`), so the card reads like a QQ 聊天记录.
+  Node text omits internal type/result/reason fields; empty-reply incorrect verdicts
+  mirror the live `reason。再想想？🤔` fallback; messages longer than
+  `PRIVATE_FORWARD_THRESHOLD` are split across same-sender nodes. If the forward call
+  fails, it degrades to plain-text chunks of the legacy `👤：/🤖：` rendering
+  (`format_history_records`). If the source is empty, it sends only the friendly abort
   message. On successful group sync, react to the triggering message with `👌`
   (`id=128076`) instead of sending a generic success message; private sync sends no
   extra success text.

@@ -200,6 +200,37 @@ async def send_group_forward_msg(group_id: int, messages: list[dict]) -> int | N
         return None
 
 
+async def resolve_bot_display_name(group_id: int | None = None) -> str:
+    """Best-effort bot display name for fabricated forward nodes.
+
+    Group scope prefers the bot's group card (what members actually see);
+    otherwise the login nickname. Returns "" on any failure — callers still
+    send the card, just without a nickname field.
+    """
+    cfg = get_config()
+    bot_id = int(cfg.bot_qq)
+    if group_id:
+        try:
+            resp = await _http_post(
+                "get_group_member_info",
+                {"group_id": int(group_id), "user_id": bot_id},
+            )
+            if resp.get("status") == "ok":
+                data = resp.get("data") or {}
+                name = str(data.get("card") or data.get("nickname") or "")
+                if name:
+                    return name
+        except Exception:
+            pass
+    try:
+        resp = await _http_post("get_login_info", {})
+        if resp.get("status") == "ok":
+            return str((resp.get("data") or {}).get("nickname") or "")
+    except Exception:
+        pass
+    return ""
+
+
 # ── Message builders ────────────────────────────────────────────────────
 
 def build_text(text: str) -> dict:
@@ -237,6 +268,23 @@ def build_reply(text: str, reply_to: str) -> list[dict]:
         {"type": "reply", "data": {"id": reply_to}},
         build_text(text),
     ]
+
+
+def build_node(*, user_id: int, nickname: str = "", content: list[dict]) -> dict:
+    """A sender-attributed merged-forward node (custom OB11MessageNode).
+
+    Fabricated nodes make the self-send dance unnecessary: the sender QQ
+    (real avatar) and nickname are set here, and ``content`` carries regular
+    OB11 segments. One ``send_*_forward_msg`` call publishes the card.
+    """
+    data: dict = {
+        "user_id": int(user_id),
+        # NapCat's OB11MessageNode schema requires a non-empty nickname;
+        # fall back to the QQ number when the display-name lookup failed.
+        "nickname": str(nickname) if nickname else str(int(user_id)),
+        "content": list(content),
+    }
+    return {"type": "node", "data": data}
 
 
 # ── OneBot11 event parsing ──────────────────────────────────────────────

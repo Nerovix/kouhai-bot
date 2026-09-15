@@ -1045,7 +1045,7 @@ def test_deliver_uses_prefetch_cache_without_translate(tmp_path, monkeypatch):
                 "kouhai_bot.editorial_preparation.translate_editorial_to_zh",
                 _fail_translate,
         ), \
-                patch("kouhai_bot.editorial_followup.send_private_msg", AsyncMock(return_value=1)), \
+                patch("kouhai_bot.editorial_followup.resolve_bot_display_name", AsyncMock(return_value="bot")), \
                 patch("kouhai_bot.editorial_followup.send_group_forward_msg", AsyncMock(return_value=99)):
             await deliver_official_tutorial_forward(
                 1,
@@ -1074,7 +1074,7 @@ def test_run_post_solve_skips_prefetch_wait_when_cache_warm(tmp_path, monkeypatc
 
     async def _run():
         with patch("kouhai_bot.editorial_followup._await_prefetch_if_running", _fail_await), \
-                patch("kouhai_bot.editorial_followup.send_private_msg", AsyncMock(return_value=1)), \
+                patch("kouhai_bot.editorial_followup.resolve_bot_display_name", AsyncMock(return_value="bot")), \
                 patch("kouhai_bot.editorial_followup.send_group_forward_msg", AsyncMock(return_value=99)):
             from kouhai_bot.editorial_followup import run_post_solve_editorial_followup
             await run_post_solve_editorial_followup(999, "542D")

@@ -57,8 +57,8 @@ async def _send_high_difficulty_notice_group(group_id: int, problem: dict | None
 async def handle_problem(group_id: int, user_id: int, sender: dict,
                          message_id: str, raw_text: str, segments: list,
                          event: dict) -> None:
-    """Resend today's problem as the original merged-forward card.
-    Falls back to regenerating problem text if daily_msg.json is missing."""
+    """Resend today's problem as the merged-forward card.
+    Falls back to a hint when daily_msg.json is missing."""
     if raw_text.lstrip() != "/problem":
         return
     if event.get("message_type") == "private":
@@ -86,8 +86,8 @@ async def handle_problem(group_id: int, user_id: int, sender: dict,
 async def resend_current_problem_group(group_id: int, sender: dict) -> None:
     """Resend today's problem card to the group (shared by /pb and poke).
 
-    Replays the original merged-forward card from daily_msg.json when
-    available; falls back to regenerating the problem text otherwise.
+    Rebuilds the merged-forward card from cached content in daily_msg.json;
+    falls back to a friendly hint when no usable cache exists.
     """
     from ...config import get_config
     from ...napcat.client import send_group_forward_msg
@@ -109,7 +109,7 @@ async def resend_current_problem_group(group_id: int, sender: dict) -> None:
         ))
         return
 
-    # Try forward card first
+    # Rebuild the card from cached content (legacy node-id fields are ignored).
     if os.path.exists(daily_msg_path):
         try:
             with open(daily_msg_path) as f:
@@ -118,33 +118,12 @@ async def resend_current_problem_group(group_id: int, sender: dict) -> None:
             if pid != current_pid:
                 raise ValueError(f"stale daily_msg pid={pid}, current={current_pid}")
             daily_msg = sanitize_cached_problem_card_payload(daily_msg)[0]
-            msg_id = daily_msg.get("msg_id")
-            if msg_id:
-                fwd_nodes = [{"type": "node", "data": {"id": str(msg_id)}}]
-                sample_msg_ids = daily_msg.get("sample_msg_ids", [])
-                if isinstance(sample_msg_ids, list):
-                    for sample_msg_id in sample_msg_ids:
-                        if sample_msg_id:
-                            fwd_nodes.append({"type": "node", "data": {"id": str(sample_msg_id)}})
-                note_msg_id = daily_msg.get("note_msg_id")
-                if note_msg_id:
-                    fwd_nodes.append({"type": "node", "data": {"id": str(note_msg_id)}})
-                snake_msg_id = daily_msg.get("snake_msg_id")
-                if snake_msg_id:
-                    fwd_nodes.append({"type": "node", "data": {"id": str(snake_msg_id)}})
-                fwd_resp = await send_group_forward_msg(group_id, fwd_nodes)
-                if fwd_resp:
-                    if pid:
-                        save_problem_card_ref(group_id, fwd_resp, pid, "problem_resend")
-                    await _send_high_difficulty_notice_group(group_id, current_problem)
-                    await _send_solved_problem_hint(group_id, nickname)
-                    return
             post_msg = daily_msg.get("post_msg")
             sample_messages = daily_msg.get("sample_messages")
             notes_message = daily_msg.get("notes_message")
             snake_enabled = bool(daily_msg.get("snake_enabled", True))
             if isinstance(post_msg, str) and isinstance(sample_messages, list):
-                fwd_resp, node_payload = await _send_problem_forward_card(
+                fwd_resp, _node_payload = await _send_problem_forward_card(
                     group_id=group_id,
                     post_msg=post_msg,
                     sample_messages=[str(item) for item in sample_messages],
@@ -154,8 +133,8 @@ async def resend_current_problem_group(group_id: int, sender: dict) -> None:
                 if fwd_resp:
                     if pid:
                         save_problem_card_ref(group_id, fwd_resp, pid, "problem_resend")
-                    daily_msg.update(node_payload)
-                    daily_msg["fwd_message_id"] = fwd_resp
+                    # Persist the sanitized cache (legacy ids dropped, thinking
+                    # tags stripped) so later rebuilds start from clean content.
                     with open(daily_msg_path, "w", encoding="utf-8") as f:
                         json.dump(daily_msg, f, ensure_ascii=False, indent=2)
                     await _send_high_difficulty_notice_group(group_id, current_problem)
@@ -206,12 +185,12 @@ async def handle_scoreboard(group_id: int, user_id: int, sender: dict,
     from ...config import get_config
     from ...user_groups import DEFAULT_GROUP, configured_user_groups
     from ...napcat.client import (
+        build_node,
         build_plain_message,
+        resolve_bot_display_name,
         send_group_msg,
-        send_private_msg,
         send_group_forward_msg,
     )
-    import asyncio
 
     cfg = get_config()
     nickname = _nick(sender)
@@ -253,15 +232,14 @@ async def handle_scoreboard(group_id: int, user_id: int, sender: dict,
 
     score_text = "\n".join(lines)
 
-    # Send to self → forward to group (merged-forward card)
-    self_resp = await send_private_msg(cfg.bot_qq, build_plain_message(score_text))
-    if not self_resp:
-        await send_group_msg(group_id, build_plain_message(score_text))
-        return
-
-    await asyncio.sleep(0.5)
+    # Merged-forward card assembled from custom nodes (no self-send)
+    bot_name = await resolve_bot_display_name(group_id)
     fwd_resp = await send_group_forward_msg(group_id, [
-        {"type": "node", "data": {"id": str(self_resp)}},
+        build_node(
+            user_id=cfg.bot_qq,
+            nickname=bot_name,
+            content=build_plain_message(score_text),
+        ),
     ])
     if not fwd_resp:
         await send_group_msg(group_id, build_plain_message(score_text))

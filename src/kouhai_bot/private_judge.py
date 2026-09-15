@@ -19,6 +19,7 @@ from .llm import append_model_tag
 from .handlers.shared import (
     append_bad_report_at,
     atomic_write_json,
+    build_problem_card_nodes,
     get_problem_summary,
     get_today_problem,
     high_difficulty_notice,
@@ -31,8 +32,10 @@ from .handlers.shared import (
     translate_sample_notes,
 )
 from .napcat.client import (
+    build_node,
     build_plain_message,
     build_text,
+    resolve_bot_display_name,
     send_group_forward_msg,
     send_group_msg,
     send_private_forward_msg,
@@ -582,13 +585,19 @@ def load_current_group_card_payload(group_id: int, pid: str) -> dict | None:
     return sanitize_cached_problem_card_payload(data)[0]
 
 
-async def _send_forward_nodes_private(user_id: int, node_ids: list[str]) -> int | None:
-    if not node_ids:
-        return None
-    await asyncio.sleep(0.5)
-    return await send_private_forward_msg(
-        user_id,
-        [{"type": "node", "data": {"id": str(node_id)}} for node_id in node_ids],
+def _is_usable_card_payload(payload: dict | None) -> bool:
+    """True when a card payload carries real statement content.
+
+    A cache holding only legacy node ids sanitizes to ``{}``; rebuilding from
+    the live problem beats sending an empty "当前题目" placeholder card.
+    """
+    if not isinstance(payload, dict):
+        return False
+    post_msg = payload.get("post_msg")
+    samples = payload.get("sample_messages")
+    return bool(
+        (isinstance(post_msg, str) and post_msg.strip())
+        or (isinstance(samples, list) and samples)
     )
 
 
@@ -615,32 +624,17 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
     cfg = get_config()
     pid = str(problem.get("today", "") or "")
     payload = load_current_group_card_payload(group_id, pid) if prefer_group_card else None
-    if payload is None:
+    if not _is_usable_card_payload(payload):
         try:
             payload = await build_problem_card_payload(group_id, problem)
         except Exception as e:
             logger.warning("failed to build private problem card for %s: %s", pid, e)
+            payload = None
+        if not _is_usable_card_payload(payload):
             await send_private_msg(user_id, build_plain_message(
                 "题目已设置，但题面暂时拉不到，稍后再试试 /problem。"
             ))
             return False
-
-    node_ids: list[str] = []
-    msg_id = payload.get("msg_id")
-    if msg_id:
-        node_ids.append(str(msg_id))
-        for sample_id in payload.get("sample_msg_ids", []) if isinstance(payload.get("sample_msg_ids"), list) else []:
-            if sample_id:
-                node_ids.append(str(sample_id))
-        for key in ("note_msg_id", "snake_msg_id"):
-            value = payload.get(key)
-            if value:
-                node_ids.append(str(value))
-        fwd_resp = await _send_forward_nodes_private(user_id, node_ids)
-        if fwd_resp:
-            _save_private_problem_card_ref(group_id, fwd_resp, pid)
-            await _send_high_difficulty_notice_private(user_id, problem)
-            return True
 
     post_msg = payload.get("post_msg")
     sample_messages = payload.get("sample_messages")
@@ -652,21 +646,20 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
     if not isinstance(notes_message, str):
         notes_message = ""
 
-    main_node_id = await send_private_msg(cfg.bot_qq, build_plain_message(post_msg))
-    node_ids = [str(main_node_id)] if main_node_id else []
-    if main_node_id:
-        for text in [*[str(item) for item in sample_messages], notes_message]:
-            if not text:
-                continue
-            resp = await send_private_msg(cfg.bot_qq, build_plain_message(text))
-            if resp:
-                node_ids.append(str(resp))
-    if main_node_id:
-        fwd_resp = await _send_forward_nodes_private(user_id, node_ids)
-        if fwd_resp:
-            _save_private_problem_card_ref(group_id, fwd_resp, pid)
-            await _send_high_difficulty_notice_private(user_id, problem)
-            return True
+    bot_name = await resolve_bot_display_name(None)
+    nodes = build_problem_card_nodes(
+        post_msg=post_msg,
+        sample_messages=[str(item) for item in sample_messages],
+        notes_message=notes_message,
+        snake_enabled=bool(payload.get("snake_enabled")),
+        bot_qq=cfg.bot_qq,
+        bot_name=bot_name,
+    )
+    fwd_resp = await send_private_forward_msg(user_id, nodes)
+    if fwd_resp:
+        _save_private_problem_card_ref(group_id, fwd_resp, pid)
+        await _send_high_difficulty_notice_private(user_id, problem)
+        return True
 
     direct_id = await send_private_msg(user_id, build_plain_message(post_msg))
     _save_private_problem_card_ref(group_id, direct_id, pid)
@@ -746,14 +739,7 @@ def build_history_card_nodes(
     for speaker, text in _history_lines(records):
         uid, name = (int(bot_qq), bot_name) if speaker == "bot" else (int(user_id), user_name)
         for chunk in _chunk_text(text):
-            nodes.append({
-                "type": "node",
-                "data": {
-                    "user_id": uid,
-                    "nickname": name,
-                    "content": [build_text(chunk)],
-                },
-            })
+            nodes.append(build_node(user_id=uid, nickname=name, content=[build_text(chunk)]))
     return nodes
 
 

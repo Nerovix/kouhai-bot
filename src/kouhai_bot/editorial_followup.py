@@ -14,8 +14,11 @@ from collections.abc import Awaitable, Callable
 
 from .config import get_config
 from .napcat.client import (
-    build_plain_message,
+    build_node,
+    build_text,
+    resolve_bot_display_name,
     send_group_forward_msg,
+    send_group_msg,
     send_private_forward_msg,
     send_private_msg,
 )
@@ -32,6 +35,7 @@ from .tutorials import (
 logger = logging.getLogger("kouhai-bot.editorial_followup")
 
 _TUTORIAL_FORWARD_CHUNK_SIZE = 5000
+_TUTORIAL_DIRECT_CHUNK_SIZE = 3000  # plain-text fallback: mirrors /review chunking
 _PREFETCH_WAIT_TIMEOUT_SEC = 600
 _PREFETCH_BACKOFF_BASE_SEC = 60.0
 _PREFETCH_BACKOFF_MAX_SEC = 6 * 3600.0
@@ -265,13 +269,14 @@ async def run_post_solve_editorial_followup(group_id: int, pid: str) -> None:
     try:
         editorial = get_verified_official_editorial(pid)
         if editorial:
-            await deliver_official_tutorial_forward(group_id, pid, editorial)
-            logger.info(
-                "[group_%s] editorial delivered from cache for %s in %.1fs",
-                group_id,
-                pid,
-                time.monotonic() - started,
-            )
+            delivered = await deliver_official_tutorial_forward(group_id, pid, editorial)
+            if delivered:
+                logger.info(
+                    "[group_%s] editorial delivered from cache for %s in %.1fs",
+                    group_id,
+                    pid,
+                    time.monotonic() - started,
+                )
             return
         if is_no_official_editorial(pid):
             logger.info(
@@ -297,13 +302,14 @@ async def run_post_solve_editorial_followup(group_id: int, pid: str) -> None:
                 pid,
             )
             return
-        await deliver_official_tutorial_forward(group_id, pid, editorial)
-        logger.info(
-            "[group_%s] editorial delivered for %s in %.1fs",
-            group_id,
-            pid,
-            time.monotonic() - started,
-        )
+        delivered = await deliver_official_tutorial_forward(group_id, pid, editorial)
+        if delivered:
+            logger.info(
+                "[group_%s] editorial delivered for %s in %.1fs",
+                group_id,
+                pid,
+                time.monotonic() - started,
+            )
     except Exception as e:
         logger.warning(
             "[group_%s] post-solve editorial delivery failed for %s: %s",
@@ -319,13 +325,14 @@ async def run_private_post_solve_editorial_followup(user_id: int, pid: str) -> N
     try:
         editorial = get_verified_official_editorial(pid)
         if editorial:
-            await deliver_official_tutorial_forward_private(user_id, pid, editorial)
-            logger.info(
-                "[user_%s] editorial delivered from cache for %s in %.1fs",
-                user_id,
-                pid,
-                time.monotonic() - started,
-            )
+            delivered = await deliver_official_tutorial_forward_private(user_id, pid, editorial)
+            if delivered:
+                logger.info(
+                    "[user_%s] editorial delivered from cache for %s in %.1fs",
+                    user_id,
+                    pid,
+                    time.monotonic() - started,
+                )
             return
         if is_no_official_editorial(pid):
             logger.info(
@@ -351,13 +358,14 @@ async def run_private_post_solve_editorial_followup(user_id: int, pid: str) -> N
                 pid,
             )
             return
-        await deliver_official_tutorial_forward_private(user_id, pid, editorial)
-        logger.info(
-            "[user_%s] editorial delivered for %s in %.1fs",
-            user_id,
-            pid,
-            time.monotonic() - started,
-        )
+        delivered = await deliver_official_tutorial_forward_private(user_id, pid, editorial)
+        if delivered:
+            logger.info(
+                "[user_%s] editorial delivered for %s in %.1fs",
+                user_id,
+                pid,
+                time.monotonic() - started,
+            )
     except Exception as e:
         logger.warning(
             "[user_%s] post-solve editorial delivery failed for %s: %s",
@@ -368,89 +376,107 @@ async def run_private_post_solve_editorial_followup(user_id: int, pid: str) -> N
         )
 
 
-async def _prepare_editorial_forward(
-    pid: str,
-    editorial: OfficialEditorial,
-) -> list[str]:
-    """Verify the cached editorial and self-send its chunks to the bot itself.
-
-    Returns the node ids ready to be forwarded (group or private), or an
-    empty list when the editorial is not deliverable (unverified, missing
-    translation, or self-send failure).
-    """
+def _editorial_payload(pid: str) -> str | None:
+    """The verified Chinese editorial payload, or None when not deliverable."""
     verified_editorial = get_verified_official_editorial(pid)
     if verified_editorial is None:
-        return []
+        return None
     zh_text = load_cached_editorial_zh(pid)
     if len(zh_text) < MIN_EDITORIAL_LEN:
-        return []
-
-    cfg = get_config()
+        return None
     header = f"📖 {pid} 官方题解"
     if verified_editorial.tutorial_url:
         header = f"{header}\n来源: {verified_editorial.tutorial_url}"
-    payload = f"{header}\n\n{zh_text}"
+    return f"{header}\n\n{zh_text}"
+
+
+async def _build_editorial_card_nodes(payload: str, *, group_id: int | None) -> list[dict]:
+    """Build the editorial card as custom forward nodes (one node per chunk).
+
+    The editorial is text-only; each chunk becomes one sender-attributed
+    node of the bot. No self-send: a single forward call publishes the card.
+    """
+    cfg = get_config()
     chunks = _chunk_text(payload, _TUTORIAL_FORWARD_CHUNK_SIZE)
-    node_ids: list[str] = []
-    for chunk in chunks:
-        self_resp = await send_private_msg(cfg.bot_qq, build_plain_message(chunk))
-        if not self_resp:
-            return []
-        node_ids.append(str(self_resp))
-    return node_ids
+    bot_name = await resolve_bot_display_name(group_id)
+    return [
+        build_node(user_id=cfg.bot_qq, nickname=bot_name, content=[build_text(chunk)])
+        for chunk in chunks
+    ]
+
+
+async def _send_editorial_text_fallback(
+    payload: str, *, group_id: int | None, user_id: int | None
+) -> bool:
+    """Plain-text fallback: send the editorial chunks as normal messages."""
+    delivered = False
+    for chunk in _chunk_text(payload, _TUTORIAL_DIRECT_CHUNK_SIZE):
+        segments = [build_text(chunk)]
+        if group_id is not None:
+            resp = await send_group_msg(group_id, segments)
+        else:
+            resp = await send_private_msg(user_id, segments)
+        delivered = delivered or bool(resp)
+    return delivered
 
 
 async def deliver_official_tutorial_forward(
     group_id: int,
     pid: str,
     editorial: OfficialEditorial,
-) -> None:
-    """Deliver one already verified and cached Chinese editorial to a group."""
-    node_ids = await _prepare_editorial_forward(pid, editorial)
-    if not node_ids:
+) -> bool:
+    """Deliver one already verified and cached Chinese editorial to a group.
+
+    Returns True once the card (or its plain-text fallback) reached the group.
+    """
+    payload = _editorial_payload(pid)
+    if payload is None:
         logger.warning(
             "[group_%s] tutorial delivery skipped for %s "
-            "(unverified/missing translation/self-send failed)",
+            "(unverified or missing translation)",
             group_id,
             pid,
         )
-        return
-    await asyncio.sleep(0.5)
-    fwd_resp = await send_group_forward_msg(
+        return False
+    nodes = await _build_editorial_card_nodes(payload, group_id=group_id)
+    fwd_resp = await send_group_forward_msg(group_id, nodes)
+    if fwd_resp:
+        return True
+    logger.warning(
+        "[group_%s] failed to forward official tutorial for %s — "
+        "falling back to plain text",
         group_id,
-        [{"type": "node", "data": {"id": node_id}} for node_id in node_ids],
+        pid,
     )
-    if not fwd_resp:
-        logger.warning(
-            "[group_%s] failed to forward official tutorial for %s",
-            group_id,
-            pid,
-        )
+    return await _send_editorial_text_fallback(payload, group_id=group_id, user_id=None)
 
 
 async def deliver_official_tutorial_forward_private(
     user_id: int,
     pid: str,
     editorial: OfficialEditorial,
-) -> None:
-    """Deliver one already verified and cached Chinese editorial to a user."""
-    node_ids = await _prepare_editorial_forward(pid, editorial)
-    if not node_ids:
+) -> bool:
+    """Deliver one already verified and cached Chinese editorial to a user.
+
+    Returns True once the card (or its plain-text fallback) reached the user.
+    """
+    payload = _editorial_payload(pid)
+    if payload is None:
         logger.warning(
             "[user_%s] tutorial delivery skipped for %s "
-            "(unverified/missing translation/self-send failed)",
+            "(unverified or missing translation)",
             user_id,
             pid,
         )
-        return
-    await asyncio.sleep(0.5)
-    fwd_resp = await send_private_forward_msg(
+        return False
+    nodes = await _build_editorial_card_nodes(payload, group_id=None)
+    fwd_resp = await send_private_forward_msg(user_id, nodes)
+    if fwd_resp:
+        return True
+    logger.warning(
+        "[user_%s] failed to forward official tutorial for %s — "
+        "falling back to plain text",
         user_id,
-        [{"type": "node", "data": {"id": node_id}} for node_id in node_ids],
+        pid,
     )
-    if not fwd_resp:
-        logger.warning(
-            "[user_%s] failed to forward official tutorial for %s",
-            user_id,
-            pid,
-        )
+    return await _send_editorial_text_fallback(payload, group_id=None, user_id=user_id)

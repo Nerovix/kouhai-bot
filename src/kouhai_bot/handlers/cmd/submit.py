@@ -92,11 +92,13 @@ from ...tutorials import (
 from ...napcat.client import (
     build_at,
     build_face,
+    build_node,
     build_private_reaction_message,
     build_plain_message,
     build_text,
     delete_msg,
     react_emoji,
+    resolve_bot_display_name,
     send_group_forward_msg,
     send_group_msg,
     send_private_forward_msg,
@@ -1506,74 +1508,38 @@ class GroupCoordinator:
                 len(display_reply),
                 len(chunks),
             )
-            node_ids: list[str] = []
-            for idx, chunk in enumerate(chunks, 1):
-                self_resp = await send_private_msg(cfg.bot_qq, build_plain_message(chunk))
-                if not self_resp:
-                    logger.warning(
-                        "[group_%s] /review seq=%s self-send chunk %s/%s failed; falling back to direct group messages",
-                        req.group_id,
-                        req.seq,
-                        idx,
-                        len(chunks),
-                    )
-                    node_ids = []
-                    break
+            bot_name = await resolve_bot_display_name(None if req.is_private else req.group_id)
+            nodes = [
+                build_node(
+                    user_id=cfg.bot_qq,
+                    nickname=bot_name,
+                    content=[build_text(chunk)],
+                )
+                for chunk in chunks
+            ]
+            if req.is_private:
+                fwd_resp = await send_private_forward_msg(req.user_id, nodes)
+            else:
+                fwd_resp = await send_group_forward_msg(req.group_id, nodes)
+            if fwd_resp:
                 logger.info(
-                    "[group_%s] /review seq=%s self-send chunk %s/%s ok: node_id=%s chunk_len=%s",
+                    "[group_%s] /review seq=%s forward-card send ok: fwd_msg_id=%s node_count=%s",
                     req.group_id,
                     req.seq,
-                    idx,
-                    len(chunks),
-                    self_resp,
-                    len(chunk),
+                    fwd_resp,
+                    len(nodes),
                 )
-                node_ids.append(str(self_resp))
-            if node_ids:
-                await asyncio.sleep(0.5)
-                if req.is_private:
-                    fwd_resp = await send_private_forward_msg(
-                        req.user_id,
-                        [{"type": "node", "data": {"id": node_id}} for node_id in node_ids],
-                    )
-                else:
-                    fwd_resp = await send_group_forward_msg(
-                        req.group_id,
-                        [{"type": "node", "data": {"id": node_id}} for node_id in node_ids],
-                    )
-                if fwd_resp:
-                    logger.info(
-                        "[group_%s] /review seq=%s forward-card send ok: fwd_msg_id=%s node_count=%s",
-                        req.group_id,
-                        req.seq,
-                        fwd_resp,
-                        len(node_ids),
-                    )
-                    if not req.is_private:
-                        await send_group_msg(req.group_id, [
-                            build_at(req.user_id),
-                            build_text(" 回复较长，已折叠到卡片里啦 👆"),
-                        ])
-                else:
-                    logger.warning(
-                        "[group_%s] /review seq=%s forward-card send failed after self-send; falling back to direct group messages",
-                        req.group_id,
-                        req.seq,
-                    )
-                    for idx, chunk in enumerate(chunks, 1):
-                        logger.info(
-                            "[group_%s] /review seq=%s direct-send fallback chunk %s/%s len=%s",
-                            req.group_id,
-                            req.seq,
-                            idx,
-                            len(chunks),
-                            len(chunk),
-                        )
-                        if req.is_private:
-                            await send_private_msg(req.user_id, build_plain_message(chunk))
-                        else:
-                            await send_group_msg(req.group_id, build_plain_message(chunk))
+                if not req.is_private:
+                    await send_group_msg(req.group_id, [
+                        build_at(req.user_id),
+                        build_text(" 回复较长，已折叠到卡片里啦 👆"),
+                    ])
             else:
+                logger.warning(
+                    "[group_%s] /review seq=%s forward-card send failed; falling back to direct group messages",
+                    req.group_id,
+                    req.seq,
+                )
                 for idx, chunk in enumerate(chunks, 1):
                     logger.info(
                         "[group_%s] /review seq=%s direct-send fallback chunk %s/%s len=%s",

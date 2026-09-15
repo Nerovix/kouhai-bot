@@ -238,6 +238,19 @@ def _last_text() -> str:
     return str(msg)
 
 
+def _card_texts(card: dict | None = None) -> str:
+    """All text inside the nodes of a recorded forward card (default: the last)."""
+    if card is None and not _forwarded:
+        return ""
+    card = card if card is not None else _forwarded[-1]
+    parts: list[str] = []
+    for node in card.get("messages", []):
+        for seg in node.get("data", {}).get("content") or []:
+            if seg.get("type") == "text":
+                parts.append(seg.get("data", {}).get("text", ""))
+    return "\n".join(parts)
+
+
 async def _mock_send_group(group_id, message):
     _sent.append({"group_id": group_id, "message": message})
     return True
@@ -277,6 +290,8 @@ async def _mock_http_post(action, data):
             if str(member.get("user_id")) == target_uid:
                 return {"status": "ok", "data": member}
         return {"status": "failed", "data": {}}
+    if action == "get_login_info":
+        return {"status": "ok", "data": {"user_id": 1, "nickname": "测试Bot"}}
     return {"status": "failed", "data": {}}
 
 
@@ -585,7 +600,6 @@ def _all_patches():
     stack.enter_context(patch("kouhai_bot.handlers.cmd.review.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.clear.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.send_group_msg", _mock_send_group))
-    stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.send_group_forward_msg", _mock_send_group_forward))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.schedule_prefetch_editorial"))
@@ -601,7 +615,6 @@ def _all_patches():
     stack.enter_context(patch("kouhai_bot.handlers.cmd.feedback.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.feedback.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.feedback.react_emoji", _mock_react))
-    stack.enter_context(patch("kouhai_bot.editorial_followup.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.editorial_followup.send_group_forward_msg", _mock_send_group_forward))
     stack.enter_context(patch("kouhai_bot.private_judge.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.private_judge.send_private_msg", _mock_send_private))
@@ -690,17 +703,11 @@ def test_submit_correct():
     assert _has_sent("恭喜") or _has_sent("通过") or _has_sent("solved"), \
         f"No congrats. Messages: {[_last_text()]}"
     assert _forwarded, f"Expected official tutorial forward, got: {_forwarded}"
-    assert _private_sent, "Expected private self-send for tutorial forward"
-    first_private = _private_sent[0]["message"]
-    private_text = first_private if isinstance(first_private, str) else str(first_private)
-    if isinstance(first_private, list):
-        private_text = " ".join(
-            seg.get("data", {}).get("text", "")
-            for seg in first_private
-            if isinstance(seg, dict) and seg.get("type") == "text"
-        )
-    assert "官方题解" in private_text
-    assert "官方题解中文翻译" in private_text
+    tutorial_text = "\n".join(_card_texts(card) for card in _forwarded)
+    assert "官方题解" in tutorial_text, tutorial_text
+    assert "官方题解中文翻译" in tutorial_text, tutorial_text
+    assert not [item for item in _private_sent if item["user_id"] == 1], \
+        f"Tutorial card must not self-send: {_private_sent}"
     with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
         saved = json.load(f)
     records = saved["user_submissions"][str(UID)]
@@ -1059,6 +1066,10 @@ def test_newproblem_force_sends_skip_editorial_then_new_card():
         return 123, {}
 
     with _all_patches(), \
+            patch(
+                "kouhai_bot.handlers.cmd.newproblem.snake_replace",
+                lambda text: text,
+            ), \
             patch(
                 "kouhai_bot.handlers.cmd.newproblem.get_next_problem_prefetcher",
                 return_value=prefetcher,
@@ -1942,10 +1953,12 @@ def test_review_long_reply_is_chunked_into_one_forward_card():
             from kouhai_bot.handlers.cmd.review import handle
             asyncio.run(handle(**_kwargs(_make_event("/review 细讲一下这题"))))
 
-    assert len(_private_sent) == 1, f"Expected 1 private chunk, got {_private_sent}"
-    assert _private_sent[0]["message"][0]["data"]["text"] == _deepseek_response
+    assert not _private_sent, f"Review card must not self-send: {_private_sent}"
     assert len(_forwarded) == 1, f"Expected 1 forward card, got {_forwarded}"
-    assert len(_forwarded[0]["messages"]) == 1, f"Expected 1 forward node, got {_forwarded}"
+    nodes = _forwarded[0]["messages"]
+    assert len(nodes) == 1, f"Expected 1 forward node, got {_forwarded}"
+    assert nodes[0]["data"]["user_id"] == 1, nodes
+    assert _card_texts() == _deepseek_response, _card_texts()
     assert "回复较长，已折叠到卡片里啦" in _last_text(), f"Unexpected final message: {_last_text()}"
     with open(os.path.join(_data_dir(), "groups", str(GID), "scoreboard.json")) as f:
         saved = json.load(f)
@@ -2661,7 +2674,7 @@ def test_problem_with_data():
     print("✅ problem: fallback when no daily_msg.json")
 
 
-def test_problem_rebuilds_forward_card_when_node_ids_are_stale():
+def test_problem_resend_rebuilds_card_from_cached_content():
     _reset_state()
     _setup_problem()
     _write_group_file(GID, "daily_msg.json", {
@@ -2674,30 +2687,30 @@ def test_problem_rebuilds_forward_card_when_node_ids_are_stale():
         "snake_enabled": True,
     })
 
-    async def _fail_old_nodes(group_id, messages):
-        if messages and messages[0]["data"]["id"] == "1111":
-            return None
-        _forwarded.append({"group_id": group_id, "messages": messages})
-        return 3000 + len(_forwarded)
-
     with _all_patches():
-        with patch("kouhai_bot.napcat.client.send_group_forward_msg", _fail_old_nodes), \
-                patch("kouhai_bot.handlers.cmd.newproblem.send_group_forward_msg", _fail_old_nodes), \
-                patch("kouhai_bot.handlers.cmd.newproblem.asyncio.sleep", AsyncMock()):
-            from kouhai_bot.handlers.cmd.stubs import handle_problem
-            asyncio.run(handle_problem(**_kwargs(_make_event("/problem"))))
+        from kouhai_bot.handlers.cmd.stubs import handle_problem
+        asyncio.run(handle_problem(**_kwargs(_make_event("/problem"))))
 
-    assert len(_private_sent) >= 2, f"Expected rebuilt self-sends, got {_private_sent}"
+    assert not _private_sent, f"Resend must not self-send: {_private_sent}"
     assert len(_forwarded) == 1, f"Expected rebuilt forward card, got {_forwarded}"
+    nodes = _forwarded[0]["messages"]
+    assert all("id" not in node["data"] for node in nodes), nodes
+    card_text = _card_texts()
+    assert "题目正文" in card_text, card_text
+    assert "样例 1" in card_text, card_text
+    assert any(
+        seg.get("type") == "image"
+        for node in nodes for seg in node["data"]["content"]
+    ), nodes
     with open(os.path.join(_data_dir(), "groups", str(GID), "daily_msg.json")) as f:
         saved = json.load(f)
-    assert saved["fwd_message_id"] == 3001
-    assert saved["msg_id"] != 1111
+    assert "fwd_message_id" not in saved
+    assert "msg_id" not in saved and "sample_msg_ids" not in saved, saved
     with open(os.path.join(_data_dir(), "groups", str(GID), "problem_card_refs.json")) as f:
         refs = json.load(f)
-    assert refs["3001"]["problem"] == PID
+    assert refs["2001"]["problem"] == PID
     _cleanup()
-    print("✅ problem: rebuilds stale forward card")
+    print("✅ problem: rebuilds card from cached content (legacy ids ignored)")
 
 
 def test_problem_rebuilds_forward_card_when_cached_text_has_thinking_tags():
@@ -2718,22 +2731,18 @@ def test_problem_rebuilds_forward_card_when_cached_text_has_thinking_tags():
         asyncio.run(handle_problem(**_kwargs(_make_event("/problem"))))
 
     assert _forwarded, f"Expected rebuilt forward card, got {_forwarded}"
-    forwarded_ids = [
-        node.get("data", {}).get("id")
-        for node in _forwarded[0]["messages"]
-        if isinstance(node, dict)
-    ]
-    assert "1111" not in forwarded_ids and "1112" not in forwarded_ids, _forwarded
-    private_text = "\n".join(_last_text_item(item) for item in _private_sent)
-    assert "internal summary" not in private_text
-    assert "hidden note" not in private_text
-    assert "可见摘要" in private_text
-    assert "可见解释" in private_text
+    nodes = _forwarded[0]["messages"]
+    assert all("id" not in node.get("data", {}) for node in nodes), _forwarded
+    card_text = _card_texts()
+    assert "internal summary" not in card_text
+    assert "hidden note" not in card_text
+    assert "可见摘要" in card_text
+    assert "可见解释" in card_text
     with open(os.path.join(_data_dir(), "groups", str(GID), "daily_msg.json"), encoding="utf-8") as f:
         saved = json.load(f)
     assert "thinking" not in saved["post_msg"]
     assert "analysis" not in saved["notes_message"]
-    assert saved["msg_id"] != 1111
+    assert "msg_id" not in saved, saved
     _cleanup()
     print("✅ problem: sanitizes cached thinking tags before resend")
 
@@ -2765,6 +2774,8 @@ def test_problem_solved_resend_shows_next_problem_hint():
     _write_group_file(GID, "daily_msg.json", {
         "msg_id": 1111,
         "pid": PID,
+        "post_msg": "题目正文",
+        "sample_messages": ["样例 1"],
     })
     _write_scoreboard(GID, {
         "solves": [{"user_id": UID, "nickname": "Alice", "problem": PID, "timestamp": time.time()}],
@@ -2789,6 +2800,8 @@ def test_problem_unsolved_resend_does_not_show_next_problem_hint():
     _write_group_file(GID, "daily_msg.json", {
         "msg_id": 1111,
         "pid": PID,
+        "post_msg": "题目正文",
+        "sample_messages": ["样例 1"],
     })
     _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
 
@@ -2817,6 +2830,8 @@ def test_problem_high_difficulty_resend_warns_after_card():
     _write_group_file(GID, "daily_msg.json", {
         "msg_id": 1111,
         "pid": PID,
+        "post_msg": "题目正文",
+        "sample_messages": ["样例 1"],
     })
     _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
 
@@ -2887,8 +2902,9 @@ def test_scoreboard_with_data():
     with _all_patches():
         from kouhai_bot.handlers.cmd.stubs import handle_scoreboard
         asyncio.run(handle_scoreboard(**_kwargs(_make_event("/scoreboard"))))
-    assert len(_private_sent) == 1, f"Expected scoreboard self-send, got {_private_sent}"
-    text = _private_sent[0]["message"][0]["data"]["text"]
+    assert not _private_sent, f"Scoreboard must not self-send: {_private_sent}"
+    assert _forwarded, "Expected scoreboard forward card"
+    text = _card_texts()
     lines = text.splitlines()
     assert lines[:3] == [
         "📊 累计解题排行榜（共 2 人）",
@@ -2923,7 +2939,7 @@ def test_scoreboard_same_score_shares_rank():
     with _all_patches():
         from kouhai_bot.handlers.cmd.stubs import handle_scoreboard
         asyncio.run(handle_scoreboard(**_kwargs(_make_event("/scoreboard"))))
-    text = _private_sent[0]["message"][0]["data"]["text"]
+    text = _card_texts()
     full_lines = text.splitlines()
     assert full_lines[:3] == [
         "📊 累计解题排行榜（共 2 人）",
@@ -2967,7 +2983,7 @@ def test_scoreboard_splits_default_and_starred_groups():
         from kouhai_bot.handlers.cmd.stubs import handle_scoreboard
         asyncio.run(handle_scoreboard(**_kwargs(_make_event("/scoreboard"))))
 
-    text = _private_sent[0]["message"][0]["data"]["text"]
+    text = _card_texts()
     lines = text.splitlines()
     default_idx = next(i for i, line in enumerate(lines) if line.startswith("#1 FreshAlice"))
     starred_header_idx = lines.index("📊 打星排行榜")
@@ -2990,12 +3006,8 @@ def test_help_shows_short_aliases_and_configured_newproblem_cooldown():
         discover_commands()
         asyncio.run(handle(**_kwargs(_make_event("/help"))))
 
-    assert _private_sent, "Expected help to self-send before forward"
-    msg = _private_sent[0]["message"]
-    text = " ".join(
-        seg.get("data", {}).get("text", "")
-        for seg in msg if isinstance(seg, dict) and seg.get("type") == "text"
-    )
+    assert _forwarded, "Expected help forward card"
+    text = _card_texts()
     assert "/newproblem(/np) [--force] — 刷一道新题（未解须 --force；90秒冷却）" in text, text
     assert "/problem(/pb) — 重新查看当前题目" in text, text
     assert "/submit(/sbm) 你的做法 — 提交做法，AI 判定对错" in text, text
@@ -3021,12 +3033,13 @@ def test_private_help_only_shows_private_judge_commands():
 
     assert _private_forwarded, "Expected private help to be sent as a forward card"
     assert _private_forwarded[-1]["user_id"] == UID, _private_forwarded
-    self_sends = [item for item in _private_sent if item["user_id"] == 1]
-    assert self_sends, "Expected private help to self-send before forward"
-    msg = self_sends[-1]["message"]
-    text = " ".join(
+    assert not [item for item in _private_sent if item["user_id"] == 1], _private_sent
+    card = _private_forwarded[-1]["messages"]
+    text = "\n".join(
         seg.get("data", {}).get("text", "")
-        for seg in msg if isinstance(seg, dict) and seg.get("type") == "text"
+        for node in card
+        for seg in (node.get("data", {}).get("content") or [])
+        if seg.get("type") == "text"
     )
     assert "/setproblem(/sp) [题号|链接|random|难度范围] — 设置 private judge 当前题" in text, text
     assert "/feedback(/fb) [简短备注] — 标记对AI最新回复不满意，记录反馈供维护复盘" in text, text
@@ -5018,6 +5031,10 @@ def test_private_problem_card_high_difficulty_warns_after_card():
     _write_group_file(GID, "daily_msg.json", {
         "msg_id": 1111,
         "pid": PID,
+        "post_msg": "题目正文",
+        "sample_messages": ["样例 1"],
+        "notes_message": "",
+        "snake_enabled": False,
     })
     problem = {
         "today": PID,
@@ -5049,7 +5066,53 @@ def test_private_problem_card_high_difficulty_warns_after_card():
     print("✅ private problem card: high difficulty warns after card")
 
 
-def test_private_problem_card_falls_back_when_main_self_send_fails():
+def test_private_problem_card_rebuilds_when_cache_has_only_legacy_ids():
+    _reset_state()
+    _write_group_file(GID, "daily_msg.json", {
+        "msg_id": 1111,
+        "sample_msg_ids": [1112, 1113],
+        "pid": PID,
+    })
+    problem = {
+        "today": PID,
+        "contestId": 542,
+        "index": "D",
+        "name": "Superhero's Job",
+        "rating": 2600,
+        "tags": [],
+    }
+    payload = {
+        "post_msg": "REBUILT CARD",
+        "sample_messages": ["REBUILT SAMPLE"],
+        "notes_message": "",
+        "snake_enabled": False,
+    }
+    rebuild = AsyncMock(return_value=payload)
+
+    with _all_patches(), \
+        patch("kouhai_bot.private_judge.build_problem_card_payload", rebuild), \
+        patch("kouhai_bot.private_judge.asyncio.sleep", AsyncMock()):
+        from kouhai_bot.private_judge import send_problem_card_private
+
+        ok = asyncio.run(send_problem_card_private(UID, GID, problem, prefer_group_card=True))
+
+    assert ok
+    assert rebuild.await_count == 1, "legacy-only cache must trigger a rebuild"
+    assert len(_private_forwarded) == 1, f"Expected private problem card, got: {_private_forwarded}"
+    node_text = "".join(
+        seg.get("data", {}).get("text", "")
+        for node in _private_forwarded[0]["messages"]
+        for seg in node["data"]["content"]
+        if seg.get("type") == "text"
+    )
+    assert "REBUILT CARD" in node_text, node_text
+    assert "REBUILT SAMPLE" in node_text, node_text
+    assert "当前题目" not in node_text, node_text
+    _cleanup()
+    print("✅ private problem card: rebuilds when cache has only legacy ids")
+
+
+def test_private_problem_card_falls_back_when_forward_fails():
     _reset_state()
     problem = {
         "today": PID,
@@ -5065,22 +5128,19 @@ def test_private_problem_card_falls_back_when_main_self_send_fails():
         "notes_message": "NOTE CARD",
     }
 
-    async def _send_private_with_main_self_send_failure(user_id, message):
-        text = _last_text_item({"message": message})
-        if user_id == 1 and text == "MAIN CARD":
-            return None
-        return await _mock_send_private(user_id, message)
+    async def _fail_forward(user_id, messages):
+        return None
 
     with _all_patches(), \
         patch("kouhai_bot.private_judge.asyncio.sleep", AsyncMock()), \
         patch("kouhai_bot.private_judge.build_problem_card_payload", AsyncMock(return_value=payload)), \
-        patch("kouhai_bot.private_judge.send_private_msg", _send_private_with_main_self_send_failure):
+        patch("kouhai_bot.private_judge.send_private_forward_msg", _fail_forward):
         from kouhai_bot.private_judge import send_problem_card_private
 
         ok = asyncio.run(send_problem_card_private(UID, GID, problem, prefer_group_card=False))
 
     assert ok
-    assert _private_forwarded == [], f"Should not forward without main card node: {_private_forwarded}"
+    assert _private_forwarded == [], f"Should not record a failed forward: {_private_forwarded}"
     with open(os.path.join(_data_dir(), "groups", str(GID), "problem_card_refs.json"), encoding="utf-8") as f:
         refs = json.load(f)
     saved_pids = [item["problem"] for item in refs.values() if item.get("source") == "private_problem_card"]
@@ -5090,7 +5150,7 @@ def test_private_problem_card_falls_back_when_main_self_send_fails():
     assert "SAMPLE CARD" in private_text, private_text
     assert "NOTE CARD" in private_text, private_text
     _cleanup()
-    print("✅ private problem card: falls back when main node self-send fails")
+    print("✅ private problem card: falls back when forward fails")
 
 
 def test_private_state_load_logs_corrupt_json_once(caplog):
@@ -5809,6 +5869,7 @@ if __name__ == "__main__":
     test_user_submission_history_is_unbounded_and_upserts_by_request_id()
     test_clarify_prompt_hides_original_problem_identity()
     test_private_problem_card_high_difficulty_warns_after_card()
+    test_private_problem_card_rebuilds_when_cache_has_only_legacy_ids()
     test_submit_same_user_includes_previous_clarify_history()
     test_submit_parallel_different_groups_do_not_block()
     test_submit_starred_user_shows_own_group_top5()

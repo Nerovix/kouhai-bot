@@ -833,10 +833,10 @@ newer AC can silently retarget an older review request.
    incomplete, the established no-summary publication fallback is retained explicitly.
 3. `/newproblem` claims the READY slot (or awaits that same single-flight preparation on
    a cold start) and formats the previous-problem reveal from current state.
-4. Self-send summary text; self-send each sample as an independent node; if statement has
-   `notes`, translate it to Chinese and append a dedicated `样例解释` node (with LaTeX/Markdown
-   artifacts normalized to readable symbols such as `→`, `≤`, `<`, `>`); then append snake
-   image and forward all nodes as one merged card to group
+4. Assemble the card as custom sender-attributed nodes — summary text; each sample as an
+   independent node; a dedicated `样例解释` node when `notes` exist (with LaTeX/Markdown
+   artifacts normalized to readable symbols such as `→`, `≤`, `<`, `>`); snake image — and
+   publish every node as one merged card with a single `send_group_forward_msg` call
 5. If delivery succeeds, commit `state.json` with `posted_at` and save `daily_msg.json`
    for `/problem` to resend. A direct-text fallback after forward-card failure still
    counts as successful delivery and must save `daily_msg.json` with `pid`, `post_msg`,
@@ -913,7 +913,7 @@ uv run python tools/tutorial_tools.py validate --heuristic-only
 
 - `schedule_post_solve_editorial_followup()` → if cache warm, deliver immediately (no prefetch wait)
 - Otherwise await an already in-flight prefetch, then deliver only if it became verified
-- Has cached zh: self-send chunk(s) → `send_group_forward_msg` (low latency)
+- Has cached zh: custom-node chunks → `send_group_forward_msg` (low latency; no self-send)
 - No editorial or still incomplete: silent skip (no group message)
 - **Not** part of `GroupCoordinator`; do not `await` inside `_finalize_submit`
 
@@ -1149,13 +1149,14 @@ and the HTML labeling UI reuse only a matching verified entry before attempting 
 translation. Do not force synchronous translation on detail-page clicks.
 
 ### 12. `/newproblem` uses merged-forward
-`/newproblem` self-sends summary text, sample nodes, optional translated notes node,
-and snake image, then forwards them as one merged card. `daily_msg.json` must persist
-all node references (`msg_id`, `sample_msg_ids`, optional `note_msg_id`, `snake_msg_id`)
-so `/problem` can resend the same card. If merged-forward fails but direct group text
-succeeds, `daily_msg.json` must still persist the current `pid` and rebuild inputs.
-`/problem` must ignore stale `daily_msg.json` whose `pid` does not match
-`state.json.today`.
+`/newproblem` assembles summary text, sample nodes, the optional translated notes node,
+and the snake image as custom sender-attributed forward nodes, then publishes them as
+one merged card in a single `send_group_forward_msg` call (no self-send). `daily_msg.json`
+must persist the card CONTENT (`pid`, `post_msg`, `sample_messages`, `notes_message`,
+`snake_enabled`) so `/problem` can rebuild the same card; legacy node-id fields are never
+replayed. If merged-forward fails but direct group text succeeds, `daily_msg.json` must
+still persist the current `pid` and rebuild inputs. `/problem` must ignore stale
+`daily_msg.json` whose `pid` does not match `state.json.today`.
 Complicated but essential for good UX.
 
 ### 13. Dispatch uses create_task
@@ -1411,10 +1412,17 @@ selected by the `--group` flag.
 - **No auto daily post catch-up**: The old bridge had a startup catch-up that posted if
   started after 12:00 with no problem. This was intentionally REMOVED — it makes
   workflow unpredictable. Missed is missed; don't auto-recover.
-- **New problem delivery**: Must use merged-forward (self-send text + snake image →
-  forward card + daily_msg.json). Plain-text direct send is fallback-only; if it
+- **New problem delivery**: Must use merged-forward assembled from custom
+  sender-attributed nodes (no self-send; one `send_group_forward_msg` call) plus the
+  `daily_msg.json` content cache. Plain-text direct send is fallback-only; if it
   succeeds, it still needs current-problem `daily_msg.json` so `/problem` never resends
   stale cached cards.
+- **Forward cards are custom-node assembled**: every merged-forward card (problem,
+  help, scoreboard, review, editorial, history) is built from fabricated
+  `OB11MessageNode`s via `build_node` in `napcat/client.py`, attributed to the bot with
+  `resolve_bot_display_name()` (group card in groups, login nickname in DMs). No
+  self-send dance, no post-send sleep, no stale node-id replay; each card keeps a
+  plain-text fallback path.
 - **Old bridge.py behavior is the ground truth**: All behavior, message text, data
   formats, and edge cases must match the legacy bridge implementation. When in doubt,
   compare against the old code if it is available in your local environment.
@@ -1446,4 +1454,4 @@ When making changes, verify against old bridge.py:
     calls `schedule_private_post_solve_editorial_followup(user_id, pid)`, reusing the
     group path's cache-check/await-prefetch logic; the cached Chinese editorial is
     forwarded to the user via `send_private_forward_msg` (same forward-card format).
-    Shared chunking/self-send lives in `_prepare_editorial_forward()`.
+    Shared chunking + custom-node assembly lives in `_build_editorial_card_nodes()` (same `build_node` helper as every other card).

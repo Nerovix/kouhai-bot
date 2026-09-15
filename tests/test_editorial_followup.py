@@ -96,18 +96,15 @@ _LONG_ZH = "这是官方题解的中文翻译。" * 100
 
 
 def _mock_deliver_prereqs(monkeypatch):
-    """Common mocks for deliver tests: verified editorial + self-send ids."""
+    """Common mocks for deliver tests: verified editorial + bot display name."""
     monkeypatch.setattr(ef, "get_verified_official_editorial", lambda pid: _FAKE_EDITORIAL)
     monkeypatch.setattr(ef, "load_cached_editorial_zh", lambda pid: _LONG_ZH)
     monkeypatch.setattr(ef, "get_config", lambda: SimpleNamespace(bot_qq=999))
-    counter = {"n": 100}
 
-    async def fake_self_send(_user_id, _message):
-        counter["n"] += 1
-        return counter["n"]
+    async def fake_resolve_bot_name(group_id=None):
+        return "测试Bot"
 
-    monkeypatch.setattr(ef, "send_private_msg", fake_self_send)
-    return counter
+    monkeypatch.setattr(ef, "resolve_bot_display_name", fake_resolve_bot_name)
 
 
 @pytest.mark.asyncio
@@ -126,8 +123,16 @@ async def test_private_deliver_forwards_to_user(monkeypatch):
     user_id, messages = forwarded[0]
     assert user_id == 12345
     assert len(messages) >= 1
-    assert messages[0]["type"] == "node"
-    assert messages[0]["data"]["id"]
+    node = messages[0]
+    assert node["type"] == "node"
+    assert node["data"]["user_id"] == 999
+    assert node["data"]["nickname"] == "测试Bot"
+    node_text = "".join(
+        seg.get("data", {}).get("text", "")
+        for seg in node["data"]["content"]
+        if seg.get("type") == "text"
+    )
+    assert "官方题解" in node_text
 
 
 @pytest.mark.asyncio
@@ -152,6 +157,7 @@ async def test_group_deliver_still_uses_group_forward(monkeypatch):
     await ef.deliver_official_tutorial_forward(777, PID, _FAKE_EDITORIAL)
     assert len(forwarded) == 1
     assert forwarded[0][0] == 777
+    assert forwarded[0][1][0]["data"]["user_id"] == 999
 
 
 def test_private_schedule_creates_task(monkeypatch):
@@ -236,3 +242,47 @@ def test_private_success_schedules_editorial_only_on_first_solve(monkeypatch):
     asyncio.run(_run())
     assert len(calls) == 1, f"editorial scheduled {len(calls)} times, want 1"
     assert calls[0] == (12345, PID)
+
+
+@pytest.mark.asyncio
+async def test_group_deliver_falls_back_to_plain_text_when_forward_fails(monkeypatch):
+    _mock_deliver_prereqs(monkeypatch)
+    sent = []
+
+    async def fail_forward(group_id, messages):
+        return None
+
+    async def fake_send_group(group_id, message):
+        sent.append((group_id, message))
+        return 1
+
+    monkeypatch.setattr(ef, "send_group_forward_msg", fail_forward)
+    monkeypatch.setattr(ef, "send_group_msg", fake_send_group)
+
+    delivered = await ef.deliver_official_tutorial_forward(777, PID, _FAKE_EDITORIAL)
+    assert delivered is True
+    assert sent and sent[0][0] == 777
+    text = "".join(seg.get("data", {}).get("text", "") for seg in sent[0][1])
+    assert "官方题解" in text
+
+
+@pytest.mark.asyncio
+async def test_private_deliver_falls_back_to_plain_text_when_forward_fails(monkeypatch):
+    _mock_deliver_prereqs(monkeypatch)
+    sent = []
+
+    async def fail_forward(user_id, messages):
+        return None
+
+    async def fake_send_private(user_id, message):
+        sent.append((user_id, message))
+        return 1
+
+    monkeypatch.setattr(ef, "send_private_forward_msg", fail_forward)
+    monkeypatch.setattr(ef, "send_private_msg", fake_send_private)
+
+    delivered = await ef.deliver_official_tutorial_forward_private(12345, PID, _FAKE_EDITORIAL)
+    assert delivered is True
+    assert sent and sent[0][0] == 12345
+    text = "".join(seg.get("data", {}).get("text", "") for seg in sent[0][1])
+    assert "官方题解" in text

@@ -57,10 +57,11 @@ async def handle(group_id: int, user_id: int, sender: dict,
                  message_id: str, raw_text: str, segments: list,
                  event: dict) -> None:
     """Generate help text from registry, deliver as merged-forward card."""
-    import asyncio
     from ...config import get_config
     from ...napcat.client import (
+        build_node,
         build_plain_message,
+        resolve_bot_display_name,
         send_group_msg,
         send_private_msg,
         send_private_forward_msg,
@@ -90,30 +91,18 @@ async def handle(group_id: int, user_id: int, sender: dict,
     text = "\n".join(lines)
     msg = build_plain_message(text)
 
+    bot_name = await resolve_bot_display_name(None if is_private else group_id)
+    nodes = [build_node(user_id=cfg.bot_qq, nickname=bot_name, content=msg)]
+
     if is_private:
-        self_resp = await send_private_msg(cfg.bot_qq, msg)
-        if self_resp:
-            await asyncio.sleep(0.5)
-            fwd_resp = await send_private_forward_msg(user_id, [
-                {"type": "node", "data": {"id": str(self_resp)}},
-            ])
-            if fwd_resp:
-                return
+        if await send_private_forward_msg(user_id, nodes):
+            return
         await send_private_msg(user_id, msg)
         return
 
-    # Send to self → forward to group (merged-forward card)
-    self_resp = await send_private_msg(cfg.bot_qq, msg)
-    if not self_resp:
-        await send_group_msg(group_id, msg)
+    if await send_group_forward_msg(group_id, nodes):
         return
-
-    await asyncio.sleep(0.5)
-    fwd_resp = await send_group_forward_msg(group_id, [
-        {"type": "node", "data": {"id": str(self_resp)}},
-    ])
-    if not fwd_resp:
-        await send_group_msg(group_id, msg)
+    await send_group_msg(group_id, msg)
 
 
 def register() -> None:

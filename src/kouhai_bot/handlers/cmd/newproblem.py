@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from .. import registry
 from ..registry import CommandDef
 from ..shared import (
+    build_problem_card_nodes,
     get_today_problem,
     high_difficulty_notice,
     is_already_solved,
@@ -31,13 +32,12 @@ from ...editorial_followup import (
 from ...napcat.client import (
     build_plain_message,
     react_emoji,
+    resolve_bot_display_name,
     send_group_msg,
     send_group_forward_msg,
-    send_private_msg,
 )
 from ...problem_prefetch import get_next_problem_prefetcher
 from ...problem_preparation import (
-    PICKER_PATH,
     ProblemPreparationError,
 )
 from ...tutorials import get_verified_official_editorial
@@ -235,19 +235,14 @@ def _save_daily_msg(
     sample_messages: list[str],
     notes_message: str,
     snake_enabled: bool,
-    node_payload: dict | None = None,
-    fwd_message_id: int | None = None,
 ) -> None:
     daily_msg = {
-        **(node_payload or {}),
         "pid": pid,
         "post_msg": post_msg,
         "sample_messages": sample_messages,
         "notes_message": notes_message,
         "snake_enabled": snake_enabled,
     }
-    if fwd_message_id is not None:
-        daily_msg["fwd_message_id"] = fwd_message_id
     daily_msg_path = os.path.join(state_dir, "daily_msg.json")
     with open(daily_msg_path, "w", encoding="utf-8") as f:
         json.dump(daily_msg, f, ensure_ascii=False, indent=2)
@@ -260,59 +255,23 @@ async def _send_problem_forward_card(
     notes_message: str = "",
     snake_enabled: bool = True,
 ) -> tuple[int | None, dict]:
+    """Publish the problem card as a custom-node merged forward.
+
+    No self-send: nodes are fabricated with the bot's identity and sent in a
+    single ``send_group_forward_msg`` call.
+    """
     cfg = get_config()
-    self_resp = await send_private_msg(cfg.bot_qq, build_plain_message(post_msg))
-    if not self_resp:
-        return None, {}
-
-    snake_msg_id = None
-    if snake_enabled:
-        snake_path = str(PICKER_PATH.parent / "snake_trio.jpg")
-        if os.path.exists(snake_path):
-            try:
-                import base64
-                with open(snake_path, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode()
-                snake_resp = await send_private_msg(cfg.bot_qq, [
-                    {"type": "image", "data": {"file": f"base64://{b64}"}},
-                ])
-                if snake_resp:
-                    snake_msg_id = snake_resp
-            except Exception as e:
-                logger.warning(f"[group_{group_id}] Snake image self-send failed: {e}")
-
-    sample_msg_ids: list[int] = []
-    for i, sample_msg in enumerate(sample_messages, 1):
-        sample_resp = await send_private_msg(cfg.bot_qq, build_plain_message(sample_msg))
-        if sample_resp:
-            sample_msg_ids.append(sample_resp)
-        else:
-            logger.warning(f"[group_{group_id}] Sample {i} self-send failed")
-
-    note_msg_id = None
-    if notes_message:
-        note_resp = await send_private_msg(cfg.bot_qq, build_plain_message(notes_message))
-        if note_resp:
-            note_msg_id = note_resp
-        else:
-            logger.warning(f"[group_{group_id}] Notes self-send failed")
-
-    await asyncio.sleep(0.5)
-    fwd_nodes = [{"type": "node", "data": {"id": str(self_resp)}}]
-    for sample_msg_id in sample_msg_ids:
-        fwd_nodes.append({"type": "node", "data": {"id": str(sample_msg_id)}})
-    if note_msg_id:
-        fwd_nodes.append({"type": "node", "data": {"id": str(note_msg_id)}})
-    if snake_msg_id:
-        fwd_nodes.append({"type": "node", "data": {"id": str(snake_msg_id)}})
-    fwd_resp = await send_group_forward_msg(group_id, fwd_nodes)
-    payload = {
-        "msg_id": self_resp,
-        "sample_msg_ids": sample_msg_ids,
-        "note_msg_id": note_msg_id,
-        "snake_msg_id": snake_msg_id,
-    }
-    return fwd_resp, payload
+    bot_name = await resolve_bot_display_name(group_id)
+    nodes = build_problem_card_nodes(
+        post_msg=post_msg,
+        sample_messages=list(sample_messages),
+        notes_message=notes_message or "",
+        snake_enabled=snake_enabled,
+        bot_qq=cfg.bot_qq,
+        bot_name=bot_name,
+    )
+    fwd_resp = await send_group_forward_msg(group_id, nodes)
+    return fwd_resp, {"node_count": len(nodes)}
 
 # ── New problem posting ─────────────────────────────────────────────────
 
@@ -432,7 +391,6 @@ async def _post_new_problem_locked(
                     sample_messages=sample_messages,
                     notes_message=notes_message,
                     snake_enabled=True,
-                    node_payload=node_payload,
                 )
             except Exception as exc:
                 logger.warning(
@@ -448,10 +406,7 @@ async def _post_new_problem_locked(
         logger.info(
             "[group_%s] New problem post forwarded ✓ (%s msgs)",
             group_id,
-            1
-            + len(sample_messages)
-            + (1 if node_payload.get("note_msg_id") else 0)
-            + (1 if node_payload.get("snake_msg_id") else 0),
+            node_payload.get("node_count", 1 + len(sample_messages)),
         )
         await _commit_problem_state(group_id, picked_state)
         if pid:
@@ -466,8 +421,6 @@ async def _post_new_problem_locked(
                 sample_messages=sample_messages,
                 notes_message=notes_message,
                 snake_enabled=True,
-                node_payload=node_payload,
-                fwd_message_id=fwd_resp,
             )
         except Exception as exc:
             logger.warning(

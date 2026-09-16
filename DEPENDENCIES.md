@@ -29,6 +29,9 @@ uv sync
 - `cloudscraper>=1.2` — 绕过 Cloudflare 爬取 CF
 - `Pillow>=10.0` — 公式图片预处理
 
+具体版本以 `uv.lock` 锁定为准（当前已锁定到安全版本：Pillow 12.3.0、aiohttp 3.14.3，
+依赖闭包无已知漏洞）。单独升级某个依赖：`uv lock --upgrade-package <包名>`，然后 `uv sync`。
+
 ## NapCat 配置
 
 NapCat 是 QQ NT 的 Bot 框架，提供 OneBot11 兼容接口。这是一个外部依赖，需要你自行部署。推荐使用 Docker。

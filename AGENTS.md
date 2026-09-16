@@ -25,6 +25,14 @@ Instructions for AI coding assistants working on this codebase.
   `max_completion_tokens` for judge/review requests. For DashScope/百炼 thinking
   models only, set `thinking_budget=100000` so reasoning cannot consume the
   entire upstream output window before `content` starts.
+- GLM-5.3 (Zhipu/火山方舟) exposes no thinking-budget parameter — its only depth
+  control is `reasoning_effort` (`low`/`high`/`max`) and thinking cannot be
+  disabled — so never send it budget-style fields. A very long reasoning run
+  can still return empty `content`; `glm53` therefore runs with `stream: true`
+  (Ark streams support `stream_options.include_usage`) so that case is
+  classified as `empty_content_after_reasoning`/`length` and fails over instead
+  of being blindly retried. Both completion paths log `finish_reason`,
+  `reasoning_chars`, and `usage` for diagnosis.
 
 ## Architecture
 

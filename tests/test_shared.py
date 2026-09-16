@@ -1759,6 +1759,40 @@ def test_dashscope_stream_payload_requests_usage_without_token_caps():
     assert forbidden.isdisjoint(calls[0])
 
 
+def test_ark_stream_payload_requests_usage_and_keeps_thinking_controls():
+    provider = LlmProviderConfig(
+        name="glm53",
+        api_key="ark-test",
+        base_url="https://ark.cn-beijing.volces.com/api/plan/v3",
+        model="glm-5.3",
+        reasoning_effort="max",
+        stream=True,
+    )
+    cfg = _openai_cfg(llm_smart_providers=[provider])
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["payload"].copy())
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion_result(
+            [{"role": "user", "content": "Reply OK."}],
+            task="judge",
+            thinking={"type": "enabled"},
+        ))
+
+    assert result.text == "OK"
+    assert calls[0]["stream"] is True
+    assert calls[0]["stream_options"] == {"include_usage": True}
+    assert calls[0]["thinking"] == {"type": "enabled"}
+    assert calls[0]["reasoning_effort"] == "max"
+    assert "thinking_budget" not in calls[0]
+    assert "enable_thinking" not in calls[0]
+
+
 def test_non_streaming_chat_completion_strips_leaked_thinking():
     response = _DummyResponse(json_data={
         "choices": [
@@ -1866,6 +1900,46 @@ def test_non_streaming_chat_completion_retries_when_only_leaked_thinking(caplog)
     assert result.retryable is True
     assert result.failure_kind == "service_unavailable"
     assert "returned no text after cleanup" in caplog.text
+
+
+def test_non_streaming_empty_completion_logs_finish_reason_usage_and_reasoning(caplog):
+    caplog.set_level("WARNING", logger="kouhai-bot.llm")
+    usage = {
+        "completion_tokens": 65536,
+        "completion_tokens_details": {"reasoning_tokens": 65530},
+    }
+    response = _DummyResponse(json_data={
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "reasoning_content": "x" * 321,
+                },
+                "finish_reason": "length",
+            }
+        ],
+        "usage": usage,
+    })
+    session = _PostSession(response)
+
+    result = asyncio.run(_post_chat_completion_once(
+        session,
+        provider_name="glm53",
+        base_url="https://ark.cn-beijing.volces.com/api/plan/v3",
+        headers={},
+        payload={},
+        timeout=120,
+    ))
+
+    assert result.text is None
+    assert result.retryable is True
+    assert result.failure_kind == "service_unavailable"
+    assert result.finish_reason == "length"
+    assert result.reasoning_chars == 321
+    assert result.usage == usage
+    assert "finish_reason=length" in caplog.text
+    assert "reasoning_chars=321" in caplog.text
+    assert "65536" in caplog.text
 
 
 def test_streaming_chat_completion_reads_sse_delta_chunks(caplog):

@@ -186,6 +186,18 @@ def _provider_is_dashscope(provider_name: str, base_url: str) -> bool:
     )
 
 
+def _provider_is_ark(provider_name: str, base_url: str) -> bool:
+    name = (provider_name or "").strip().lower()
+    if name in {"ark", "volces", "volcengine"} or "volces" in name:
+        return True
+
+    parsed = urlparse((base_url or "").strip())
+    host = (parsed.hostname or "").lower()
+    if not host and "://" not in (base_url or ""):
+        host = (base_url or "").split("/", 1)[0].lower()
+    return host == "volces.com" or host.endswith(".volces.com")
+
+
 # Tasks served by the smart queue; every other task name (including the
 # multimodal_* markers for image-bearing requests) routes to general.
 _SMART_TASKS = frozenset({"judge", "review"})
@@ -304,7 +316,7 @@ def _choice_reasoning_text(choice: dict) -> str:
         if not isinstance(value, dict):
             continue
         reasoning_content = value.get("reasoning_content", "")
-        if isinstance(reasoning_content, str):
+        if isinstance(reasoning_content, str) and reasoning_content:
             return reasoning_content
     return ""
 
@@ -572,12 +584,29 @@ async def _post_chat_completion_once(
             message = choices[0].get("message", {})
             content_text = _message_content_text(message)
             if not content_text:
-                logger.warning("%s API returned no text after cleanup", provider_name)
+                finish_reason = choices[0].get("finish_reason")
+                if finish_reason is not None:
+                    finish_reason = str(finish_reason)
+                reasoning_chars = len(_choice_reasoning_text(choices[0]))
+                usage = data.get("usage")
+                if not isinstance(usage, dict):
+                    usage = None
+                logger.warning(
+                    "%s API returned no text after cleanup finish_reason=%s "
+                    "reasoning_chars=%s usage=%s",
+                    provider_name,
+                    finish_reason,
+                    reasoning_chars,
+                    usage,
+                )
                 return _ChatCompletionAttempt(
                     text=None,
                     retryable=True,
                     retry_after_sec=None,
                     failure_kind="service_unavailable",
+                    finish_reason=finish_reason,
+                    reasoning_chars=reasoning_chars,
+                    usage=usage,
                 )
             return _ChatCompletionAttempt(
                 text=content_text,
@@ -719,7 +748,9 @@ async def chat_completion(
             )
             if uses_stream:
                 payload["stream"] = True
-                if _provider_is_dashscope(provider.name, provider.base_url):
+                if _provider_is_dashscope(provider.name, provider.base_url) or _provider_is_ark(
+                    provider.name, provider.base_url
+                ):
                     payload.setdefault("stream_options", {"include_usage": True})
 
             for attempt in range(max_retries + 1):

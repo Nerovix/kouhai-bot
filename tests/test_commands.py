@@ -1638,6 +1638,14 @@ def test_review_excludes_unverified_editorial_candidate():
     _cleanup()
 
 
+def test_review_prompt_treats_statement_as_ground_truth():
+    from kouhai_bot.handlers.cmd.submit import REVIEW_PROMPT
+
+    assert "判题口径以题面为准" in REVIEW_PROMPT
+    assert "不等于题目被改成非交互版本" in REVIEW_PROMPT
+    assert "「直接读入/输出隐藏值」不是解法" in REVIEW_PROMPT
+
+
 def test_review_includes_mentioned_user_context():
     _reset_state()
     _setup_problem()

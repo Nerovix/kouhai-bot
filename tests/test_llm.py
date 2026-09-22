@@ -1,5 +1,8 @@
+import asyncio
+import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -10,6 +13,7 @@ from kouhai_bot.llm import (
     ChatCompletionResult,
     _ChatCompletionAttempt,
     _apply_rating_gate,
+    _read_streaming_chat_completion,
     chat_completion,
 )
 from kouhai_bot.llm_config import LlmProviderConfig, build_provider_queues_from_yaml
@@ -197,3 +201,116 @@ async def test_chat_completion_skips_out_of_range_provider_without_attempt(monke
     assert isinstance(result, ChatCompletionResult)
     assert result.text == "second response"
     assert attempts == ["second"]
+
+
+class _ScriptedContent:
+    """Async line stream over a (delay, line) script, mimicking resp.content."""
+
+    def __init__(self, script):
+        self._script = list(script)
+
+    def __aiter__(self):
+        return self._iter()
+
+    async def _iter(self):
+        for delay, line in self._script:
+            if delay:
+                await asyncio.sleep(delay)
+            yield line
+
+
+class _ScriptedResponse:
+    def __init__(self, script):
+        self.content = _ScriptedContent(script)
+
+
+def _delta_event(text):
+    payload = json.dumps({"choices": [{"delta": {"content": text}}]})
+    return [f"data: {payload}\n".encode(), b"\n"]
+
+
+@pytest.mark.asyncio
+async def test_stream_progress_watchdog_passes_healthy_stream():
+    script = []
+    for chunk in ("O", "K"):
+        script += [(0.15, line) for line in _delta_event(chunk)]
+    finish = json.dumps(
+        {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"total_tokens": 2}}
+    )
+    script += [(0.15, f"data: {finish}\n".encode()), (0.15, b"\n")]
+    script.append((0.15, b"data: [DONE]\n"))
+
+    result = await _read_streaming_chat_completion(
+        _ScriptedResponse(script),
+        provider_name="fake",
+        progress_timeout_sec=0.4,
+    )
+
+    assert result.text == "OK"
+    assert result.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_stream_progress_watchdog_trips_on_heartbeat_masked_dead_stream(caplog):
+    script = [(0.0, line) for line in _delta_event("A")]
+    for _ in range(20):
+        script.append((0.05, b": ping\n"))
+        script.append((0.05, b"\n"))
+        script.append((0.05, b'data: {"choices":[{"delta":{}}]}\n'))
+        script.append((0.05, b"\n"))
+
+    started = time.monotonic()
+    with caplog.at_level("WARNING", logger="kouhai-bot.llm"):
+        result = await _read_streaming_chat_completion(
+            _ScriptedResponse(script),
+            provider_name="fake",
+            progress_timeout_sec=0.3,
+        )
+    elapsed = time.monotonic() - started
+
+    assert result.text is None
+    assert result.retryable is True
+    assert result.failure_kind == "service_unavailable"
+    assert any(
+        "no meaningful progress" in record.getMessage()
+        for record in caplog.records
+    )
+    assert 0.25 <= elapsed < 2.0
+
+
+@pytest.mark.asyncio
+async def test_stream_progress_watchdog_trips_on_total_silence(caplog):
+    script = [(0.0, line) for line in _delta_event("A")]
+    script.append((10.0, b"data: [DONE]\n"))
+
+    with caplog.at_level("WARNING", logger="kouhai-bot.llm"):
+        result = await _read_streaming_chat_completion(
+            _ScriptedResponse(script),
+            provider_name="fake",
+            progress_timeout_sec=0.25,
+        )
+
+    assert result.text is None
+    assert result.retryable is True
+    assert any(
+        "no meaningful progress" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_progress_watchdog_disabled_accepts_quiet_stream():
+    script = [(0.0, line) for line in _delta_event("A")]
+    script.append((0.6, b"\n"))
+    finish = json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    script.append((0.0, f"data: {finish}\n".encode()))
+    script.append((0.0, b"\n"))
+    script.append((0.0, b"data: [DONE]\n"))
+
+    result = await _read_streaming_chat_completion(
+        _ScriptedResponse(script),
+        provider_name="fake",
+        progress_timeout_sec=0,
+    )
+
+    assert result.text == "A"

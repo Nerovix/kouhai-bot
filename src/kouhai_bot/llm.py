@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -404,12 +405,18 @@ async def _read_streaming_chat_completion(
     resp: aiohttp.ClientResponse,
     *,
     provider_name: str,
+    progress_timeout_sec: int | float | None = None,
 ) -> _ChatCompletionAttempt:
     parts: list[str] = []
     event_lines: list[str] = []
     reasoning_chars = 0
     finish_reason: str | None = None
     usage: dict | None = None
+    # Stall watchdog state: wall-clock time of the last frame that carried
+    # real progress (answer text, reasoning, usage, finish_reason, [DONE]).
+    # Comments and empty frames (keepalives) deliberately do not count.
+    last_progress = time.monotonic()
+    data_events = 0
 
     def finish(text: str) -> _ChatCompletionAttempt:
         text = strip_leaked_thinking(text)
@@ -469,37 +476,83 @@ async def _read_streaming_chat_completion(
             usage=usage,
         )
 
+    def stalled() -> _ChatCompletionAttempt:
+        elapsed = time.monotonic() - last_progress
+        return stream_failure(
+            f"no meaningful progress for {elapsed:.0f}s "
+            f"(data_events={data_events})"
+        )
+
     def handle_event(raw_data: str) -> tuple[bool, _ChatCompletionAttempt | None]:
-        nonlocal finish_reason, reasoning_chars, usage
+        nonlocal finish_reason, reasoning_chars, usage, last_progress, data_events
         data_text = raw_data.strip()
         if not data_text:
             return False, None
+        data_events += 1
         if data_text == "[DONE]":
+            last_progress = time.monotonic()
             return True, None
         try:
             data = json.loads(data_text)
         except json.JSONDecodeError:
             return False, stream_failure("invalid json")
 
-        reasoning_chars += len(_stream_event_reasoning_text(data))
+        progress = False
+        event_reasoning = _stream_event_reasoning_text(data)
+        if event_reasoning:
+            reasoning_chars += len(event_reasoning)
+            progress = True
         event_usage = data.get("usage")
         if isinstance(event_usage, dict):
             usage = event_usage
+            progress = True
         for choice in data.get("choices", []) or []:
             if isinstance(choice, dict) and choice.get("finish_reason") is not None:
                 finish_reason = str(choice.get("finish_reason"))
+                progress = True
         text, valid_event, error_message = _stream_event_text(data)
         if error_message:
             return False, stream_failure(error_message)
+        if text:
+            progress = True
         event_type = str(data.get("type") or "").strip()
         if text and not (parts and event_type in {"response.output_text.done", "response.completed"}):
             parts.append(text)
         if not valid_event:
             return False, stream_failure("invalid event")
+        if progress:
+            last_progress = time.monotonic()
         return False, None
 
+    progress_limit = (
+        float(progress_timeout_sec)
+        if progress_timeout_sec and progress_timeout_sec > 0
+        else None
+    )
+    content_lines = resp.content.__aiter__()
+
+    async def next_line() -> bytes | None:
+        try:
+            return await content_lines.__anext__()
+        except StopAsyncIteration:
+            return None
+
     try:
-        async for raw_line in resp.content:
+        while True:
+            if progress_limit is None:
+                raw_line = await next_line()
+            else:
+                remaining = progress_limit - (time.monotonic() - last_progress)
+                if remaining <= 0:
+                    return stalled()
+                try:
+                    raw_line = await asyncio.wait_for(
+                        next_line(), timeout=remaining
+                    )
+                except asyncio.TimeoutError:
+                    return stalled()
+            if raw_line is None:
+                break
             line = raw_line.decode("utf-8").strip()
             if not line:
                 if event_lines:
@@ -537,6 +590,7 @@ async def _post_chat_completion_once(
     payload: dict,
     timeout: int,
     stream_idle_timeout_sec: int | float | None = None,
+    stream_progress_timeout_sec: int | float | None = None,
 ) -> _ChatCompletionAttempt:
     try:
         async with session.post(
@@ -569,6 +623,7 @@ async def _post_chat_completion_once(
                 return await _read_streaming_chat_completion(
                     resp,
                     provider_name=provider_name,
+                    progress_timeout_sec=stream_progress_timeout_sec,
                 )
 
             data = await resp.json()
@@ -709,6 +764,9 @@ async def chat_completion(
     stream_idle_timeout_sec = int(
         getattr(cfg, "llm_stream_idle_timeout_sec", 120) or 0
     )
+    stream_progress_timeout_sec = int(
+        getattr(cfg, "llm_stream_progress_timeout_sec", 90) or 0
+    )
 
     last_failure_kind: str | None = None
     last_failed_provider: str | None = None
@@ -762,6 +820,7 @@ async def chat_completion(
                     payload=payload,
                     timeout=timeout,
                     stream_idle_timeout_sec=stream_idle_timeout_sec,
+                    stream_progress_timeout_sec=stream_progress_timeout_sec,
                 )
                 if result.text is not None:
                     if last_failed_provider:

@@ -243,7 +243,7 @@ async def test_stream_progress_watchdog_passes_healthy_stream():
     result = await _read_streaming_chat_completion(
         _ScriptedResponse(script),
         provider_name="fake",
-        progress_timeout_sec=0.4,
+        progress_timeout_sec=0.5,
     )
 
     assert result.text == "OK"

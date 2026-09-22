@@ -1510,6 +1510,33 @@ def test_streaming_provider_uses_default_idle_timeout():
     assert calls == [120]
 
 
+@pytest.mark.parametrize("override,expected", [(None, 90), (456, 456)])
+def test_stream_progress_timeout_threading(override, expected):
+    provider = LlmProviderConfig(
+        name="qwen",
+        api_key="sk-test",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="qwen-test",
+    )
+    kwargs = {} if override is None else {"llm_stream_progress_timeout_sec": override}
+    cfg = _openai_cfg(llm_smart_providers=[provider], **kwargs)
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["stream_progress_timeout_sec"])
+        return _ChatCompletionAttempt(text="OK", retryable=False, retry_after_sec=None)
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion(
+            [{"role": "user", "content": "Reply with exactly OK."}],
+            task="judge",
+        ))
+
+    assert result == "OK"
+    assert calls == [expected]
+
 
 def test_zenmux_minimax_m3_payload_accepts_adaptive_thinking():
     provider = LlmProviderConfig(

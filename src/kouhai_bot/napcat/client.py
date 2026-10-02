@@ -20,6 +20,10 @@ from ..config import get_config
 
 logger = logging.getLogger("kouhai-bot.napcat")
 
+FORWARD_VERIFY_DELAY_SEC = 1.5
+FORWARD_VERIFY_WINDOW_SEC = 15.0
+FORWARD_VERIFY_HISTORY_COUNT = 30
+
 # ── HTTP API ────────────────────────────────────────────────────────────
 
 _session: aiohttp.ClientSession | None = None
@@ -104,15 +108,29 @@ async def send_group_poke(group_id: int, user_id: int) -> bool:
 
 async def send_private_forward_msg(user_id: int, messages: list[dict]) -> int | None:
     """Forward messages as a merged card to a private chat."""
+    attempt_ts = time.time()
     try:
         result = await _http_post("send_private_forward_msg", {
             "user_id": user_id,
             "messages": messages,
         })
-        return _extract_message_id("send_private_forward_msg", result)
     except Exception as e:
         logger.error(f"send_private_forward_msg failed: {e}", exc_info=True)
-        return None
+    else:
+        message_id = _extract_message_id("send_private_forward_msg", result)
+        if message_id is not None:
+            return message_id
+    verified_id = await _verify_forward_delivered(
+        kind="private", target_id=user_id, messages=messages, attempt_ts=attempt_ts,
+    )
+    if verified_id is not None:
+        logger.info(
+            "send_private_forward_msg reported failure but the card was delivered; recovered message_id=%s",
+            verified_id,
+        )
+        return verified_id
+    logger.warning("send_private_forward_msg: could not verify delivery in recent history; treating as failed")
+    return None
 
 
 async def set_friend_add_request(flag: str, *, approve: bool = True, remark: str = "") -> bool:
@@ -189,15 +207,142 @@ async def delete_msg(message_id: str) -> None:
 
 async def send_group_forward_msg(group_id: int, messages: list[dict]) -> int | None:
     """Forward messages as a merged card to a group."""
+    attempt_ts = time.time()
     try:
         result = await _http_post("send_group_forward_msg", {
             "group_id": group_id,
             "messages": messages,
         })
-        return _extract_message_id("send_group_forward_msg", result)
     except Exception as e:
         logger.error(f"send_group_forward_msg failed: {e}", exc_info=True)
+    else:
+        message_id = _extract_message_id("send_group_forward_msg", result)
+        if message_id is not None:
+            return message_id
+    verified_id = await _verify_forward_delivered(
+        kind="group", target_id=group_id, messages=messages, attempt_ts=attempt_ts,
+    )
+    if verified_id is not None:
+        logger.info(
+            "send_group_forward_msg reported failure but the card was delivered; recovered message_id=%s",
+            verified_id,
+        )
+        return verified_id
+    logger.warning("send_group_forward_msg: could not verify delivery in recent history; treating as failed")
+    return None
+
+
+def _forward_node_snippets(messages: list[dict]) -> list[str]:
+    snippets = []
+    if not isinstance(messages, list):
+        return snippets
+    for node in messages:
+        if not isinstance(node, dict):
+            continue
+        data = node.get("data")
+        if not isinstance(data, dict):
+            continue
+        content = data.get("content")
+        if not isinstance(content, list):
+            continue
+        for segment in content:
+            if not isinstance(segment, dict) or segment.get("type") != "text":
+                continue
+            segment_data = segment.get("data")
+            if not isinstance(segment_data, dict) or "text" not in segment_data:
+                continue
+            try:
+                text = str(segment_data["text"]).strip()
+            except Exception:
+                continue
+            if len(text) >= 10:
+                snippets.append(text[:40])
+            break
+    return snippets
+
+
+def _multimsg_matches(raw: str, snippets: list[str]) -> bool:
+    if not isinstance(raw, str):
+        raw = str(raw or "")
+    if "multimsg" not in raw:
+        return False
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return any(snippet in raw for snippet in snippets)
+
+    if not isinstance(parsed, dict):
+        return any(snippet in raw for snippet in snippets)
+    meta = parsed.get("meta") or {}
+    if not isinstance(meta, dict):
+        return any(snippet in raw for snippet in snippets)
+    detail = meta.get("detail") or {}
+    news = detail.get("news") if isinstance(detail, dict) else None
+    if isinstance(news, list) and news:
+        for item in news:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if text is None:
+                continue
+            text = str(text)
+            if any(snippet in text for snippet in snippets):
+                return True
+        return False
+    return any(snippet in raw for snippet in snippets)
+
+
+async def _verify_forward_delivered(
+    *, kind: str, target_id: int, messages: list[dict], attempt_ts: float,
+) -> int | None:
+    snippets = _forward_node_snippets(messages)
+    if not snippets:
         return None
+    try:
+        await asyncio.sleep(FORWARD_VERIFY_DELAY_SEC)
+        if kind == "group":
+            resp = await _http_post("get_group_msg_history", {
+                "group_id": int(target_id),
+                "count": FORWARD_VERIFY_HISTORY_COUNT,
+            })
+        elif kind == "private":
+            resp = await _http_post("get_friend_msg_history", {
+                "user_id": int(target_id),
+                "count": FORWARD_VERIFY_HISTORY_COUNT,
+            })
+        else:
+            return None
+        recent = ((resp or {}).get("data") or {}).get("messages") or []
+        bot_qq = str(get_config().bot_qq)
+        for message in recent:
+            if not isinstance(message, dict):
+                continue
+            try:
+                ts = float(message.get("time") or 0)
+            except (TypeError, ValueError):
+                continue
+            if ts < attempt_ts - FORWARD_VERIFY_WINDOW_SEC:
+                continue
+            sender = message.get("sender") or {}
+            if not isinstance(sender, dict):
+                continue
+            if str(sender.get("user_id") or "") != bot_qq:
+                continue
+            segments = message.get("message") or []
+            if not isinstance(segments, list):
+                continue
+            for segment in segments:
+                if not isinstance(segment, dict) or segment.get("type") != "json":
+                    continue
+                segment_data = segment.get("data") or {}
+                if not isinstance(segment_data, dict):
+                    continue
+                raw = str(segment_data.get("data") or "")
+                if _multimsg_matches(raw, snippets):
+                    return message.get("message_id")
+    except Exception:
+        return None
+    return None
 
 
 async def resolve_bot_display_name(group_id: int | None = None) -> str:

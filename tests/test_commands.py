@@ -3549,7 +3549,7 @@ def test_newproblem_fallback_direct_saves_daily_msg_for_current_pid():
                 "kouhai_bot.handlers.cmd.newproblem.get_next_problem_prefetcher",
                 return_value=prefetcher,
             ), \
-            patch("kouhai_bot.handlers.cmd.newproblem.send_group_forward_msg", _fail_forward), \
+                patch("kouhai_bot.napcat.client.send_group_forward_msg", _fail_forward), \
             patch("kouhai_bot.handlers.cmd.newproblem.asyncio.sleep", AsyncMock()):
         from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
         posted = asyncio.run(_post_new_problem_locked(GID, prefix="刷新了一道新题🌟", notify_group=True))
@@ -5142,7 +5142,7 @@ def test_private_problem_card_falls_back_when_forward_fails():
     with _all_patches(), \
         patch("kouhai_bot.private_judge.asyncio.sleep", AsyncMock()), \
         patch("kouhai_bot.private_judge.build_problem_card_payload", AsyncMock(return_value=payload)), \
-        patch("kouhai_bot.private_judge.send_private_forward_msg", _fail_forward):
+            patch("kouhai_bot.napcat.client.send_private_forward_msg", _fail_forward):
         from kouhai_bot.private_judge import send_problem_card_private
 
         ok = asyncio.run(send_problem_card_private(UID, GID, problem, prefer_group_card=False))

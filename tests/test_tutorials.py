@@ -1046,7 +1046,8 @@ def test_deliver_uses_prefetch_cache_without_translate(tmp_path, monkeypatch):
                 _fail_translate,
         ), \
                 patch("kouhai_bot.editorial_followup.resolve_bot_display_name", AsyncMock(return_value="bot")), \
-                patch("kouhai_bot.editorial_followup.send_group_forward_msg", AsyncMock(return_value=99)):
+                    patch("kouhai_bot.napcat.client.send_group_forward_msg", AsyncMock(return_value=99)), \
+                    patch("kouhai_bot.napcat.client.get_config", lambda: cfg):
             await deliver_official_tutorial_forward(
                 1,
                 "542D",

@@ -143,7 +143,9 @@ def test_send_history_card_forwards_custom_nodes_in_one_call():
         texts.append((group_id, message))
 
     with patch("kouhai_bot.private_judge.get_config", return_value=_cfg()), \
-         patch("kouhai_bot.private_judge.send_group_forward_msg", _forward), \
+         patch("kouhai_bot.napcat.client.get_config", return_value=_cfg()), \
+         patch("kouhai_bot.napcat.client.send_group_forward_msg", _forward), \
+         patch("kouhai_bot.napcat.client.send_private_msg", lambda *a, **k: None), \
          patch("kouhai_bot.private_judge.send_group_msg", _text):
         ok = asyncio.run(send_history_card(
             destination="group",
@@ -173,8 +175,9 @@ def test_send_history_card_private_destination_uses_private_forward():
         raise AssertionError("wrong send path used")
 
     with patch("kouhai_bot.private_judge.get_config", return_value=_cfg()), \
-         patch("kouhai_bot.private_judge.send_private_forward_msg", _private_forward), \
-         patch("kouhai_bot.private_judge.send_group_forward_msg", _noop), \
+         patch("kouhai_bot.napcat.client.send_private_forward_msg", _private_forward), \
+         patch("kouhai_bot.napcat.client.send_group_forward_msg", _noop), \
+         patch("kouhai_bot.napcat.client.send_private_msg", lambda *a, **k: None), \
          patch("kouhai_bot.private_judge.send_group_msg", _noop), \
          patch("kouhai_bot.private_judge.send_private_msg", _noop):
         ok = asyncio.run(send_history_card(
@@ -203,7 +206,9 @@ def test_send_history_card_falls_back_to_plain_text_when_forward_fails():
         raise AssertionError("wrong send path used")
 
     with patch("kouhai_bot.private_judge.get_config", return_value=_cfg()), \
-         patch("kouhai_bot.private_judge.send_group_forward_msg", _failing_forward), \
+         patch("kouhai_bot.private_judge.send_forward_card_with_legacy_fallback", return_value=None) as helper, \
+         patch("kouhai_bot.napcat.client.send_group_forward_msg", _failing_forward), \
+         patch("kouhai_bot.napcat.client.send_private_msg", lambda *a, **k: None), \
          patch("kouhai_bot.private_judge.send_group_msg", _text), \
          patch("kouhai_bot.private_judge.send_private_msg", _noop):
         ok = asyncio.run(send_history_card(
@@ -215,7 +220,7 @@ def test_send_history_card_falls_back_to_plain_text_when_forward_fails():
         ))
 
     assert ok is True
-    assert len(forward_calls) == 1
+    assert helper.call_count == 1
     joined = "\n".join(_msg_text(message) for _, message in texts)
     assert "张三在当前的历史记录如下：" in joined
     assert "👤：q" in joined and "🤖：a" in joined

@@ -20,6 +20,7 @@ from .handlers.shared import (
     append_bad_report_at,
     atomic_write_json,
     build_problem_card_nodes,
+    build_problem_card_legacy_segments,
     get_problem_summary,
     get_today_problem,
     high_difficulty_notice,
@@ -36,9 +37,10 @@ from .napcat.client import (
     build_plain_message,
     build_text,
     resolve_bot_display_name,
+    send_forward_card_with_legacy_fallback,
     send_group_forward_msg,
-    send_group_msg,
     send_private_forward_msg,
+    send_group_msg,
     send_private_msg,
 )
 from .problem_content import (
@@ -655,7 +657,13 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
         bot_qq=cfg.bot_qq,
         bot_name=bot_name,
     )
-    fwd_resp = await send_private_forward_msg(user_id, nodes)
+    fwd_resp = await send_forward_card_with_legacy_fallback(
+        destination="private", user_id=user_id, nodes=nodes,
+        self_send_messages=build_problem_card_legacy_segments(
+            post_msg=post_msg, sample_messages=[str(item) for item in sample_messages],
+            notes_message=notes_message, snake_enabled=bool(payload.get("snake_enabled")),
+        ),
+    )
     if fwd_resp:
         _save_private_problem_card_ref(group_id, fwd_resp, pid)
         await _send_high_difficulty_notice_private(user_id, problem)
@@ -766,15 +774,15 @@ async def send_history_card(
         bot_qq=cfg.bot_qq,
         bot_display_name=bot_display_name,
     )
-    if nodes:
-        if destination == GROUP_SCOPE:
-            sent = await send_group_forward_msg(group_id, nodes)
-        else:
-            sent = await send_private_forward_msg(user_id, nodes)
-        if sent:
-            return True
-        logger.warning("history card forward failed; falling back to plain text")
-    for chunk in _chunk_text(format_history_records(records, user_display_name=user_display_name)):
+    chunks = _chunk_text(format_history_records(records, user_display_name=user_display_name))
+    sent = await send_forward_card_with_legacy_fallback(
+        destination=destination, group_id=group_id, user_id=user_id, nodes=nodes,
+        self_send_messages=[build_plain_message(chunk) for chunk in chunks],
+    )
+    if sent:
+        return True
+    logger.warning("history card forward failed; falling back to plain text")
+    for chunk in chunks:
         if destination == GROUP_SCOPE:
             await send_group_msg(group_id, build_plain_message(chunk))
         else:

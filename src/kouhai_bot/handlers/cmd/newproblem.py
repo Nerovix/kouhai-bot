@@ -14,6 +14,7 @@ from .. import registry
 from ..registry import CommandDef
 from ..shared import (
     build_problem_card_nodes,
+    build_problem_card_legacy_segments,
     get_today_problem,
     high_difficulty_notice,
     is_already_solved,
@@ -34,6 +35,7 @@ from ...napcat.client import (
     react_emoji,
     resolve_bot_display_name,
     send_group_msg,
+    send_forward_card_with_legacy_fallback,
     send_group_forward_msg,
 )
 from ...problem_prefetch import get_next_problem_prefetcher
@@ -270,7 +272,13 @@ async def _send_problem_forward_card(
         bot_qq=cfg.bot_qq,
         bot_name=bot_name,
     )
-    fwd_resp = await send_group_forward_msg(group_id, nodes)
+    fwd_resp = await send_forward_card_with_legacy_fallback(
+        destination="group", group_id=group_id, nodes=nodes,
+        self_send_messages=build_problem_card_legacy_segments(
+            post_msg=post_msg, sample_messages=list(sample_messages),
+            notes_message=notes_message or "", snake_enabled=snake_enabled,
+        ),
+    )
     return fwd_resp, {"node_count": len(nodes)}
 
 # ── New problem posting ─────────────────────────────────────────────────

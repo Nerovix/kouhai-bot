@@ -606,6 +606,28 @@ def build_problem_card_nodes(
     return nodes
 
 
+def build_problem_card_legacy_segments(
+    *, post_msg: str, sample_messages: list[str], notes_message: str = "", snake_enabled: bool = True,
+) -> list[list[dict]]:
+    """Build the pre-custom-node card content for self-send/id forwarding."""
+    from ..napcat.client import build_plain_message
+
+    messages = [build_plain_message(post_msg)]
+    messages.extend(build_plain_message(str(sample)) for sample in sample_messages)
+    if notes_message:
+        messages.append(build_plain_message(notes_message))
+    if snake_enabled:
+        snake_path = snake_image_path()
+        if os.path.exists(snake_path):
+            try:
+                with open(snake_path, "rb") as f:
+                    encoded = base64.b64encode(f.read()).decode()
+                messages.append([{"type": "image", "data": {"file": f"base64://{encoded}"}}])
+            except Exception as exc:
+                logger.warning("snake image legacy segment skipped: %s", exc)
+    return messages
+
+
 def sanitize_cached_problem_card_payload(data: dict) -> tuple[dict, bool]:
     """Scrub cached LLM text before rebuilding user-visible problem cards.
 

@@ -90,7 +90,6 @@ async def resend_current_problem_group(group_id: int, sender: dict) -> None:
     falls back to a friendly hint when no usable cache exists.
     """
     from ...config import get_config
-    from ...napcat.client import send_group_forward_msg
     from ..shared import save_problem_card_ref
     from .newproblem import _send_problem_forward_card
     import json
@@ -190,7 +189,6 @@ async def handle_scoreboard(group_id: int, user_id: int, sender: dict,
         resolve_bot_display_name,
         send_group_msg,
         send_forward_card_with_legacy_fallback,
-        send_group_forward_msg,
     )
 
     cfg = get_config()

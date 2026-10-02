@@ -38,8 +38,6 @@ from .napcat.client import (
     build_text,
     resolve_bot_display_name,
     send_forward_card_with_legacy_fallback,
-    send_group_forward_msg,
-    send_private_forward_msg,
     send_group_msg,
     send_private_msg,
 )
@@ -762,9 +760,9 @@ async def send_history_card(
 ) -> bool:
     """Deliver the /sync history as a per-sender chat-record forward card.
 
-    A single `send_*_forward_msg` call with custom nodes (no self-send dance);
-    if the forward call fails, degrade to the legacy plain-text `👤/🤖` chunks
-    so the history still reaches the chat.
+    Tries the custom-node card first, then the legacy self-send id card
+    (``send_forward_card_with_legacy_fallback``); if both fail, degrade to
+    the plain-text `👤/🤖` chunks so the history still reaches the chat.
     """
     cfg = get_config()
     nodes = build_history_card_nodes(

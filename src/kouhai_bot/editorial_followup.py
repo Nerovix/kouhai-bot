@@ -19,8 +19,6 @@ from .napcat.client import (
     build_text,
     resolve_bot_display_name,
     send_forward_card_with_legacy_fallback,
-    send_group_forward_msg,
-    send_private_forward_msg,
     send_group_msg,
     send_private_msg,
 )
@@ -396,7 +394,7 @@ async def _build_editorial_card_nodes(payload: str, *, group_id: int | None) -> 
     """Build the editorial card as custom forward nodes (one node per chunk).
 
     The editorial is text-only; each chunk becomes one sender-attributed
-    node of the bot. No self-send: a single forward call publishes the card.
+    node of the bot.
     """
     cfg = get_config()
     chunks = _chunk_text(payload, _TUTORIAL_FORWARD_CHUNK_SIZE)

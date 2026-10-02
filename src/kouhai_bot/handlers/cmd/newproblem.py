@@ -36,7 +36,6 @@ from ...napcat.client import (
     resolve_bot_display_name,
     send_group_msg,
     send_forward_card_with_legacy_fallback,
-    send_group_forward_msg,
 )
 from ...problem_prefetch import get_next_problem_prefetcher
 from ...problem_preparation import (
@@ -257,10 +256,11 @@ async def _send_problem_forward_card(
     notes_message: str = "",
     snake_enabled: bool = True,
 ) -> tuple[int | None, dict]:
-    """Publish the problem card as a custom-node merged forward.
+    """Publish the problem card as a merged forward.
 
-    No self-send: nodes are fabricated with the bot's identity and sent in a
-    single ``send_group_forward_msg`` call.
+    Custom nodes are fabricated with the bot's identity and tried first; on
+    failure the card falls back to the legacy self-send id card, and the
+    caller owns the final direct-send fallback.
     """
     cfg = get_config()
     bot_name = await resolve_bot_display_name(group_id)

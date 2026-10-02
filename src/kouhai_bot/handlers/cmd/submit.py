@@ -100,8 +100,6 @@ from ...napcat.client import (
     react_emoji,
     resolve_bot_display_name,
     send_forward_card_with_legacy_fallback,
-    send_group_forward_msg,
-    send_private_forward_msg,
     send_group_msg,
     send_private_msg,
 )

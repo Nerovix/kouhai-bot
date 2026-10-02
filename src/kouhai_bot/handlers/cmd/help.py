@@ -65,8 +65,6 @@ async def handle(group_id: int, user_id: int, sender: dict,
         send_group_msg,
         send_private_msg,
         send_forward_card_with_legacy_fallback,
-        send_group_forward_msg,
-        send_private_forward_msg,
     )
     cfg = get_config()
     cmds = all_commands()

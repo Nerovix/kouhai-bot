@@ -189,7 +189,8 @@ async def test_private_run_skips_when_no_editorial(monkeypatch):
     def boom(*_args, **_kwargs):
         raise AssertionError("must not forward when no editorial")
 
-    monkeypatch.setattr(ef, "send_private_forward_msg", boom)
+    monkeypatch.setattr("kouhai_bot.napcat.client.send_private_forward_msg", boom)
+    monkeypatch.setattr("kouhai_bot.napcat.client.send_private_msg", boom)
     await ef.run_private_post_solve_editorial_followup(12345, PID)
 
 

@@ -1076,7 +1076,8 @@ def test_run_post_solve_skips_prefetch_wait_when_cache_warm(tmp_path, monkeypatc
     async def _run():
         with patch("kouhai_bot.editorial_followup._await_prefetch_if_running", _fail_await), \
                 patch("kouhai_bot.editorial_followup.resolve_bot_display_name", AsyncMock(return_value="bot")), \
-                patch("kouhai_bot.editorial_followup.send_group_forward_msg", AsyncMock(return_value=99)):
+                patch("kouhai_bot.napcat.client.send_group_forward_msg", AsyncMock(return_value=99)), \
+                patch("kouhai_bot.napcat.client.send_private_msg", AsyncMock(return_value=None)):
             from kouhai_bot.editorial_followup import run_post_solve_editorial_followup
             await run_post_solve_editorial_followup(999, "542D")
 

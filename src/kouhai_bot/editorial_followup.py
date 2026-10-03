@@ -15,11 +15,11 @@ from collections.abc import Awaitable, Callable
 from .config import get_config
 from .napcat.client import (
     build_node,
+    build_plain_message,
     build_text,
     resolve_bot_display_name,
-    send_group_forward_msg,
+    send_forward_card_with_legacy_fallback,
     send_group_msg,
-    send_private_forward_msg,
     send_private_msg,
 )
 from .tutorials import (
@@ -394,7 +394,7 @@ async def _build_editorial_card_nodes(payload: str, *, group_id: int | None) -> 
     """Build the editorial card as custom forward nodes (one node per chunk).
 
     The editorial is text-only; each chunk becomes one sender-attributed
-    node of the bot. No self-send: a single forward call publishes the card.
+    node of the bot.
     """
     cfg = get_config()
     chunks = _chunk_text(payload, _TUTORIAL_FORWARD_CHUNK_SIZE)
@@ -439,7 +439,11 @@ async def deliver_official_tutorial_forward(
         )
         return False
     nodes = await _build_editorial_card_nodes(payload, group_id=group_id)
-    fwd_resp = await send_group_forward_msg(group_id, nodes)
+    chunks = _chunk_text(payload, _TUTORIAL_FORWARD_CHUNK_SIZE)
+    fwd_resp = await send_forward_card_with_legacy_fallback(
+        destination="group", group_id=group_id, nodes=nodes,
+        self_send_messages=[build_plain_message(chunk) for chunk in chunks],
+    )
     if fwd_resp:
         return True
     logger.warning(
@@ -470,7 +474,11 @@ async def deliver_official_tutorial_forward_private(
         )
         return False
     nodes = await _build_editorial_card_nodes(payload, group_id=None)
-    fwd_resp = await send_private_forward_msg(user_id, nodes)
+    chunks = _chunk_text(payload, _TUTORIAL_FORWARD_CHUNK_SIZE)
+    fwd_resp = await send_forward_card_with_legacy_fallback(
+        destination="private", user_id=user_id, nodes=nodes,
+        self_send_messages=[build_plain_message(chunk) for chunk in chunks],
+    )
     if fwd_resp:
         return True
     logger.warning(

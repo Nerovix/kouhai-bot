@@ -64,8 +64,7 @@ async def handle(group_id: int, user_id: int, sender: dict,
         resolve_bot_display_name,
         send_group_msg,
         send_private_msg,
-        send_private_forward_msg,
-        send_group_forward_msg,
+        send_forward_card_with_legacy_fallback,
     )
     cfg = get_config()
     cmds = all_commands()
@@ -95,12 +94,16 @@ async def handle(group_id: int, user_id: int, sender: dict,
     nodes = [build_node(user_id=cfg.bot_qq, nickname=bot_name, content=msg)]
 
     if is_private:
-        if await send_private_forward_msg(user_id, nodes):
+        if await send_forward_card_with_legacy_fallback(
+            destination="private", user_id=user_id, nodes=nodes, self_send_messages=[msg]
+        ):
             return
         await send_private_msg(user_id, msg)
         return
 
-    if await send_group_forward_msg(group_id, nodes):
+    if await send_forward_card_with_legacy_fallback(
+        destination="group", group_id=group_id, nodes=nodes, self_send_messages=[msg]
+    ):
         return
     await send_group_msg(group_id, msg)
 

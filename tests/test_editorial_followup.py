@@ -116,7 +116,8 @@ async def test_private_deliver_forwards_to_user(monkeypatch):
         forwarded.append((user_id, messages))
         return 1
 
-    monkeypatch.setattr(ef, "send_private_forward_msg", fake_fwd)
+    monkeypatch.setattr("kouhai_bot.napcat.client.send_private_forward_msg", fake_fwd)
+    monkeypatch.setattr("kouhai_bot.napcat.client.send_private_msg", lambda *a, **k: None)
 
     await ef.deliver_official_tutorial_forward_private(12345, PID, _FAKE_EDITORIAL)
     assert len(forwarded) == 1
@@ -138,7 +139,7 @@ async def test_private_deliver_forwards_to_user(monkeypatch):
 @pytest.mark.asyncio
 async def test_private_deliver_skips_when_unverified(monkeypatch):
     monkeypatch.setattr(ef, "get_verified_official_editorial", lambda pid: None)
-    monkeypatch.setattr(ef, "send_private_forward_msg", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not forward")))
+    monkeypatch.setattr("kouhai_bot.napcat.client.send_private_forward_msg", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not forward")))
     # must not raise: unverified editorial is silently skipped
     await ef.deliver_official_tutorial_forward_private(12345, PID, _FAKE_EDITORIAL)
 
@@ -152,7 +153,8 @@ async def test_group_deliver_still_uses_group_forward(monkeypatch):
         forwarded.append((group_id, messages))
         return 1
 
-    monkeypatch.setattr(ef, "send_group_forward_msg", fake_group_fwd)
+    monkeypatch.setattr("kouhai_bot.napcat.client.send_group_forward_msg", fake_group_fwd)
+    monkeypatch.setattr("kouhai_bot.napcat.client.send_private_msg", lambda *a, **k: None)
 
     await ef.deliver_official_tutorial_forward(777, PID, _FAKE_EDITORIAL)
     assert len(forwarded) == 1
@@ -187,7 +189,8 @@ async def test_private_run_skips_when_no_editorial(monkeypatch):
     def boom(*_args, **_kwargs):
         raise AssertionError("must not forward when no editorial")
 
-    monkeypatch.setattr(ef, "send_private_forward_msg", boom)
+    monkeypatch.setattr("kouhai_bot.napcat.client.send_private_forward_msg", boom)
+    monkeypatch.setattr("kouhai_bot.napcat.client.send_private_msg", boom)
     await ef.run_private_post_solve_editorial_followup(12345, PID)
 
 
@@ -256,7 +259,9 @@ async def test_group_deliver_falls_back_to_plain_text_when_forward_fails(monkeyp
         sent.append((group_id, message))
         return 1
 
-    monkeypatch.setattr(ef, "send_group_forward_msg", fail_forward)
+    async def fail_helper(*args, **kwargs):
+        return None
+    monkeypatch.setattr(ef, "send_forward_card_with_legacy_fallback", fail_helper)
     monkeypatch.setattr(ef, "send_group_msg", fake_send_group)
 
     delivered = await ef.deliver_official_tutorial_forward(777, PID, _FAKE_EDITORIAL)
@@ -278,7 +283,9 @@ async def test_private_deliver_falls_back_to_plain_text_when_forward_fails(monke
         sent.append((user_id, message))
         return 1
 
-    monkeypatch.setattr(ef, "send_private_forward_msg", fail_forward)
+    async def fail_helper(*args, **kwargs):
+        return None
+    monkeypatch.setattr(ef, "send_forward_card_with_legacy_fallback", fail_helper)
     monkeypatch.setattr(ef, "send_private_msg", fake_send_private)
 
     delivered = await ef.deliver_official_tutorial_forward_private(12345, PID, _FAKE_EDITORIAL)

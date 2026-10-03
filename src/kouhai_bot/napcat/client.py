@@ -20,6 +20,8 @@ from ..config import get_config
 
 logger = logging.getLogger("kouhai-bot.napcat")
 
+LEGACY_FORWARD_SELF_SEND_DELAY_SEC = 0.5
+
 # ── HTTP API ────────────────────────────────────────────────────────────
 
 _session: aiohttp.ClientSession | None = None
@@ -113,6 +115,70 @@ async def send_private_forward_msg(user_id: int, messages: list[dict]) -> int | 
     except Exception as e:
         logger.error(f"send_private_forward_msg failed: {e}", exc_info=True)
         return None
+
+
+def build_id_node(message_id: int | str) -> dict:
+    """旧式卡节点：引用已存在消息的 id。"""
+    return {"type": "node", "data": {"id": str(message_id)}}
+
+
+async def send_legacy_forward_card(
+    *,
+    destination: str,
+    group_id: int = 0,
+    user_id: int = 0,
+    self_send_messages: list[list[dict]],
+) -> int | None:
+    """Publish a pre-custom-node merged card via self-sent message ids."""
+    if not self_send_messages:
+        return None
+
+    bot_id = int(get_config().bot_qq)
+    message_ids: list[int | str] = []
+    for message in self_send_messages:
+        message_id = await send_private_msg(bot_id, message)
+        if not message_id:
+            logger.warning("legacy forward fallback: self-send failed; aborting")
+            return None
+        message_ids.append(message_id)
+
+    await asyncio.sleep(LEGACY_FORWARD_SELF_SEND_DELAY_SEC)
+    nodes = [build_id_node(message_id) for message_id in message_ids]
+    if destination == "group":
+        return await send_group_forward_msg(int(group_id), nodes)
+    return await send_private_forward_msg(int(user_id), nodes)
+
+
+async def send_forward_card_with_legacy_fallback(
+    *,
+    destination: str,
+    group_id: int = 0,
+    user_id: int = 0,
+    nodes: list[dict] | None,
+    self_send_messages: list[list[dict]],
+) -> int | None:
+    """Try custom nodes, then legacy self-send nodes; caller owns text fallback."""
+    if nodes:
+        if destination == "group":
+            forwarded = await send_group_forward_msg(int(group_id), nodes)
+        else:
+            forwarded = await send_private_forward_msg(int(user_id), nodes)
+        if forwarded:
+            return forwarded
+        logger.warning("forward card failed; falling back to legacy self-send card")
+    else:
+        logger.warning("forward card has no custom nodes; using legacy self-send card")
+
+    forwarded = await send_legacy_forward_card(
+        destination=destination,
+        group_id=group_id,
+        user_id=user_id,
+        self_send_messages=self_send_messages,
+    )
+    if forwarded:
+        return forwarded
+    logger.warning("legacy self-send forward card failed; caller should use text fallback")
+    return None
 
 
 async def set_friend_add_request(flag: str, *, approve: bool = True, remark: str = "") -> bool:

@@ -99,9 +99,8 @@ from ...napcat.client import (
     delete_msg,
     react_emoji,
     resolve_bot_display_name,
-    send_group_forward_msg,
+    send_forward_card_with_legacy_fallback,
     send_group_msg,
-    send_private_forward_msg,
     send_private_msg,
 )
 
@@ -1518,10 +1517,11 @@ class GroupCoordinator:
                 )
                 for chunk in chunks
             ]
-            if req.is_private:
-                fwd_resp = await send_private_forward_msg(req.user_id, nodes)
-            else:
-                fwd_resp = await send_group_forward_msg(req.group_id, nodes)
+            fwd_resp = await send_forward_card_with_legacy_fallback(
+                destination="private" if req.is_private else "group",
+                group_id=req.group_id, user_id=req.user_id, nodes=nodes,
+                self_send_messages=[build_plain_message(chunk) for chunk in chunks],
+            )
             if fwd_resp:
                 logger.info(
                     "[group_%s] /review seq=%s forward-card send ok: fwd_msg_id=%s node_count=%s",

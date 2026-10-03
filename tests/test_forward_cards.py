@@ -10,6 +10,123 @@ import kouhai_bot.napcat.client as client
 import kouhai_bot.handlers.shared as shared
 
 
+def test_build_id_node_shape():
+    assert client.build_id_node(123) == {
+        "type": "node",
+        "data": {"id": "123"},
+    }
+
+
+def test_forward_helper_custom_nodes_success_skips_legacy(monkeypatch):
+    calls = []
+
+    async def custom(group_id, nodes):
+        calls.append(("custom", group_id, nodes))
+        return 10
+
+    async def self_send(*args):
+        raise AssertionError("legacy self-send must not run")
+
+    monkeypatch.setattr(client, "send_group_forward_msg", custom)
+    monkeypatch.setattr(client, "send_private_msg", self_send)
+    result = asyncio.run(client.send_forward_card_with_legacy_fallback(
+        destination="group", group_id=7, nodes=[{"type": "node"}],
+        self_send_messages=[[client.build_text("x")]],
+    ))
+    assert result == 10
+    assert calls == [("custom", 7, [{"type": "node"}])]
+
+
+def test_forward_helper_custom_failure_uses_legacy_ids(monkeypatch):
+    calls = []
+
+    forward_calls = 0
+
+    async def custom(user_id, nodes):
+        nonlocal forward_calls
+        forward_calls += 1
+        calls.append(("custom" if forward_calls == 1 else "private", user_id, nodes))
+        return None if forward_calls == 1 else 99
+
+    async def self_send(user_id, message):
+        calls.append(("self", user_id, message))
+        return len(calls) + 100
+
+    monkeypatch.setattr(client, "send_private_forward_msg", custom)
+    monkeypatch.setattr(client, "send_private_msg", self_send)
+    monkeypatch.setattr(client, "get_config", lambda: type("C", (), {"bot_qq": 5})())
+    monkeypatch.setattr(client, "LEGACY_FORWARD_SELF_SEND_DELAY_SEC", 0)
+    result = asyncio.run(client.send_forward_card_with_legacy_fallback(
+        destination="private", user_id=8, nodes=[{"type": "node"}],
+        self_send_messages=[[client.build_text("a")], [client.build_text("b")]],
+    ))
+    assert result == 99
+    assert [item[0] for item in calls] == ["custom", "self", "self", "private"]
+    assert calls[-1][2] == [client.build_id_node(102), client.build_id_node(103)]
+
+
+def test_forward_helper_legacy_failure_returns_none(monkeypatch):
+    async def custom(*args):
+        return None
+
+    async def self_send(*args):
+        return None
+
+    monkeypatch.setattr(client, "send_group_forward_msg", custom)
+    monkeypatch.setattr(client, "send_private_msg", self_send)
+    monkeypatch.setattr(client, "get_config", lambda: type("C", (), {"bot_qq": 5})())
+    result = asyncio.run(client.send_forward_card_with_legacy_fallback(
+        destination="group", group_id=7, nodes=[{"type": "node"}],
+        self_send_messages=[[client.build_text("x")]],
+    ))
+    assert result is None
+
+
+def test_forward_helper_legacy_forward_failure_returns_none(monkeypatch):
+    async def custom(*args):
+        return None
+
+    async def self_send(*args):
+        return 42
+
+    async def legacy_forward(*args):
+        return None
+
+    monkeypatch.setattr(client, "send_group_forward_msg", custom)
+    monkeypatch.setattr(client, "send_private_msg", self_send)
+    monkeypatch.setattr(client, "send_private_forward_msg", legacy_forward)
+    monkeypatch.setattr(client, "get_config", lambda: type("C", (), {"bot_qq": 5})())
+    monkeypatch.setattr(client, "LEGACY_FORWARD_SELF_SEND_DELAY_SEC", 0)
+    result = asyncio.run(client.send_forward_card_with_legacy_fallback(
+        destination="private", user_id=8, nodes=[{"type": "node"}],
+        self_send_messages=[[client.build_text("x")]],
+    ))
+    assert result is None
+
+
+def test_forward_helper_empty_nodes_goes_directly_to_legacy(monkeypatch):
+    calls = []
+
+    async def self_send(user_id, message):
+        calls.append(("self", user_id, message))
+        return 12
+
+    async def group_forward(group_id, nodes):
+        calls.append(("group", group_id, nodes))
+        return 13
+
+    monkeypatch.setattr(client, "send_private_msg", self_send)
+    monkeypatch.setattr(client, "send_group_forward_msg", group_forward)
+    monkeypatch.setattr(client, "get_config", lambda: type("C", (), {"bot_qq": 5})())
+    monkeypatch.setattr(client, "LEGACY_FORWARD_SELF_SEND_DELAY_SEC", 0)
+    result = asyncio.run(client.send_forward_card_with_legacy_fallback(
+        destination="group", group_id=7, nodes=[],
+        self_send_messages=[[client.build_text("x")]],
+    ))
+    assert result == 13
+    assert calls == [("self", 5, [client.build_text("x")]), ("group", 7, [client.build_id_node(12)])]
+
+
 def test_build_node_shape():
     node = client.build_node(
         user_id=42, nickname="昵称", content=[{"type": "text", "data": {"text": "hi"}}]

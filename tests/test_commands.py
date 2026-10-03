@@ -593,14 +593,11 @@ def _all_patches():
     stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.send_private_msg", _mock_send_private))
-    stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.send_group_forward_msg", _mock_send_group_forward))
-    stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.send_private_forward_msg", _mock_send_private_forward))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.delete_msg", _mock_delete_msg))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.clarify.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.review.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.clear.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.send_group_msg", _mock_send_group))
-    stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.send_group_forward_msg", _mock_send_group_forward))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.react_emoji", _mock_react))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.newproblem.schedule_prefetch_editorial"))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.stubs.send_group_msg", _mock_send_group))
@@ -615,11 +612,8 @@ def _all_patches():
     stack.enter_context(patch("kouhai_bot.handlers.cmd.feedback.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.feedback.send_private_msg", _mock_send_private))
     stack.enter_context(patch("kouhai_bot.handlers.cmd.feedback.react_emoji", _mock_react))
-    stack.enter_context(patch("kouhai_bot.editorial_followup.send_group_forward_msg", _mock_send_group_forward))
     stack.enter_context(patch("kouhai_bot.private_judge.send_group_msg", _mock_send_group))
     stack.enter_context(patch("kouhai_bot.private_judge.send_private_msg", _mock_send_private))
-    stack.enter_context(patch("kouhai_bot.private_judge.send_group_forward_msg", _mock_send_group_forward))
-    stack.enter_context(patch("kouhai_bot.private_judge.send_private_forward_msg", _mock_send_private_forward))
     stack.enter_context(patch("kouhai_bot.handlers.shared.call_chat_completion_result", _mock_chat_completion_result))
     stack.enter_context(patch("kouhai_bot.handlers.shared.judge_submission_result", _mock_judge_result))
     stack.enter_context(patch("kouhai_bot.handlers.shared.second_judge_submission_result", _mock_second_judge_result))
@@ -3549,7 +3543,7 @@ def test_newproblem_fallback_direct_saves_daily_msg_for_current_pid():
                 "kouhai_bot.handlers.cmd.newproblem.get_next_problem_prefetcher",
                 return_value=prefetcher,
             ), \
-            patch("kouhai_bot.handlers.cmd.newproblem.send_group_forward_msg", _fail_forward), \
+                patch("kouhai_bot.napcat.client.send_group_forward_msg", _fail_forward), \
             patch("kouhai_bot.handlers.cmd.newproblem.asyncio.sleep", AsyncMock()):
         from kouhai_bot.handlers.cmd.newproblem import _post_new_problem_locked
         posted = asyncio.run(_post_new_problem_locked(GID, prefix="刷新了一道新题🌟", notify_group=True))
@@ -5142,7 +5136,7 @@ def test_private_problem_card_falls_back_when_forward_fails():
     with _all_patches(), \
         patch("kouhai_bot.private_judge.asyncio.sleep", AsyncMock()), \
         patch("kouhai_bot.private_judge.build_problem_card_payload", AsyncMock(return_value=payload)), \
-        patch("kouhai_bot.private_judge.send_private_forward_msg", _fail_forward):
+            patch("kouhai_bot.napcat.client.send_private_forward_msg", _fail_forward):
         from kouhai_bot.private_judge import send_problem_card_private
 
         ok = asyncio.run(send_problem_card_private(UID, GID, problem, prefer_group_card=False))

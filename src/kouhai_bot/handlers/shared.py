@@ -1417,6 +1417,168 @@ def build_second_judge_messages(
     ]
 
 
+_JEV_FIRST_JSON_PREAMBLE = (
+    "Your output must be strict JSON only.\n"
+    "All human-readable values in the JSON, especially \"reason\" and \"reply\", MUST be written in Chinese.\n"
+    "Do not write English explanations in \"reason\" or \"reply\".\n"
+    "Do not output Markdown, code fences, comments, or any text outside the JSON object.\n"
+    "Do not add extra keys outside the required schema.\n"
+)
+
+_JEV_FIRST_DROP_SECTIONS = (
+    "## Spam / reaction",
+    "## Reply language and style",
+    "## Output format",
+)
+
+
+def _drop_prompt_section(text: str, header: str) -> str:
+    """Drop one ``## header`` section (up to the next ``---`` divider)."""
+    pattern = re.compile(rf"\n{re.escape(header)}\n.*?(?=\n---\n|\Z)", re.S)
+    if not pattern.search(text):
+        raise RuntimeError(f"judge prompt changed: section {header!r} not found")
+    return pattern.sub("\n", text, count=1)
+
+
+def build_jev_first_judge_request(
+    problem_text: str,
+    submission: str,
+    history: list[dict] | None = None,
+) -> dict:
+    """Build the Jev request for the first pass of /sbmjev.
+
+    Reuses :func:`build_judge_messages` verbatim so the judging rules and input
+    payload stay identical to the production first pass. Jev cannot emit the
+    free-form JSON verdict, so the JSON-output instructions, the spam/reaction
+    section and the reply-language section are dropped, and the verdict is
+    exposed as one ``choice`` question. Spam is not a separate outcome: it is
+    simply incorrect.
+    """
+    messages = build_judge_messages(problem_text, submission, history)
+    principles = messages[0]["content"]
+    if _JEV_FIRST_JSON_PREAMBLE not in principles:
+        raise RuntimeError("judge prompt changed: JSON preamble not found")
+    principles = principles.replace(_JEV_FIRST_JSON_PREAMBLE, "", 1)
+    for header in _JEV_FIRST_DROP_SECTIONS:
+        principles = _drop_prompt_section(principles, header)
+
+    old_step = (
+        "1. Check spam/trolling/unrelated:\n"
+        "   - obvious spam only -> spam output with reaction=\"123\"\n"
+        "   - otherwise continue (do NOT use reaction for normal vague attempts)"
+    )
+    new_step = (
+        "1. Check spam/trolling/unrelated:\n"
+        "   - obvious spam, trolling, or unrelated content is simply incorrect\n"
+        "   - otherwise continue"
+    )
+    if old_step not in principles:
+        raise RuntimeError("judge prompt changed: spam step not found")
+    principles = principles.replace(old_step, new_step, 1)
+    old_output_step = "6. Produce strict JSON with Chinese reason/reply"
+    if old_output_step not in principles:
+        raise RuntimeError("judge prompt changed: output step not found")
+    principles = principles.replace(
+        old_output_step, "6. Decide whether the idea is correct or incorrect", 1
+    )
+    principles = principles.replace(
+        "Reply should remind the user to submit ideas, not full code.\n", "", 1
+    )
+    # Tidy separators left behind by the dropped sections.
+    principles = re.sub(r"\n{3,}", "\n\n", principles).strip()
+    principles = re.sub(r"(?:\s*---\s*)+$", "", principles).rstrip()
+
+    task = json.loads(messages[1]["content"])
+    return {
+        "state": {
+            "judging_principles": principles,
+            "judge_task": task,
+        },
+        "questions": {
+            "verdict": {
+                "type": "choice",
+                "instructions": (
+                    "按 `judging_principles` 审查 `judge_task`，判断 "
+                    "`judge_task.current_submission` 是否真正解决了题目。"
+                    "只输出正确/错误两种结果，不判断是否离题。"
+                ),
+                "criteria": {
+                    "correct": (
+                        "核心观察/模型/构造齐全，可据此重建正确解法；"
+                        "缺失的只是常规实现细节。"
+                    ),
+                    "incorrect": (
+                        "只有通用算法关键词、缺少题目特有的核心步骤、"
+                        "存在致命逻辑错误、误解题意，或复杂度过高且无有效优化。"
+                    ),
+                },
+            }
+        },
+    }
+
+
+_JEV_JSON_OUTPUT_RULE = "1) 只输出 JSON 对象，字段为 correct、reason、reply、reaction。\n"
+
+
+def build_jev_second_judge_request(
+    problem_text: str,
+    submission: str,
+    history: list[dict] | None,
+    editorial_text: str,
+    editorial_source: str = "",
+    first_judge_result: dict | None = None,
+) -> dict:
+    """Build the Jev request for /sbmjev from the second-review prompt.
+
+    Reuses :func:`build_second_judge_messages` verbatim so the judging rules
+    and input payload stay identical to the production second review. Jev is a
+    decision model that cannot emit free-form JSON, so the only adaptation is
+    dropping the JSON-output rule/example and exposing the verdict as one
+    ``choice`` question instead.
+    """
+    messages = build_second_judge_messages(
+        problem_text,
+        submission,
+        history,
+        first_judge_result or {},
+        editorial_text,
+        editorial_source,
+    )
+    principles = messages[0]["content"]
+    if _JEV_JSON_OUTPUT_RULE not in principles:
+        raise RuntimeError("second-judge prompt changed: JSON output rule not found")
+    principles = principles.replace(_JEV_JSON_OUTPUT_RULE, "")
+    if "输出示例：" in principles:
+        principles = principles.split("输出示例：", 1)[0].rstrip()
+    task = json.loads(messages[1]["content"])
+    return {
+        "state": {
+            "judging_principles": principles,
+            "review_task": task,
+        },
+        "questions": {
+            "verdict": {
+                "type": "choice",
+                "instructions": (
+                    "按 `judging_principles` 审查 `review_task`，判断 "
+                    "`review_task.current_submission` 的核心做法是否正确。"
+                    "只输出正确/错误两种结果，不判断是否离题。"
+                ),
+                "criteria": {
+                    "correct": (
+                        "核心算法正确、复杂度满足限制、关键边界处理无误；"
+                        "即使与官方题解不同也算通过。"
+                    ),
+                    "incorrect": (
+                        "核心算法错误、复杂度过高、关键边界处理有误，"
+                        "或依赖题面之外的修改/放宽声称。"
+                    ),
+                },
+            }
+        },
+    }
+
+
 async def judge_submission_result(
     problem_text: str,
     submission: str,

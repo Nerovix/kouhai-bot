@@ -23,6 +23,8 @@ from .. import registry
 from ..registry import CommandDef
 from ..shared import (
     append_model_tag,
+    build_jev_first_judge_request,
+    build_jev_second_judge_request,
     build_scoreboard_entries,
     build_multimodal_user_content,
     call_chat_completion_result,
@@ -53,6 +55,7 @@ from ..shared import (
 )
 from ...config import get_config
 from ...context import get_display_name, load_group_ctx
+from ...jev import run_jev
 from ...user_groups import (
     effective_submit_delay_sec_for_scoreboard,
     get_user_group,
@@ -1895,6 +1898,165 @@ async def handle(group_id: int, user_id: int, sender: dict,
         return
 
 
+async def handle_jev(group_id: int, user_id: int, sender: dict,
+                     message_id: str, raw_text: str, segments: list,
+                     event: dict) -> None:
+    """/sbmjev — entertainment Jev verdict on the current problem.
+
+    Deliberately stateless: it reads the current problem/statement and the
+    user's existing dialogue, but never writes submissions, scoreboard or
+    history. Only regular debug logs are emitted.
+    """
+    scope = PRIVATE_SCOPE if event.get("message_type") == "private" else GROUP_SCOPE
+
+    stripped = raw_text.lstrip()
+    match = re.match(r'/sbmjev\s+', stripped)
+    if not match:
+        await _send_jev_text(
+            scope, group_id, user_id,
+            "用法：/sbmjev 你的做法。试试看？",
+        )
+        return
+
+    submission = stripped[match.end():].strip()
+    if not submission:
+        await _send_jev_text(
+            scope, group_id, user_id,
+            "/sbmjev 后面要写你的做法呀，只发 /sbmjev 我不知道你做了啥 😅",
+        )
+        return
+
+    if is_curfew_active():
+        await _send_jev_text(scope, group_id, user_id, format_curfew_message())
+        return
+
+    problem = (
+        get_private_current_problem(user_id)
+        if scope == PRIVATE_SCOPE
+        else get_today_problem(group_id)
+    )
+    pid = str(problem.get("today", "") or "") if isinstance(problem, dict) else ""
+    if not pid:
+        if scope == PRIVATE_SCOPE:
+            text = "当前还没有 private judge 题目～先发 /setproblem 设置一道题吧。"
+        else:
+            text = "当前还没有题目可以提交～发 /newproblem 刷新一道？"
+        await _send_jev_text(scope, group_id, user_id, text)
+        return
+
+    problem_text = load_problem_statement(pid)
+    if not problem_text:
+        await _send_jev_text(scope, group_id, user_id, "加载题目信息失败，稍后再试试？")
+        return
+
+    history = _load_user_problem_history(group_id, user_id, pid, scope=scope)
+    logger.info(
+        "[group_%s] jev first judge start pid=%s scope=%s user=%s history_items=%s",
+        group_id, pid, scope, user_id, len(history),
+    )
+    try:
+        first_request = build_jev_first_judge_request(
+            problem_text, submission, history
+        )
+        first = await run_jev(**first_request)
+    except Exception:
+        logger.exception(
+            "[group_%s] jev first judge crashed pid=%s user=%s",
+            group_id, pid, user_id,
+        )
+        await _send_jev_face(scope, group_id, user_id, message_id, "312")
+        return
+    if first.failure_kind or not first.choice:
+        logger.warning(
+            "[group_%s] jev first judge failed pid=%s user=%s failure=%s",
+            group_id, pid, user_id, first.failure_kind or "empty_choice",
+        )
+        await _send_jev_face(scope, group_id, user_id, message_id, "312")
+        return
+    logger.info(
+        "[group_%s] jev first judge result pid=%s user=%s model=%s choice=%s "
+        "p_correct=%s confidence=%s input_tokens=%s",
+        group_id, pid, user_id, first.model, first.choice,
+        first.probabilities.get("correct"), first.confidence, first.input_tokens,
+    )
+    if first.choice != "correct":
+        await _send_jev_face(scope, group_id, user_id, message_id, "479")
+        return
+
+    # Same gate as the production flow: only a first-pass-correct submission
+    # with a verified editorial gets a second review.
+    editorial = get_verified_official_editorial(pid)
+    if not editorial:
+        await _send_jev_face(scope, group_id, user_id, message_id, "478")
+        return
+
+    editorial_source = "\n".join(
+        part for part in [editorial.tutorial_title, editorial.tutorial_url]
+        if part
+    )
+    logger.info(
+        "[group_%s] jev second judge start pid=%s scope=%s user=%s source=%s",
+        group_id, pid, scope, user_id, editorial_source,
+    )
+    try:
+        second_request = build_jev_second_judge_request(
+            problem_text,
+            submission,
+            history,
+            editorial.text,
+            editorial_source,
+            first_judge_result={
+                "correct": True,
+                "reason": "",
+                "reply": "",
+                "reaction": "",
+            },
+        )
+        second = await run_jev(**second_request)
+    except Exception:
+        logger.exception(
+            "[group_%s] jev second judge crashed pid=%s user=%s fallback=first",
+            group_id, pid, user_id,
+        )
+        await _send_jev_face(scope, group_id, user_id, message_id, "478")
+        return
+    if second.failure_kind or not second.choice:
+        logger.warning(
+            "[group_%s] jev second judge failed pid=%s user=%s failure=%s fallback=first",
+            group_id, pid, user_id, second.failure_kind or "empty_choice",
+        )
+        await _send_jev_face(scope, group_id, user_id, message_id, "478")
+        return
+    logger.info(
+        "[group_%s] jev second judge result pid=%s user=%s model=%s choice=%s "
+        "p_correct=%s confidence=%s input_tokens=%s",
+        group_id, pid, user_id, second.model, second.choice,
+        second.probabilities.get("correct"), second.confidence, second.input_tokens,
+    )
+    # Feedback is reaction-only: correct → face 478, incorrect → face 479.
+    # Private chats have no reaction target, so degrade to sending the face.
+    await _send_jev_face(
+        scope, group_id, user_id, message_id,
+        "478" if second.choice == "correct" else "479",
+    )
+
+
+async def _send_jev_face(
+    scope: str, group_id: int, user_id: int, message_id: str, face_id: str
+) -> None:
+    if scope == PRIVATE_SCOPE:
+        await send_private_msg(user_id, [build_face(face_id)])
+    else:
+        await react_emoji(message_id, face_id)
+
+
+async def _send_jev_text(scope: str, group_id: int, user_id: int, text: str) -> None:
+    if scope == PRIVATE_SCOPE:
+        await send_private_msg(user_id, build_plain_message(text))
+    else:
+        await send_group_msg(group_id, [build_at(user_id), build_text(f" {text}")])
+
+
 def register() -> None:
     registry.register(CommandDef(
         name="submit",
@@ -1902,5 +2064,13 @@ def register() -> None:
         description="提交做法，AI 判定对错",
         usage="你的做法",
         handler=handle,
+        cooldown=10,
+    ))
+    registry.register(CommandDef(
+        name="sbmjev",
+        aliases=[],
+        description="娱乐判题：用 Jev 判提交是否通过（不计分、不留记录）",
+        usage="你的做法",
+        handler=handle_jev,
         cooldown=10,
     ))

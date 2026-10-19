@@ -145,6 +145,26 @@ async def test_sbmjev_requires_submission_text():
 
 
 @pytest.mark.asyncio
+async def test_sbmjev_crash_reacts_312():
+    values = _patches()
+    with patch.object(submit_mod, "get_today_problem", return_value=values["get_today_problem"]), \
+         patch.object(submit_mod, "load_problem_statement", return_value=values["load_problem_statement"]), \
+         patch.object(submit_mod, "_load_user_problem_history", return_value=[]), \
+         patch.object(submit_mod, "get_verified_official_editorial", return_value=None), \
+         patch.object(submit_mod, "is_curfew_active", return_value=False), \
+         patch.object(submit_mod, "build_jev_second_judge_request", side_effect=RuntimeError("prompt drift")), \
+         patch.object(submit_mod, "send_group_msg") as send_group, \
+         patch.object(submit_mod, "react_emoji", new=AsyncMock()) as react:
+        await submit_mod.handle_jev(
+            GID, UID, {"nickname": "Alice"}, "m5",
+            "/sbmjev 我的做法", [], {"message_type": "group"},
+        )
+
+    send_group.assert_not_called()
+    react.assert_awaited_once_with("m5", "312")
+
+
+@pytest.mark.asyncio
 async def test_sbmjev_failure_reacts_312():
     values = _patches()
     with patch.object(submit_mod, "get_today_problem", return_value=values["get_today_problem"]), \

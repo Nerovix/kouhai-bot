@@ -146,6 +146,21 @@ async def test_run_jev_rejects_malformed_answer(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_jev_accepts_v1_suffixed_base(monkeypatch):
+    monkeypatch.setattr(
+        jev, "get_config", lambda: _cfg(jev_base_url="https://www.rightapi.ai/v1/")
+    )
+
+    async def fake_post(url, api_key, payload, timeout):
+        assert url == "https://www.rightapi.ai/v1/systemone"
+        return 200, SUCCESS_BODY
+
+    monkeypatch.setattr(jev, "_post_once", fake_post)
+    result = await jev.run_jev({"x": 1}, {"verdict": {"type": "choice"}})
+    assert result.choice == "correct"
+
+
+@pytest.mark.asyncio
 async def test_run_jev_requires_api_key(monkeypatch):
     monkeypatch.setattr(jev, "get_config", lambda: _cfg(jev_api_key=""))
 

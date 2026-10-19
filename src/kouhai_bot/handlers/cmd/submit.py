@@ -1960,14 +1960,21 @@ async def handle_jev(group_id: int, user_id: int, sender: dict,
         "[group_%s] jev judge start pid=%s scope=%s user=%s history_items=%s editorial=%s",
         group_id, pid, scope, user_id, len(history), bool(editorial),
     )
-    request = build_jev_second_judge_request(
-        problem_text,
-        submission,
-        history,
-        editorial.text if editorial else "",
-        editorial_source,
-    )
-    result = await run_jev(**request)
+    try:
+        request = build_jev_second_judge_request(
+            problem_text,
+            submission,
+            history,
+            editorial.text if editorial else "",
+            editorial_source,
+        )
+        result = await run_jev(**request)
+    except Exception:
+        logger.exception(
+            "[group_%s] jev judge crashed pid=%s user=%s", group_id, pid, user_id
+        )
+        await _send_jev_face(scope, group_id, user_id, message_id, "312")
+        return
     if result.failure_kind or not result.choice:
         logger.warning(
             "[group_%s] jev judge failed pid=%s user=%s failure=%s",

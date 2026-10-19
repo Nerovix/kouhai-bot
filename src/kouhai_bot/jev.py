@@ -110,7 +110,12 @@ async def run_jev(
         logger.warning("jev judge requested but jev.api_key is not configured")
         return JevResult(failure_kind="not_configured")
 
-    url = f"{cfg.jev_base_url.rstrip('/')}/v1/systemone"
+    # Accept both the documented base (https://www.rightapi.ai) and the
+    # LLM-style base that already ends in /v1.
+    base_url = cfg.jev_base_url.rstrip("/")
+    if base_url.endswith("/v1"):
+        base_url = base_url[: -len("/v1")]
+    url = f"{base_url}/v1/systemone"
     payload = {
         "model": cfg.jev_model,
         "state": state,

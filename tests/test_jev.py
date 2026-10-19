@@ -9,7 +9,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from kouhai_bot.config import BotConfig
 from kouhai_bot import jev
 from kouhai_bot.handlers.shared import (
+    build_jev_first_judge_request,
     build_jev_second_judge_request,
+    build_judge_messages,
     build_second_judge_messages,
 )
 
@@ -59,6 +61,48 @@ def test_jev_request_task_matches_second_judge_user_message():
         PROBLEM, SUBMISSION, HISTORY, {}, EDITORIAL, "source"
     )
     assert request["state"]["review_task"] == json.loads(messages[1]["content"])
+
+
+def test_jev_request_reuses_first_judge_prompt():
+    request = build_jev_first_judge_request(PROBLEM, SUBMISSION, HISTORY)
+    principles = request["state"]["judging_principles"]
+    # Same judging rules as the production first pass...
+    assert "You are judging Codeforces daily-problem /submit messages." in principles
+    assert "## Two-pass judgment" in principles
+    assert "## Judging by topic" in principles
+    # ...minus the JSON contract and the separate spam/reaction outcome.
+    assert "Your output must be strict JSON only." not in principles
+    assert "## Spam / reaction" not in principles
+    assert "## Output format" not in principles
+    assert 'reaction="123"' not in principles
+    assert "simply incorrect" in principles
+    assert "Produce strict JSON" not in principles
+    assert "Decide whether the idea is correct or incorrect" in principles
+    assert not principles.rstrip().endswith("---")
+
+    task = request["state"]["judge_task"]
+    assert task["task"] == "first_pass_judge_complete_solution"
+    assert task["problem_statement"] == PROBLEM
+    assert task["current_submission"] == SUBMISSION
+
+    question = request["questions"]["verdict"]
+    assert question["type"] == "choice"
+    assert set(question["criteria"]) == {"correct", "incorrect"}
+
+
+def test_jev_first_request_task_matches_first_judge_user_message():
+    request = build_jev_first_judge_request(PROBLEM, SUBMISSION, HISTORY)
+    messages = build_judge_messages(PROBLEM, SUBMISSION, HISTORY)
+    assert request["state"]["judge_task"] == json.loads(messages[1]["content"])
+
+
+def test_jev_second_request_carries_first_pass_verdict():
+    first_pass = {"correct": True, "reason": "", "reply": "", "reaction": ""}
+    request = build_jev_second_judge_request(
+        PROBLEM, SUBMISSION, HISTORY, EDITORIAL, "source",
+        first_judge_result=first_pass,
+    )
+    assert request["state"]["review_task"]["first_pass"]["verdict"] is True
 
 
 def _cfg(**overrides) -> BotConfig:

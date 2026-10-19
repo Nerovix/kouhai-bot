@@ -23,6 +23,7 @@ from .. import registry
 from ..registry import CommandDef
 from ..shared import (
     append_model_tag,
+    build_jev_first_judge_request,
     build_jev_second_judge_request,
     build_scoreboard_entries,
     build_multimodal_user_content,
@@ -1949,50 +1950,95 @@ async def handle_jev(group_id: int, user_id: int, sender: dict,
         return
 
     history = _load_user_problem_history(group_id, user_id, pid, scope=scope)
-    editorial = get_verified_official_editorial(pid)
-    editorial_source = ""
-    if editorial:
-        editorial_source = "\n".join(
-            part for part in [editorial.tutorial_title, editorial.tutorial_url]
-            if part
-        )
     logger.info(
-        "[group_%s] jev judge start pid=%s scope=%s user=%s history_items=%s editorial=%s",
-        group_id, pid, scope, user_id, len(history), bool(editorial),
+        "[group_%s] jev first judge start pid=%s scope=%s user=%s history_items=%s",
+        group_id, pid, scope, user_id, len(history),
     )
     try:
-        request = build_jev_second_judge_request(
+        first_request = build_jev_first_judge_request(
+            problem_text, submission, history
+        )
+        first = await run_jev(**first_request)
+    except Exception:
+        logger.exception(
+            "[group_%s] jev first judge crashed pid=%s user=%s",
+            group_id, pid, user_id,
+        )
+        await _send_jev_face(scope, group_id, user_id, message_id, "312")
+        return
+    if first.failure_kind or not first.choice:
+        logger.warning(
+            "[group_%s] jev first judge failed pid=%s user=%s failure=%s",
+            group_id, pid, user_id, first.failure_kind or "empty_choice",
+        )
+        await _send_jev_face(scope, group_id, user_id, message_id, "312")
+        return
+    logger.info(
+        "[group_%s] jev first judge result pid=%s user=%s model=%s choice=%s "
+        "p_correct=%s confidence=%s input_tokens=%s",
+        group_id, pid, user_id, first.model, first.choice,
+        first.probabilities.get("correct"), first.confidence, first.input_tokens,
+    )
+    if first.choice != "correct":
+        await _send_jev_face(scope, group_id, user_id, message_id, "479")
+        return
+
+    # Same gate as the production flow: only a first-pass-correct submission
+    # with a verified editorial gets a second review.
+    editorial = get_verified_official_editorial(pid)
+    if not editorial:
+        await _send_jev_face(scope, group_id, user_id, message_id, "478")
+        return
+
+    editorial_source = "\n".join(
+        part for part in [editorial.tutorial_title, editorial.tutorial_url]
+        if part
+    )
+    logger.info(
+        "[group_%s] jev second judge start pid=%s scope=%s user=%s source=%s",
+        group_id, pid, scope, user_id, editorial_source,
+    )
+    try:
+        second_request = build_jev_second_judge_request(
             problem_text,
             submission,
             history,
-            editorial.text if editorial else "",
+            editorial.text,
             editorial_source,
+            first_judge_result={
+                "correct": True,
+                "reason": "",
+                "reply": "",
+                "reaction": "",
+            },
         )
-        result = await run_jev(**request)
+        second = await run_jev(**second_request)
     except Exception:
         logger.exception(
-            "[group_%s] jev judge crashed pid=%s user=%s", group_id, pid, user_id
+            "[group_%s] jev second judge crashed pid=%s user=%s fallback=first",
+            group_id, pid, user_id,
         )
-        await _send_jev_face(scope, group_id, user_id, message_id, "312")
+        await _send_jev_face(scope, group_id, user_id, message_id, "478")
         return
-    if result.failure_kind or not result.choice:
+    if second.failure_kind or not second.choice:
         logger.warning(
-            "[group_%s] jev judge failed pid=%s user=%s failure=%s",
-            group_id, pid, user_id, result.failure_kind or "empty_choice",
+            "[group_%s] jev second judge failed pid=%s user=%s failure=%s fallback=first",
+            group_id, pid, user_id, second.failure_kind or "empty_choice",
         )
-        # Jev unavailable: same reaction-only channel, face 312.
-        await _send_jev_face(scope, group_id, user_id, message_id, "312")
+        await _send_jev_face(scope, group_id, user_id, message_id, "478")
         return
-
-    passed = result.choice == "correct"
     logger.info(
-        "[group_%s] jev judge result pid=%s user=%s model=%s choice=%s p_correct=%s confidence=%s input_tokens=%s",
-        group_id, pid, user_id, result.model, result.choice,
-        result.probabilities.get("correct"), result.confidence, result.input_tokens,
+        "[group_%s] jev second judge result pid=%s user=%s model=%s choice=%s "
+        "p_correct=%s confidence=%s input_tokens=%s",
+        group_id, pid, user_id, second.model, second.choice,
+        second.probabilities.get("correct"), second.confidence, second.input_tokens,
     )
     # Feedback is reaction-only: correct → face 478, incorrect → face 479.
     # Private chats have no reaction target, so degrade to sending the face.
-    await _send_jev_face(scope, group_id, user_id, message_id, "478" if passed else "479")
+    await _send_jev_face(
+        scope, group_id, user_id, message_id,
+        "478" if second.choice == "correct" else "479",
+    )
 
 
 async def _send_jev_face(

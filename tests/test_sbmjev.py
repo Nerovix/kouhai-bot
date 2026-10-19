@@ -1,7 +1,8 @@
 import os
 import sys
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -15,171 +16,214 @@ GID = 999999
 UID = 42
 PID = "542D"
 
+REQUEST = {"state": {"x": 1}, "questions": {"verdict": {}}}
+FIRST_PASS = {"correct": True, "reason": "", "reply": "", "reaction": ""}
 
-def _jev_result(choice: str = "correct") -> JevResult:
-    return JevResult(
-        choice=choice,
-        probabilities={"correct": 0.88 if choice == "correct" else 0.12,
-                       "incorrect": 0.12 if choice == "correct" else 0.88},
-        confidence=0.76,
-        model="jev-1.13.0",
-        input_tokens=340,
+
+def _editorial():
+    return SimpleNamespace(
+        text="Official editorial body",
+        tutorial_title="Tutorial",
+        tutorial_url="https://example.com/editorial",
     )
 
 
-def _patches(**overrides):
-    """Patch every dependency of the /sbmjev handler."""
-    defaults = {
-        "get_today_problem": {"today": PID, "rating": 2500},
-        "get_private_current_problem": {"today": PID, "rating": 2500},
-        "load_problem_statement": "Problem statement",
-        "_load_user_problem_history": [],
-        "get_verified_official_editorial": None,
-        "is_curfew_active": False,
-        "build_jev_second_judge_request": {"state": {"x": 1}, "questions": {"verdict": {}}},
-        "run_jev": _jev_result(),
-    }
-    defaults.update(overrides)
-    return defaults
+@contextmanager
+def _handler_env(*, results, editorial=None, first_error=None):
+    """Patch every dependency of the /sbmjev handler and expose the mocks."""
+    env = SimpleNamespace()
+    env.run = AsyncMock(
+        side_effect=results if isinstance(results, list) else [results]
+    )
+    env.build_first = Mock(return_value=REQUEST)
+    env.build_second = Mock(return_value=REQUEST)
+    env.send_group = AsyncMock()
+    env.send_private = AsyncMock()
+    env.react = AsyncMock()
+    env.save_group = Mock()
+    env.save_private = Mock()
+
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(
+                submit_mod, "get_today_problem",
+                return_value={"today": PID, "rating": 2500},
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                submit_mod, "get_private_current_problem",
+                return_value={"today": PID, "rating": 2500},
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                submit_mod, "load_problem_statement",
+                return_value="Problem statement",
+            )
+        )
+        stack.enter_context(
+            patch.object(submit_mod, "_load_user_problem_history", return_value=[])
+        )
+        stack.enter_context(
+            patch.object(
+                submit_mod, "get_verified_official_editorial", return_value=editorial
+            )
+        )
+        stack.enter_context(
+            patch.object(submit_mod, "is_curfew_active", return_value=False)
+        )
+        if first_error is not None:
+            stack.enter_context(
+                patch.object(
+                    submit_mod, "build_jev_first_judge_request",
+                    side_effect=first_error,
+                )
+            )
+        else:
+            stack.enter_context(
+                patch.object(
+                    submit_mod, "build_jev_first_judge_request", env.build_first
+                )
+            )
+        stack.enter_context(
+            patch.object(
+                submit_mod, "build_jev_second_judge_request", env.build_second
+            )
+        )
+        stack.enter_context(patch.object(submit_mod, "run_jev", new=env.run))
+        stack.enter_context(
+            patch.object(submit_mod, "send_group_msg", new=env.send_group)
+        )
+        stack.enter_context(
+            patch.object(submit_mod, "send_private_msg", new=env.send_private)
+        )
+        stack.enter_context(patch.object(submit_mod, "react_emoji", new=env.react))
+        stack.enter_context(
+            patch.object(submit_mod, "save_user_submission", new=env.save_group)
+        )
+        stack.enter_context(
+            patch.object(submit_mod, "save_private_submission", new=env.save_private)
+        )
+        yield env
+
+
+async def _invoke(message_id: str = "m1", *, private: bool = False):
+    await submit_mod.handle_jev(
+        GID, UID, {"nickname": "Alice"}, message_id,
+        "/sbmjev 我的做法", [],
+        {"message_type": "private" if private else "group"},
+    )
 
 
 @pytest.mark.asyncio
-async def test_group_sbmjev_reacts_without_writing_state():
-    values = _patches()
-    with patch.object(submit_mod, "get_today_problem", return_value=values["get_today_problem"]), \
-         patch.object(submit_mod, "load_problem_statement", return_value=values["load_problem_statement"]), \
-         patch.object(submit_mod, "_load_user_problem_history", return_value=values["_load_user_problem_history"]), \
-         patch.object(submit_mod, "get_verified_official_editorial", return_value=None), \
-         patch.object(submit_mod, "is_curfew_active", return_value=False), \
-         patch.object(submit_mod, "build_jev_second_judge_request", return_value=values["build_jev_second_judge_request"]) as build, \
-         patch.object(submit_mod, "run_jev", new=AsyncMock(return_value=values["run_jev"])) as run, \
-         patch.object(submit_mod, "send_group_msg") as send_group, \
-         patch.object(submit_mod, "react_emoji", new=AsyncMock()) as react, \
-         patch.object(submit_mod, "save_user_submission") as save_group, \
-         patch.object(submit_mod, "save_private_submission") as save_private:
-        await submit_mod.handle_jev(
-            GID, UID, {"nickname": "Alice"}, "m1",
-            "/sbmjev 我的做法", [], {"message_type": "group"},
-        )
+async def test_first_incorrect_reacts_479_without_second_pass():
+    with _handler_env(results=[JevResult(choice="incorrect")]) as env:
+        await _invoke("m1")
 
-    build.assert_called_once()
-    assert build.call_args.args[1] == "我的做法"
-    run.assert_awaited_once()
-    save_group.assert_not_called()
-    save_private.assert_not_called()
-    send_group.assert_not_called()
-    react.assert_awaited_once_with("m1", "478")
+    env.build_first.assert_called_once()
+    assert env.build_first.call_args.args[1] == "我的做法"
+    env.run.assert_awaited_once()
+    env.build_second.assert_not_called()
+    env.send_group.assert_not_awaited()
+    env.react.assert_awaited_once_with("m1", "479")
+    env.save_group.assert_not_called()
+    env.save_private.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_group_sbmjev_incorrect_reacts_479():
-    values = _patches()
-    with patch.object(submit_mod, "get_today_problem", return_value=values["get_today_problem"]), \
-         patch.object(submit_mod, "load_problem_statement", return_value=values["load_problem_statement"]), \
-         patch.object(submit_mod, "_load_user_problem_history", return_value=[]), \
-         patch.object(submit_mod, "get_verified_official_editorial", return_value=None), \
-         patch.object(submit_mod, "is_curfew_active", return_value=False), \
-         patch.object(submit_mod, "build_jev_second_judge_request", return_value=values["build_jev_second_judge_request"]), \
-         patch.object(submit_mod, "run_jev", new=AsyncMock(return_value=_jev_result("incorrect"))), \
-         patch.object(submit_mod, "send_group_msg") as send_group, \
-         patch.object(submit_mod, "react_emoji", new=AsyncMock()) as react:
-        await submit_mod.handle_jev(
-            GID, UID, {"nickname": "Alice"}, "m1b",
-            "/sbmjev 我的做法", [], {"message_type": "group"},
-        )
+async def test_first_correct_without_editorial_reacts_478():
+    with _handler_env(results=[JevResult(choice="correct")]) as env:
+        await _invoke("m2")
 
-    send_group.assert_not_called()
-    react.assert_awaited_once_with("m1b", "479")
+    env.run.assert_awaited_once()
+    env.build_second.assert_not_called()
+    env.react.assert_awaited_once_with("m2", "478")
+
+
+@pytest.mark.asyncio
+async def test_second_pass_runs_and_can_react_478():
+    with _handler_env(
+        results=[JevResult(choice="correct"), JevResult(choice="correct")],
+        editorial=_editorial(),
+    ) as env:
+        await _invoke("m3")
+
+    assert env.run.await_count == 2
+    env.build_second.assert_called_once()
+    assert env.build_second.call_args.kwargs["first_judge_result"] == FIRST_PASS
+    assert env.build_second.call_args.args[3] == "Official editorial body"
+    env.react.assert_awaited_once_with("m3", "478")
+
+
+@pytest.mark.asyncio
+async def test_second_pass_can_overturn_to_479():
+    with _handler_env(
+        results=[JevResult(choice="correct"), JevResult(choice="incorrect")],
+        editorial=_editorial(),
+    ) as env:
+        await _invoke("m4")
+
+    assert env.run.await_count == 2
+    env.react.assert_awaited_once_with("m4", "479")
+
+
+@pytest.mark.asyncio
+async def test_second_pass_failure_falls_back_to_first_verdict():
+    with _handler_env(
+        results=[JevResult(choice="correct"), JevResult(failure_kind="timeout")],
+        editorial=_editorial(),
+    ) as env:
+        await _invoke("m5")
+
+    assert env.run.await_count == 2
+    env.react.assert_awaited_once_with("m5", "478")
 
 
 @pytest.mark.asyncio
 async def test_private_sbmjev_degrades_to_face_message():
-    sent = []
+    with _handler_env(results=[JevResult(choice="incorrect")]) as env:
+        await _invoke("m6", private=True)
 
-    async def fake_send_private(user_id, message):
-        sent.append((user_id, message))
-        return 1
-
-    values = _patches(load_problem_statement="Problem statement")
-    with patch.object(submit_mod, "get_private_current_problem", return_value=values["get_private_current_problem"]), \
-         patch.object(submit_mod, "load_problem_statement", return_value=values["load_problem_statement"]), \
-         patch.object(submit_mod, "_load_user_problem_history", return_value=[]), \
-         patch.object(submit_mod, "get_verified_official_editorial", return_value=None), \
-         patch.object(submit_mod, "is_curfew_active", return_value=False), \
-         patch.object(submit_mod, "build_jev_second_judge_request", return_value=values["build_jev_second_judge_request"]), \
-         patch.object(submit_mod, "run_jev", new=AsyncMock(return_value=_jev_result("incorrect"))), \
-         patch.object(submit_mod, "send_private_msg", side_effect=fake_send_private), \
-         patch.object(submit_mod, "send_group_msg") as send_group, \
-         patch.object(submit_mod, "react_emoji", new=AsyncMock()) as react, \
-         patch.object(submit_mod, "save_private_submission") as save_private:
-        await submit_mod.handle_jev(
-            GID, UID, {"nickname": "Alice"}, "m2",
-            "/sbmjev 我的做法", [], {"message_type": "private"},
-        )
-
-    send_group.assert_not_called()
-    react.assert_not_awaited()
-    save_private.assert_not_called()
-    assert len(sent) == 1
-    assert sent[0][1] == [{"type": "face", "data": {"id": "479"}}]
+    env.react.assert_not_awaited()
+    env.send_group.assert_not_awaited()
+    env.send_private.assert_awaited_once_with(
+        UID, [{"type": "face", "data": {"id": "479"}}]
+    )
+    env.save_private.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_sbmjev_requires_submission_text():
-    sent = []
-
-    async def fake_send_group(group_id, message):
-        sent.append((group_id, message))
-        return 1
-
-    with patch.object(submit_mod, "send_group_msg", side_effect=fake_send_group), \
+    with patch.object(submit_mod, "send_group_msg", new=AsyncMock()) as send_group, \
          patch.object(submit_mod, "run_jev", new=AsyncMock()) as run:
         await submit_mod.handle_jev(
-            GID, UID, {"nickname": "Alice"}, "m3",
+            GID, UID, {"nickname": "Alice"}, "m7",
             "/sbmjev", [], {"message_type": "group"},
         )
 
     run.assert_not_awaited()
-    assert len(sent) == 1
-    assert "用法" in sent[0][1][1]["data"]["text"]
+    send_group.assert_awaited_once()
+    text = send_group.call_args.args[1][1]["data"]["text"]
+    assert "用法" in text
 
 
 @pytest.mark.asyncio
-async def test_sbmjev_crash_reacts_312():
-    values = _patches()
-    with patch.object(submit_mod, "get_today_problem", return_value=values["get_today_problem"]), \
-         patch.object(submit_mod, "load_problem_statement", return_value=values["load_problem_statement"]), \
-         patch.object(submit_mod, "_load_user_problem_history", return_value=[]), \
-         patch.object(submit_mod, "get_verified_official_editorial", return_value=None), \
-         patch.object(submit_mod, "is_curfew_active", return_value=False), \
-         patch.object(submit_mod, "build_jev_second_judge_request", side_effect=RuntimeError("prompt drift")), \
-         patch.object(submit_mod, "send_group_msg") as send_group, \
-         patch.object(submit_mod, "react_emoji", new=AsyncMock()) as react:
-        await submit_mod.handle_jev(
-            GID, UID, {"nickname": "Alice"}, "m5",
-            "/sbmjev 我的做法", [], {"message_type": "group"},
-        )
+async def test_first_pass_crash_reacts_312():
+    with _handler_env(
+        results=[JevResult(choice="correct")],
+        first_error=RuntimeError("prompt drift"),
+    ) as env:
+        await _invoke("m8")
 
-    send_group.assert_not_called()
-    react.assert_awaited_once_with("m5", "312")
+    env.run.assert_not_awaited()
+    env.react.assert_awaited_once_with("m8", "312")
 
 
 @pytest.mark.asyncio
-async def test_sbmjev_failure_reacts_312():
-    values = _patches()
-    with patch.object(submit_mod, "get_today_problem", return_value=values["get_today_problem"]), \
-         patch.object(submit_mod, "load_problem_statement", return_value=values["load_problem_statement"]), \
-         patch.object(submit_mod, "_load_user_problem_history", return_value=[]), \
-         patch.object(submit_mod, "get_verified_official_editorial", return_value=None), \
-         patch.object(submit_mod, "is_curfew_active", return_value=False), \
-         patch.object(submit_mod, "build_jev_second_judge_request", return_value=values["build_jev_second_judge_request"]), \
-         patch.object(submit_mod, "run_jev", new=AsyncMock(return_value=JevResult(failure_kind="timeout"))), \
-         patch.object(submit_mod, "send_group_msg") as send_group, \
-         patch.object(submit_mod, "react_emoji", new=AsyncMock()) as react:
-        await submit_mod.handle_jev(
-            GID, UID, {"nickname": "Alice"}, "m4",
-            "/sbmjev 我的做法", [], {"message_type": "group"},
-        )
+async def test_first_pass_failure_reacts_312():
+    with _handler_env(results=[JevResult(failure_kind="timeout")]) as env:
+        await _invoke("m9")
 
-    send_group.assert_not_called()
-    react.assert_awaited_once_with("m4", "312")
+    env.build_first.assert_called_once()
+    env.react.assert_awaited_once_with("m9", "312")

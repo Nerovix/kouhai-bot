@@ -1979,23 +1979,18 @@ async def handle_jev(group_id: int, user_id: int, sender: dict,
         return
 
     passed = result.choice == "correct"
-    detail: list[str] = []
-    if result.model:
-        detail.append(result.model)
-    p_correct = result.probabilities.get("correct")
-    if p_correct is not None:
-        detail.append(f"correct {p_correct:.2f}")
-    if result.confidence is not None:
-        detail.append(f"confidence {result.confidence:.2f}")
-    text = f"Jev 判：{'通过 ✅' if passed else '不通过 ❌'}"
-    if detail:
-        text += f"（{'，'.join(detail)}）"
     logger.info(
         "[group_%s] jev judge result pid=%s user=%s model=%s choice=%s p_correct=%s confidence=%s input_tokens=%s",
         group_id, pid, user_id, result.model, result.choice,
-        p_correct, result.confidence, result.input_tokens,
+        result.probabilities.get("correct"), result.confidence, result.input_tokens,
     )
-    await _send_jev_text(scope, group_id, user_id, text)
+    # Feedback is reaction-only: correct → face 478, incorrect → face 479.
+    # Private chats have no reaction target, so degrade to sending the face.
+    face_id = "478" if passed else "479"
+    if scope == PRIVATE_SCOPE:
+        await send_private_msg(user_id, [build_face(face_id)])
+    else:
+        await react_emoji(message_id, face_id)
 
 
 async def _send_jev_text(scope: str, group_id: int, user_id: int, text: str) -> None:

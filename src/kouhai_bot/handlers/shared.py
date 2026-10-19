@@ -1461,6 +1461,7 @@ def build_jev_second_judge_request(
                 "instructions": (
                     "按 `judging_principles` 审查 `review_task`，判断 "
                     "`review_task.current_submission` 的核心做法是否正确。"
+                    "只输出正确/错误两种结果，不判断是否离题。"
                 ),
                 "criteria": {
                     "correct": (

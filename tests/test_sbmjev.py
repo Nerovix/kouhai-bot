@@ -44,13 +44,7 @@ def _patches(**overrides):
 
 
 @pytest.mark.asyncio
-async def test_group_sbmjev_judges_without_writing_state():
-    sent = []
-
-    async def fake_send_group(group_id, message):
-        sent.append((group_id, message))
-        return 1
-
+async def test_group_sbmjev_reacts_without_writing_state():
     values = _patches()
     with patch.object(submit_mod, "get_today_problem", return_value=values["get_today_problem"]), \
          patch.object(submit_mod, "load_problem_statement", return_value=values["load_problem_statement"]), \
@@ -59,7 +53,8 @@ async def test_group_sbmjev_judges_without_writing_state():
          patch.object(submit_mod, "is_curfew_active", return_value=False), \
          patch.object(submit_mod, "build_jev_second_judge_request", return_value=values["build_jev_second_judge_request"]) as build, \
          patch.object(submit_mod, "run_jev", new=AsyncMock(return_value=values["run_jev"])) as run, \
-         patch.object(submit_mod, "send_group_msg", side_effect=fake_send_group), \
+         patch.object(submit_mod, "send_group_msg") as send_group, \
+         patch.object(submit_mod, "react_emoji", new=AsyncMock()) as react, \
          patch.object(submit_mod, "save_user_submission") as save_group, \
          patch.object(submit_mod, "save_private_submission") as save_private:
         await submit_mod.handle_jev(
@@ -72,16 +67,33 @@ async def test_group_sbmjev_judges_without_writing_state():
     run.assert_awaited_once()
     save_group.assert_not_called()
     save_private.assert_not_called()
-    assert len(sent) == 1
-    assert sent[0][0] == GID
-    assert sent[0][1][0] == {"type": "at", "data": {"qq": str(UID)}}
-    reply = sent[0][1][1]["data"]["text"]
-    assert "通过" in reply
-    assert "jev-1.13.0" in reply
+    send_group.assert_not_called()
+    react.assert_awaited_once_with("m1", "478")
 
 
 @pytest.mark.asyncio
-async def test_private_sbmjev_is_open_and_stateless():
+async def test_group_sbmjev_incorrect_reacts_479():
+    values = _patches()
+    with patch.object(submit_mod, "get_today_problem", return_value=values["get_today_problem"]), \
+         patch.object(submit_mod, "load_problem_statement", return_value=values["load_problem_statement"]), \
+         patch.object(submit_mod, "_load_user_problem_history", return_value=[]), \
+         patch.object(submit_mod, "get_verified_official_editorial", return_value=None), \
+         patch.object(submit_mod, "is_curfew_active", return_value=False), \
+         patch.object(submit_mod, "build_jev_second_judge_request", return_value=values["build_jev_second_judge_request"]), \
+         patch.object(submit_mod, "run_jev", new=AsyncMock(return_value=_jev_result("incorrect"))), \
+         patch.object(submit_mod, "send_group_msg") as send_group, \
+         patch.object(submit_mod, "react_emoji", new=AsyncMock()) as react:
+        await submit_mod.handle_jev(
+            GID, UID, {"nickname": "Alice"}, "m1b",
+            "/sbmjev 我的做法", [], {"message_type": "group"},
+        )
+
+    send_group.assert_not_called()
+    react.assert_awaited_once_with("m1b", "479")
+
+
+@pytest.mark.asyncio
+async def test_private_sbmjev_degrades_to_face_message():
     sent = []
 
     async def fake_send_private(user_id, message):
@@ -98,6 +110,7 @@ async def test_private_sbmjev_is_open_and_stateless():
          patch.object(submit_mod, "run_jev", new=AsyncMock(return_value=_jev_result("incorrect"))), \
          patch.object(submit_mod, "send_private_msg", side_effect=fake_send_private), \
          patch.object(submit_mod, "send_group_msg") as send_group, \
+         patch.object(submit_mod, "react_emoji", new=AsyncMock()) as react, \
          patch.object(submit_mod, "save_private_submission") as save_private:
         await submit_mod.handle_jev(
             GID, UID, {"nickname": "Alice"}, "m2",
@@ -105,10 +118,10 @@ async def test_private_sbmjev_is_open_and_stateless():
         )
 
     send_group.assert_not_called()
+    react.assert_not_awaited()
     save_private.assert_not_called()
     assert len(sent) == 1
-    text = sent[0][1][0]["data"]["text"]
-    assert "不通过" in text
+    assert sent[0][1] == [{"type": "face", "data": {"id": "479"}}]
 
 
 @pytest.mark.asyncio

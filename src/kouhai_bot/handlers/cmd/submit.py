@@ -2041,11 +2041,21 @@ async def handle_jev(group_id: int, user_id: int, sender: dict,
     )
 
 
+# NapCat cannot serialise face ids 478/479/312 as private message segments
+# ("消息体无法解析") — they live in QQ's reaction-emoji space, not the classic
+# face space (314/123/289/14 do send fine). Private feedback therefore degrades
+# to a text emoji; groups still get a real reaction on the user's message.
+_PRIVATE_EMOJI_TEXT = {"478": "✅", "479": "❌", "312": "⚠️"}
+
+
 async def _send_jev_face(
     scope: str, group_id: int, user_id: int, message_id: str, face_id: str
 ) -> None:
     if scope == PRIVATE_SCOPE:
-        await send_private_msg(user_id, [build_face(face_id)])
+        await send_private_msg(
+            user_id,
+            build_plain_message(_PRIVATE_EMOJI_TEXT.get(face_id, "❓")),
+        )
     else:
         await react_emoji(message_id, face_id)
 

@@ -181,16 +181,26 @@ async def test_second_pass_failure_falls_back_to_first_verdict():
 
 
 @pytest.mark.asyncio
-async def test_private_sbmjev_degrades_to_face_message():
+async def test_private_sbmjev_degrades_to_text_emoji():
     with _handler_env(results=[JevResult(choice="incorrect")]) as env:
         await _invoke("m6", private=True)
 
     env.react.assert_not_awaited()
     env.send_group.assert_not_awaited()
     env.send_private.assert_awaited_once_with(
-        UID, [{"type": "face", "data": {"id": "479"}}]
+        UID, [{"type": "text", "data": {"text": "❌"}}]
     )
     env.save_private.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_private_sbmjev_failure_sends_warning_emoji():
+    with _handler_env(results=[JevResult(failure_kind="timeout")]) as env:
+        await _invoke("m10", private=True)
+
+    env.send_private.assert_awaited_once_with(
+        UID, [{"type": "text", "data": {"text": "⚠️"}}]
+    )
 
 
 @pytest.mark.asyncio

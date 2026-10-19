@@ -145,13 +145,7 @@ async def test_sbmjev_requires_submission_text():
 
 
 @pytest.mark.asyncio
-async def test_sbmjev_degrades_when_jev_is_unavailable():
-    sent = []
-
-    async def fake_send_group(group_id, message):
-        sent.append((group_id, message))
-        return 1
-
+async def test_sbmjev_failure_reacts_312():
     values = _patches()
     with patch.object(submit_mod, "get_today_problem", return_value=values["get_today_problem"]), \
          patch.object(submit_mod, "load_problem_statement", return_value=values["load_problem_statement"]), \
@@ -160,10 +154,12 @@ async def test_sbmjev_degrades_when_jev_is_unavailable():
          patch.object(submit_mod, "is_curfew_active", return_value=False), \
          patch.object(submit_mod, "build_jev_second_judge_request", return_value=values["build_jev_second_judge_request"]), \
          patch.object(submit_mod, "run_jev", new=AsyncMock(return_value=JevResult(failure_kind="timeout"))), \
-         patch.object(submit_mod, "send_group_msg", side_effect=fake_send_group):
+         patch.object(submit_mod, "send_group_msg") as send_group, \
+         patch.object(submit_mod, "react_emoji", new=AsyncMock()) as react:
         await submit_mod.handle_jev(
             GID, UID, {"nickname": "Alice"}, "m4",
             "/sbmjev 我的做法", [], {"message_type": "group"},
         )
 
-    assert "暂时不可用" in sent[0][1][1]["data"]["text"]
+    send_group.assert_not_called()
+    react.assert_awaited_once_with("m4", "312")

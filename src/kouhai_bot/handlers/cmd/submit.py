@@ -1973,9 +1973,8 @@ async def handle_jev(group_id: int, user_id: int, sender: dict,
             "[group_%s] jev judge failed pid=%s user=%s failure=%s",
             group_id, pid, user_id, result.failure_kind or "empty_choice",
         )
-        await _send_jev_text(
-            scope, group_id, user_id, "Jev 判题服务暂时不可用，稍后再试试？"
-        )
+        # Jev unavailable: same reaction-only channel, face 312.
+        await _send_jev_face(scope, group_id, user_id, message_id, "312")
         return
 
     passed = result.choice == "correct"
@@ -1986,7 +1985,12 @@ async def handle_jev(group_id: int, user_id: int, sender: dict,
     )
     # Feedback is reaction-only: correct → face 478, incorrect → face 479.
     # Private chats have no reaction target, so degrade to sending the face.
-    face_id = "478" if passed else "479"
+    await _send_jev_face(scope, group_id, user_id, message_id, "478" if passed else "479")
+
+
+async def _send_jev_face(
+    scope: str, group_id: int, user_id: int, message_id: str, face_id: str
+) -> None:
     if scope == PRIVATE_SCOPE:
         await send_private_msg(user_id, [build_face(face_id)])
     else:

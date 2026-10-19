@@ -57,6 +57,15 @@ llm:
     #   model_tag: "『QwenVL』"
     #   stream: true  # DashScope 自动使用 SSE
 
+# ── Jev 娱乐判题（/sbmjev，可选） ──
+# TypeSafe System One 决策模型；key 需绑定 Jev 渠道。
+# 接口与题型见 https://docs.rightapi.ai/docs/rc_jev/
+# jev:
+#   api_key: "sk-..."
+#   base_url: "https://www.rightapi.ai"
+#   model: "jev-latest"
+#   timeout_sec: 60
+
 # ── 群聊配置 ──
 current_group: 987654321  # 服务的 QQ 群号
 

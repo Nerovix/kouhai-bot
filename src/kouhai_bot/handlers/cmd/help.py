@@ -8,6 +8,7 @@ _PRIVATE_HELP_COMMANDS = {
     "problem",
     "tag",
     "submit",
+    "sbmjev",
     "clarify",
     "review",
     "feedback",

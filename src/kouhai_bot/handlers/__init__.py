@@ -27,6 +27,7 @@ _PRIVATE_ALLOWED_COMMANDS = {
     "setproblem",
     "problem",
     "submit",
+    "sbmjev",
     "clarify",
     "review",
     "feedback",

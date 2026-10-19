@@ -1417,6 +1417,66 @@ def build_second_judge_messages(
     ]
 
 
+_JEV_JSON_OUTPUT_RULE = "1) 只输出 JSON 对象，字段为 correct、reason、reply、reaction。\n"
+
+
+def build_jev_second_judge_request(
+    problem_text: str,
+    submission: str,
+    history: list[dict] | None,
+    editorial_text: str,
+    editorial_source: str = "",
+) -> dict:
+    """Build the Jev request for /sbmjev from the second-review prompt.
+
+    Reuses :func:`build_second_judge_messages` verbatim so the judging rules
+    and input payload stay identical to the production second review. Jev is a
+    decision model that cannot emit free-form JSON, so the only adaptation is
+    dropping the JSON-output rule/example and exposing the verdict as one
+    ``choice`` question instead.
+    """
+    messages = build_second_judge_messages(
+        problem_text,
+        submission,
+        history,
+        {},
+        editorial_text,
+        editorial_source,
+    )
+    principles = messages[0]["content"]
+    if _JEV_JSON_OUTPUT_RULE not in principles:
+        raise RuntimeError("second-judge prompt changed: JSON output rule not found")
+    principles = principles.replace(_JEV_JSON_OUTPUT_RULE, "")
+    if "输出示例：" in principles:
+        principles = principles.split("输出示例：", 1)[0].rstrip()
+    task = json.loads(messages[1]["content"])
+    return {
+        "state": {
+            "judging_principles": principles,
+            "review_task": task,
+        },
+        "questions": {
+            "verdict": {
+                "type": "choice",
+                "instructions": (
+                    "按 `judging_principles` 审查 `review_task`，判断 "
+                    "`review_task.current_submission` 的核心做法是否正确。"
+                ),
+                "criteria": {
+                    "correct": (
+                        "核心算法正确、复杂度满足限制、关键边界处理无误；"
+                        "即使与官方题解不同也算通过。"
+                    ),
+                    "incorrect": (
+                        "核心算法错误、复杂度过高、关键边界处理有误，"
+                        "或依赖题面之外的修改/放宽声称。"
+                    ),
+                },
+            }
+        },
+    }
+
+
 async def judge_submission_result(
     problem_text: str,
     submission: str,

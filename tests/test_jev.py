@@ -108,7 +108,7 @@ def test_jev_second_request_carries_first_pass_verdict():
 def _cfg(**overrides) -> BotConfig:
     cfg = BotConfig()
     cfg.jev_api_key = "test-key"
-    cfg.jev_base_url = "https://www.rightapi.ai"
+    cfg.jev_base_url = "https://jev.test"
     cfg.jev_model = "jev-latest"
     cfg.jev_timeout_sec = 5
     cfg.jev_max_retries = 1
@@ -138,7 +138,7 @@ async def test_run_jev_parses_choice(monkeypatch):
     monkeypatch.setattr(jev, "get_config", lambda: _cfg())
 
     async def fake_post(url, api_key, payload, timeout):
-        assert url == "https://www.rightapi.ai/v1/systemone"
+        assert url == "https://jev.test/v1/systemone"
         assert payload["model"] == "jev-latest"
         assert api_key == "test-key"
         return 200, SUCCESS_BODY
@@ -192,11 +192,11 @@ async def test_run_jev_rejects_malformed_answer(monkeypatch):
 @pytest.mark.asyncio
 async def test_run_jev_accepts_v1_suffixed_base(monkeypatch):
     monkeypatch.setattr(
-        jev, "get_config", lambda: _cfg(jev_base_url="https://www.rightapi.ai/v1/")
+        jev, "get_config", lambda: _cfg(jev_base_url="https://jev.test/v1/")
     )
 
     async def fake_post(url, api_key, payload, timeout):
-        assert url == "https://www.rightapi.ai/v1/systemone"
+        assert url == "https://jev.test/v1/systemone"
         return 200, SUCCESS_BODY
 
     monkeypatch.setattr(jev, "_post_once", fake_post)
@@ -210,6 +210,18 @@ async def test_run_jev_requires_api_key(monkeypatch):
 
     async def fake_post(*args, **kwargs):  # pragma: no cover - must not run
         raise AssertionError("no request should be made without a key")
+
+    monkeypatch.setattr(jev, "_post_once", fake_post)
+    result = await jev.run_jev({"x": 1}, {"verdict": {"type": "choice"}})
+    assert result.failure_kind == "not_configured"
+
+
+@pytest.mark.asyncio
+async def test_run_jev_requires_base_url(monkeypatch):
+    monkeypatch.setattr(jev, "get_config", lambda: _cfg(jev_base_url=""))
+
+    async def fake_post(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("no request should be made without a base_url")
 
     monkeypatch.setattr(jev, "_post_once", fake_post)
     result = await jev.run_jev({"x": 1}, {"verdict": {"type": "choice"}})

@@ -87,6 +87,25 @@ def test_config_allows_missing_qwen_model(monkeypatch, tmp_path):
     assert cfg.qwen_model == ""
 
 
+def test_config_jev_base_url_has_no_default(monkeypatch, tmp_path):
+    cfg = _from_yaml(_make_yaml(), monkeypatch, tmp_path)
+    assert cfg.jev_base_url == ""
+
+
+def test_config_jev_empty_base_url_does_not_fall_back(monkeypatch, tmp_path):
+    data = yaml.safe_load(_make_yaml())
+    data["jev"] = {"api_key": "sk-jev", "base_url": ""}
+    cfg = _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+    assert cfg.jev_base_url == ""
+
+
+def test_config_jev_base_url_strips_trailing_slash(monkeypatch, tmp_path):
+    data = yaml.safe_load(_make_yaml())
+    data["jev"] = {"api_key": "sk-jev", "base_url": "https://jev.test/"}
+    cfg = _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+    assert cfg.jev_base_url == "https://jev.test"
+
+
 def test_config_appends_legacy_multimodal_model_queue_to_general(monkeypatch, tmp_path):
     data = yaml.safe_load(_make_yaml())
     data["llm"]["multimodal_model"] = [

@@ -62,7 +62,7 @@ llm:
 # 接口与题型见 https://docs.rightapi.ai/docs/rc_jev/
 # jev:
 #   api_key: "sk-..."
-#   base_url: "https://www.rightapi.ai"
+#   base_url: "https://your-gateway.example"
 #   model: "jev-latest"
 #   timeout_sec: 60
 

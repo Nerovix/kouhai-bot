@@ -57,6 +57,18 @@ cp config.example.yaml config.yaml
 
 目前接口仅兼容 OpenAI 格式，不过大部分厂商都提供此格式。bot 在回答问题时会按照 llm 下的配置从上到下按顺序尝试连接。如果你不清楚如何填写配置，向 AI 提供你的厂商、模型需求和 apikey 以寻求帮助。
 
+#### Jev（可选）
+
+`/sbmjev` 娱乐判题使用独立的 `jev` 段。`api_key` 和 `base_url` 都必须显式配置，没有内置默认地址；缺任意一项时该功能会直接返回“未配置”，不会发起请求：
+
+```yaml
+jev:
+  api_key: "sk-..."
+  base_url: "https://your-gateway.example"
+  model: "jev-latest"
+```
+
+
 Bot 根据任务类型路由到两个模型队列：
 
 - `smart_model`：判题（`/submit`）和复盘（`/review`），需要强推理能力

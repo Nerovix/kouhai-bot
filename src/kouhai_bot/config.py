@@ -121,7 +121,7 @@ class BotConfig:
 
     # --- Jev (TypeSafe System One) decision model ---
     jev_api_key: str = ""
-    jev_base_url: str = "https://www.rightapi.ai"
+    jev_base_url: str = ""
     jev_model: str = "jev-latest"
     jev_timeout_sec: int = 60
     jev_max_retries: int = 1
@@ -215,9 +215,7 @@ class BotConfig:
         jev = data.get("jev", {})
         if isinstance(jev, dict):
             c.jev_api_key = str(jev.get("api_key", c.jev_api_key) or "")
-            c.jev_base_url = str(
-                jev.get("base_url", c.jev_base_url) or c.jev_base_url
-            ).rstrip("/")
+            c.jev_base_url = str(jev.get("base_url", "") or "").rstrip("/")
             c.jev_model = str(jev.get("model", c.jev_model) or c.jev_model)
             c.jev_timeout_sec = int(
                 jev.get("timeout_sec", c.jev_timeout_sec)

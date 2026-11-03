@@ -106,12 +106,14 @@ async def run_jev(
 ) -> JevResult:
     """Answer ``questions`` over ``state`` with one Jev request."""
     cfg = get_config()
-    if not cfg.jev_api_key:
-        logger.warning("jev judge requested but jev.api_key is not configured")
+    if not cfg.jev_api_key or not cfg.jev_base_url:
+        logger.warning(
+            "jev judge requested but jev.api_key/base_url is not configured"
+        )
         return JevResult(failure_kind="not_configured")
 
-    # Accept both the documented base (https://www.rightapi.ai) and the
-    # LLM-style base that already ends in /v1.
+    # Accept both a bare gateway base and the LLM-style base that already
+    # ends in /v1.
     base_url = cfg.jev_base_url.rstrip("/")
     if base_url.endswith("/v1"):
         base_url = base_url[: -len("/v1")]

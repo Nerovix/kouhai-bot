@@ -105,9 +105,67 @@
 - Q5 — 多群 scheduler_config 迁移（原 JSON 每群 enabled_jobs/rating override → groups 表）。[P1 groups 表已含 enabled_jobs/job_schedules/min_rating/max_rating]
 - Q6 — [已解决·整体删除] annotations（离线人工标注工具：首杀导出 bundle + 本地 HTML UI 标「AI 判得对不对」攒评测集）**owner 决定不要了，真删而非 disable**。已删除 src/kouhai_bot/annotations/、tools/annotation_server.py、tools/annotation_web/、tests/test_annotations.py，以及 DB schema 的 annotations 表。无任何运行时消费者（新 submit 早已移除自动导出 hook）。
 - Q7 — [已解决·owner 批准] /range 任何群友可设，维持现状（10s 冷却）。不加额外权限。
-- Q8 — [已解决·撤销] 不需要群名。group_openid 已唯一确定群；渲染/积分榜只用 bot 署名+用户昵称，无任何处依赖群名。（官方另有「获取群基本信息」API，若未来要显示群名可再接，本期不需要。）
+- Q8 — [已解决·撤销] 不需要群名。group_openid 已唯一确定群；渲染/积分榜只用 bot 署名+用户昵称，无任何处依赖群名。核实（2026-11-18）：官方「获取群基本信息」`GET /v2/groups/{gid}/info` 确实存在（返回 group_name/group_member_num/group_tags 等），但**同样仅白名单可用（11253）**，个人开发者拿不到——故即便想要群名也取不到，撤销决定成立。
 - Q9 — [已解决·纠正] **先前「官方拿不到昵称/头像」的结论过时，已推翻。** 官方文档（GROUP_AT_MESSAGE_CREATE / GROUP_MESSAGE_CREATE 页，更新于 2026-11-16）的 author=GroupUser 对象现含 `username`(QQ昵称)/`member_nickname`(群名片)/`avatar`(头像URL)/`member_role`/`member_openid`/`union_openid`；变更记录 20261116 条明确「群聊消息下发事件增加 member_nickname 及头像」「单聊增加发送者昵称、头像」。故**昵称无需白名单接口，直接取群事件 author 即可**。已修：`normalize_event` 解析 nickname（群名片优先→username）、透传 avatar/mentions/message_scene/msg_elements；dispatch 原读 `author.nickname`（错误字段，恒空）改为 member_nickname/username。头像：`author.avatar` 字段已存在，但事件示例尚未含 avatar 实例、社区无实测，**实际下发待抓包验证**；渲染暂仍用首字母色块假头像，验证后再决定是否加载远程头像。「获取群成员信息/列表」REST 接口仍是内邀白名单（11253），个人开发者普遍拿不到——但事件已带昵称，故不影响。owner 看到的「能认人的 bot」两类：协议端(NapCat/LLOneBot/go-cqhttp，完整 QQ 资料) 或官方 bot 取事件 author.username。openid 按应用隔离，拿不到真实 QQ 号。
-- Q10 — [延后·需实测，但格式已有文档] 官方**入站** @提及 / 引用回复 现已有结构化字段（2026-11-16 文档）：`mentions[]`(GroupMentionsUser：member_openid/username/member_nickname/scope=all|single/is_you)、`msg_elements[]`(递归 MsgElement，message_type=103 为引用消息)、`message_scene.ext`(msg_idx / ref_msg_idx 引用索引 / auth_token)。故 @提及不必再靠 `<@!openid>` 正则猜测，可直接读 mentions[]；引用回复走 msg_elements + ref_msg_idx。normalize_event 已透传这些字段。review 的「引用旧题卡定位」仍需实测确认引用消息如何携带被引消息内容/pid（ref_msg_idx 指向的消息需另查或随元素下发）→ 本期 review 仍仅定位最近 solved 题，引用定位延后。owner 指示：先发真实 @/引用消息抓 WS 载荷原文校准（同时验证 avatar 是否真下发）。PR 暂不合并，测到大体能用再合。
+- Q10 — [延后·需实测，机制已核实可行] 官方**入站** @提及 / 引用回复 现已有结构化字段（2026-11-16 文档）：`mentions[]`(GroupMentionsUser：member_openid/username/member_nickname/scope=all|single/is_you)、`msg_elements[]`(递归 MsgElement，message_type=103 为引用消息)、`message_scene.ext`(msg_idx / ref_msg_idx 引用索引 / auth_token)。normalize_event 已透传这些字段。**2026-11-18 核实关键结论**：① 引用消息正文**随事件下发**——type=103 的 `msg_elements[].content` 即被引消息文本（无需「按 idx 查消息」API，官方根本没有历史消息拉取接口）；② **发消息响应返回 `ext_info.ref_idx`**，故 bot 可把自己发的每张题卡的 ref_idx→pid 存本地映射，用户引用时入站 `ref_msg_idx` 与之匹配即可定位旧题卡（msg_elements 文本兜底）。→ 「review 引用旧题卡定位」**机制上可行**，比原先设想更明确；仍待真实载荷实测校准（尤其小程序卡片等非文本被引类型是否带 content）。出站引用用 `message_reference.message_id`(=REFIDX)。本期 review 仍仅定位最近 solved 题，引用定位延后到实测后。owner 指示：先发真实 @/引用消息抓 WS 载荷原文校准（同时验证 avatar 是否真下发）。PR 暂不合并，测到大体能用再合。
+
+## 官方 API 能力核实（2026-11-18，4 路子 Agent 抓现行文档逐条对照 D1–D16/Q1–Q10）
+
+> 目的：确认「我们以为不能做的真不能做、以为能做的真能做」，校验设计决定的背景知识是否完整。
+> 文档站 bot.q.qq.com/wiki（v1.50.0，页面多更新至 2026-11-16）。结论分四类。
+
+### A. 确认「真的不能做」（原假设成立，替代方案有效）
+- **群表情回应 reaction**：官方表情表态接口**仅频道**（`PUT /channels/.../reactions/...`，文档明示「目前仅支持频道」；消息类型支持表 群聊❌ 单聊❌ 频道✅）。→ D4/D10 用极短 emoji 文本消息替代 reaction **成立**。
+- **拍一拍 poke**：全站 + changelog 无此接口。→ 移除 poke 分支成立。
+- **历史消息拉取**：无任何「拉群消息记录/按 idx 查消息」API，只能实时事件 + 本地持久化。→ DB 持久化 + 事件驱动架构成立。
+- **群成员信息/列表**：`GET /v2/groups/{gid}/members[/{mid}]` 仍内邀白名单（11253）。返回字段实为 member_openid/username/member_role/bot/joined_at/union_openid（**无 avatar、无 nick**）。→ 不依赖此接口成立。
+- **群基本信息**：`GET /v2/groups/{gid}/info` 存在但**亦白名单 11253**（见 Q8）。→ 不需群名成立。
+- **真实 QQ 号**：openid 按应用隔离，拿不到真实 QQ 号。→ D1 openid 原生主键成立。
+
+### B. 确认「真的能做」（原假设成立）
+- 发群消息 `POST /v2/groups/{gid}/messages`；msg_type 0/2/7 互斥，markdown 时 content/ark 须空。✓ Q1
+- 原生 markdown `msg_type=2 + markdown.content`（template_id/custom_template_id 已废弃；2026-04-23 起自定义 markdown 开放所有机器人，无需申请模版）。✓ Q1
+- @ 某人 `<qqbot-at-user id="member_openid"/>` 仅 markdown 生效。✓
+- 被动回复 群 5min/5 次 per msg_id，msg_id+msg_seq 去重（40054005），**不占主动配额**。✓
+- @所有人 `<qqbot-at-everyone/>` 需 bot 管理员 + 每群每天 1 次。✓
+- 富媒体上传 `POST /v2/groups/{gid}/files` file_data base64 + srv_send_msg:false → file_info（ttl 秒，0=永久）；发图 msg_type=7 media.file_info；file_info 可复用（群上传仅发群）。✓ Q2
+- 撤回 `DELETE /v2/groups/{gid}/messages/{mid}`，自己 ≤2min（40064004），管理员可撤成员消息。✓
+- 主动 1000 条/群/日。✓（频控细节见 C）
+- 网关外连 WS：op0/1/2/6/7/9/10/11；identify token `"QQBot <token>"` + shard[0,1]；READY 含 session_id；resume op6{token,session_id,seq}。✓
+- access_token `POST /app/getAppAccessToken` {appId,clientSecret} → expires_in≤7200，到期前 60s 换新，失败也回 HTTP200 须看 body code。✓
+- intents：GROUP_AND_C2C=1<<25、INTERACTION=1<<26、GROUP_MEMBER_EVENT=1<<24。✓
+- 全量群消息 GROUP_MESSAGE_CREATE（intent 1<<25）：**无需平台特殊申请**，由**群主**在群内 bot 资料页把「可获取的群聊消息范围」设为「获取群内全部消息」即可；个人认证开发者可加自己任群主/管理员的群（上限 2000）。→ D7/D15 多群惰性服务 + echo 成立（限制在「公开使用」而非全量消息）。
+- 用户信息 `GET /v2/users/{openid}/info`（20261116 新增）返回 username/avatar/union_openid/allow_proactive_msg，需好友（40184001）。✓ Q9
+- mentions[] / msg_elements / message_scene 结构如 Q10。✓
+- keyboard 按钮 + INTERACTION_CREATE 存在（我们未用，能力边界已知）。
+
+### C. 纠正 / 过时（已更新代码与文档）
+- **C1 域名统一**：changelog 20260810「所有接口域名统一为 `api.bot.qq.com`」。旧 `api.sgroup.qq.com`/`bots.qq.com` 仍别名可用（探针实测 sgroup 能跑通），但已非推荐。**已改** config.py / rest.py 默认 api_base→`https://api.bot.qq.com`，config.example.yaml / AGENTS.md 同步。token_base 本就 api.bot.qq.com。
+- **C2 主动频控是双层**：Bot 维度 **60/qpm**（未认证 30）+ 单群接收侧 **20/qpm**。我们 ReplyBudget 只建模了 per-group 20/qpm（正确），**未建模 bot 全局 60/qpm**——多群总量大时需注意（当前规模无碍）。已在 AGENTS.md 注明。
+- **C3 @所有人支持纯文本**：changelog 20261026 起 `<qqbot-at-everyone/>` 在**文本+markdown**均生效（旧 `<@userid>`/`@everyone` 将弃用）。我们 contest_check 用 markdown @all 仍正确，无需改。已注明。
+- **C4 长度上限非官方数值**：2000/3000 码点仅见第三方实现，官方文档只给错误码 40054007「消息长度超限」无确切数字。→ 标注为经验值，待实测；超长转长图的保底策略无论如何安全。
+- **C5 沙箱基本废弃**：FAQ「管理员可直接体验测试，无需沙箱；旧管理端已不支持添加沙箱群」，改用「内部体验号码」(20 个)。sandbox.api.sgroup.qq.com 仅存旧缓存页。→ sandbox flag 保留但基本无用，config.example 已注明。
+- **C6 GROUP_MEMBER_UPDATE 不存在**：群成员事件仅 ADD/REMOVE（+ 新增 GROUP_JOIN_REQUEST 入群申请）。我们 events.py 只处理 ADD/REMOVE，正确。
+- **C7 富媒体上传细节更新**：file_data 现支持二进制直传（旧「暂未支持」过时）≤5M；file_type=4 文件已开放；支持 url 上传（平台转存，可能失败 850026）+ 分片上传；图片软限 20MB/硬限 200MB。我们 base64 直传 ~100KB PNG 不受影响。ttl=0=永久。已注明。
+
+### D. 新能力（本期未用，记录备查 / 未来可选）
+- **msg_type=8 图文卡片**（card, type=tuwen，20261028）：原生富卡片，可作长图之外的另一卡片形态。我们仍用高保真长图（刻意选择）。
+- **引用回复完整机制**（见 Q10）：入站 msg_elements[].content 带被引正文 + 出站响应 ext_info.ref_idx → 可建 ref_idx→pid 本地映射定位旧题卡；出站引用 message_reference.message_id。→ review 引用定位**可行**，待实测后实现。
+- **互动召回消息** is_wakeup=true：用户对话后 30 天内按 4 周期各 1 条召回。
+- **素材管理** `qqbot-media://` 图片引用 + force_verify_image_resource（20261021）。
+- **event_id 被动回复**：发消息可用 event_id（事件被动）替代 msg_id。
+- **union_group_openid / union_openid**：绑定三方应用时跨应用关联群/用户（20261116）。
+- **GROUP_JOIN_REQUEST 入群申请事件** + 群成员管理/禁言/入群审批接口（近期新增，多需权限）。
+- **keyboard 按钮**：markdown 底部挂按钮（≤5行×5），action 0跳转/1回调/2指令，permission 0指定/1管理员/2所有人；回调 INTERACTION_CREATE 须 3s 内 `PUT /interactions/{id}` 回应（同 id 仅一次）。FAQ(11/11) 称已开放所有机器人。
+
+### E. 实施待办（核实暴露的改进点，非阻塞）
+- **E1 入站事件去重**：官方提示消息可能重复推送，应按 message_id 去重。当前 dispatch **未做入站去重**——重复事件可能触发重复命令（如双 /submit）。建议加 per-group 近期 message_id LRU 去重。（待实现）
+- **E2 bot 全局 60/qpm**：多群规模上来后 ReplyBudget 需补 bot 维度节流。（当前规模无碍）
+- **E3 引用定位 + avatar 实测**：抓真实 @/引用/头像载荷校准（Q10），再实现 review 引用旧题卡 + 决定是否加载远程头像。
+- **E4 长度上限实测**：发超长文本/markdown 触发 40054007 校准确切码点数。
+
+### 核实总结
+设计决定的背景知识**基本完整且正确**：所有「不能做」的替代方案（reaction→emoji 文本、无 poke、无历史拉取、openid 主键、多群惰性、长图卡片）经核实**全部成立**；「能做」的核心链路（markdown @ / 被动主动配额 / 富媒体 / 撤回 / 网关 / intents / 全量群消息）经核实**全部可行**。唯一实质纠正为 **C1 域名统一**（已修代码默认值）；其余为细节补全（双层频控、@all 文本、长度经验值、沙箱废弃、上传细节）与新能力记录。**最大正向发现**：引用旧题卡定位机制比原设想更明确可行（Q10/E3）。无推翻性错误。
 
 ## 实施进度
 
@@ -151,3 +209,4 @@
 - owner 讨论（2026-11-18）：Q7 批准维持现状；Q8 撤销（group_openid 即唯一身份，不需群名）；Q9 定（官方无头像 URL，昵称仅白名单 username 可得→忽略，openid[:8] 兜底+字母色块头像）；Q6 知悉建议搁置（离线标注工具，核心跑通后再迁）；Q10 延后实测。PR 暂不合并，测到大体能用再合。
 - annotations 整体删除（2026-11-18，owner 定「不要了，真删」）：移除 annotations 包/annotation_server/annotation_web/test_annotations + DB annotations 表；Q6 关闭。确认个人开发者 bot 默认仅 openid 可得（昵称/角色需白名单，头像不暴露）。
 - Q9 纠正 + 昵称接线（2026-11-18，子 Agent 上网调查 + 官方文档原文核实）：官方 2026-11-16 起群事件 author 已带 username/member_nickname/avatar，「拿不到昵称/头像」结论过时推翻。修复 dispatch 误读 author.nickname（恒空）→ member_nickname/username；normalize_event 解析 nickname + 透传 avatar/mentions/message_scene/msg_elements；新增 2 测试，全量 612 passed。头像实际下发待实测，渲染暂仍用字母色块。Q10 入站 @/引用已有结构化文档字段（mentions[]/msg_elements type103/ref_msg_idx），透传就绪，仍待实测校准引用定位。
+- 官方 API 能力全面核实（2026-11-18，4 路子 Agent 抓现行文档逐条对照 D1–D16/Q1–Q10）：新增「官方 API 能力核实」章节（A 确认不能做 / B 确认能做 / C 纠正过时 / D 新能力 / E 待办）。结论：设计背景知识基本完整正确，所有「不能做」的替代方案与「能做」的核心链路全部核实成立，无推翻性错误。唯一实质纠正 C1 域名统一 api.bot.qq.com（已改 config.py/rest.py 默认值 + example/AGENTS.md）；细节补全 C2 双层频控(bot 60/qpm+群 20/qpm)、C3 @all 支持纯文本、C4 长度上限为经验值、C5 沙箱废弃、C6 无 GROUP_MEMBER_UPDATE、C7 富媒体上传细节。最大正向发现：引用旧题卡定位机制可行（msg_elements[].content 带被引正文 + 出站 ext_info.ref_idx 可建本地映射，Q10/E3）。待办 E1 入站事件去重（官方提示可能重复推送，dispatch 尚未去重）/E2 bot 全局节流/E3 引用+avatar 实测/E4 长度实测。

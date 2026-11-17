@@ -134,7 +134,7 @@ class BotConfig:
     # --- Official QQ bot API ---
     app_id: str = ""
     app_secret: str = ""
-    official_api_base: str = "https://api.sgroup.qq.com"
+    official_api_base: str = "https://api.bot.qq.com"
     official_token_base: str = "https://api.bot.qq.com"
     official_sandbox: bool = False
     official_bot_name: str = ""
@@ -264,7 +264,7 @@ class BotConfig:
         default_base = (
             "https://sandbox.api.sgroup.qq.com"
             if c.official_sandbox
-            else "https://api.sgroup.qq.com"
+            else "https://api.bot.qq.com"
         )
         c.official_api_base = str(
             official.get("api_base", default_base) or default_base

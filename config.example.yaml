@@ -10,8 +10,8 @@ official:
   app_id: "1900000000"           # 机器人 AppID（占位符，替换为你自己的）
   app_secret: "your-app-secret"  # 机器人 AppSecret（占位符）
   bot_name: "算法助手"            # 卡片署名显示名（官方无登录昵称 API）
-  sandbox: false                 # true 走沙箱 api 域名（开发调试用）
-  # api_base: "https://api.sgroup.qq.com"   # 默认正式环境 REST 域名
+  sandbox: false                 # 沙箱环境官方已基本废弃（管理员可直接体验测试），一般保持 false
+  # api_base: "https://api.bot.qq.com"      # 默认 REST 域名（2026-08-10 起官方统一为此域名）
   # token_base: "https://api.bot.qq.com"    # 默认 access_token 域名
   # intents: 50331648            # 默认 群+C2C(1<<25) | 互动(1<<26) | 群成员(1<<24)
                                  # 复读机需要群开启「获取群内全部消息」(GROUP_MESSAGE_CREATE)

@@ -2,12 +2,13 @@
 
 Instructions for AI coding assistants working on this codebase.
 
-The bot runs on the **official QQ bot API** (api.bot.qq.com / api.sgroup.qq.com),
-not NapCat/OneBot. It is a **pure group bot** serving **many groups** from one
-worker; each group is an independent view over a shared SQLite database. Private
-judge, 打星/user_groups, curfew, and jev have been removed. The full migration
-decision log lives in `docs/official-migration/DECISIONS.md` (D1–D16, open questions
-Q6–Q10); read it before changing architecture.
+The bot runs on the **official QQ bot API** (`api.bot.qq.com`, unified since
+2026-08-10; legacy `api.sgroup.qq.com` still aliases it), not NapCat/OneBot. It
+is a **pure group bot** serving **many groups** from one worker; each group is an
+independent view over a shared SQLite database. Private judge, 打星/user_groups,
+curfew, and jev have been removed. The full migration decision log lives in
+`docs/official-migration/DECISIONS.md` (D1–D16, open questions Q6–Q10, and the
+2026-11-18 API capability audit); read it before changing architecture.
 
 ## Operational Constraints
 
@@ -77,22 +78,30 @@ Transport: official/ (tokens/rest/gateway/sender/budget/media)
   send_group_markdown / send_group_at / send_group_media / send_group_image_bytes /
   send_group_image_url / react / recall). No OneBot segments. Content mapping:
   - incorrect verdict / clarify / congrats / short review → **markdown** (`msg_type=2`,
-    `<qqbot-at-user id="member_openid"/>` for @, `<qqbot-at-everyone/>` for @all).
+    `<qqbot-at-user id="member_openid"/>` for @; `<qqbot-at-everyone/>` for @all works
+    in both markdown and plain text since 2026-10-26, admin + 1/group/day).
   - card-level (problem / help / scoreboard / long review / editorial / history) →
     **long image** via `render/` (Playwright Chromium screenshot of a high-fidelity
     mobile-QQ forward-card HTML replica), uploaded as base64 media (`msg_type=7`).
+    A native 图文卡片 `msg_type=8` (card, type=tuwen) also exists since 2026-10-28 but
+    is unused — the long-image path is our deliberate high-fidelity choice.
   - pure confirmations (👀 ack / 👌 clear+feedback / 😵 offtopic / 🧐 second-judge) →
     tiny group text/emoji messages. The 🧐 second-judge signal carries **no text**
     ("二审" is dev jargon; the original was a reaction only).
   - `ReplyBudget` (`official/budget.py`): passive first (group 5min/5 replies per
-    msg_id), active fallback outside window/quota (1000/group/day persisted in DB,
-    20/qpm in memory); graceful degradation on failure.
-  - `react()` has no official reaction equivalent → sends a tiny emoji character
-    message. Recall = DELETE messages/{id} (own <2min).
+    msg_id, independent of active quota), active fallback outside window/quota
+    (1000/group/day persisted in DB; rate limit is two-layer — per-group 20/qpm in
+    memory plus a bot-wide 60/qpm cap, 30 if unverified). Graceful degradation on failure.
+  - `react()` has no official group reaction equivalent (表情表态 is channel-only,
+    confirmed 2026-11) → sends a tiny emoji character message. No poke API either.
+    Recall = DELETE messages/{id} (own ≤2min; admin may recall member messages).
 - **Media (Q2)**: `official/media.py` MediaCache keys content sha256 → file_info,
-  expires ttl−30s, reused across sends. Upload POST /v2/groups/{gid}/files with
-  `file_data` (base64), `srv_send_msg:false` returns file_info only; then send
-  `msg_type=7 media:{file_info}`.
+  expires ttl−30s (ttl=0 means permanent), reused across sends (group uploads send
+  to groups only). Upload POST /v2/groups/{gid}/files with `file_data` (base64; binary
+  direct upload ≤5M also supported), `srv_send_msg:false` returns file_info only; then
+  send `msg_type=7 media:{file_info}`. `url` upload (platform re-hosts) and chunked
+  upload exist; file_type 1=image 2=video 3=voice 4=file (opened). Our ~100KB card PNGs
+  use base64 direct upload.
 - **Render (P2)**: `render/browser.py` RenderBrowser singleton (headless Chromium,
   `screenshot_html(html, width=720, device_scale_factor=2)`); `render/html.py`
   forward-card HTML; `render/forward_card.py` `send_forward_card(sender, group,
@@ -127,6 +136,18 @@ Transport: official/ (tokens/rest/gateway/sender/budget/media)
   silent drop within cooldown), canonicalizes alias→canonical text, builds Ctx, and
   spawns (`create_task`) or awaits the handler. No reaction/notice/poke/friend-request
   branches (no official equivalent).
+- **Inbound events & quote (Q10, audit 2026-11-18)**: group events carry structured
+  `mentions[]` (member_openid/username/member_nickname/scope=all|single/is_you),
+  `message_scene.ext` (msg_idx/ref_msg_idx/auth_token), and recursive `msg_elements[]`
+  (message_type=103 = quote, whose nested `content` IS the quoted message text — no
+  history-fetch API exists). Send responses return `ext_info.ref_idx`, so a bot can map
+  its own posted cards' ref_idx→pid locally and match inbound `ref_msg_idx` to locate a
+  quoted problem card (review quoted-card targeting is feasible this way; still pending
+  real-payload 实测). Outbound quotes use `message_reference.message_id` (=REFIDX).
+  **Gateway may push duplicate events** — dedup inbound by message_id (recommended; not
+  yet enforced in dispatch). Member-info/list and group-basic-info REST APIs remain
+  whitelist-only (11253); user-info `/v2/users/{openid}/info` needs friendship (40184001).
+  Nickname/avatar come from the event author, not those APIs.
 - **Echo (auto-repeater)**: `echo.py` per-group `GroupEcho` buffers recent messages;
   when ≥`trigger_count` identical non-command messages stack and no bot entry is in the
   streak, with probability `echo_probability` it repeats the content via
@@ -164,10 +185,10 @@ The file is **never committed** (`.gitignore`). Copy `config.example.yaml`.
 |-----|---------|-------------|
 | `official.app_id` | `""` | Bot AppID (**required**; env `KOUHAI_APP_ID`) |
 | `official.app_secret` | `""` | Bot AppSecret (**required**; env `KOUHAI_APP_SECRET`) |
-| `official.bot_name` | `""` | Card attribution display name (no official nickname API) |
-| `official.sandbox` | `false` | Use sandbox REST domain |
-| `official.api_base` | `https://api.sgroup.qq.com` | REST base |
-| `official.token_base` | `https://api.bot.qq.com` | access_token base |
+| `official.bot_name` | `""` | Card attribution display name (bot's own name; user nicknames come from events) |
+| `official.sandbox` | `false` | Sandbox REST domain (official sandbox largely deprecated; admin tests directly) |
+| `official.api_base` | `https://api.bot.qq.com` | REST base (unified domain since 2026-08-10) |
+| `official.token_base` | `https://api.bot.qq.com` | access_token base (`/app/getAppAccessToken`) |
 | `official.intents` | `(1<<25)\|(1<<26)\|(1<<24)` | group+C2C / interaction / group-member |
 
 `BotConfig.validate_official()` fails fast if app_id/app_secret missing. `bot_qq` and
@@ -405,12 +426,16 @@ markdown `<qqbot-at-everyone/>` + lines via `sender.send_group_markdown`. @all n
 2. **Judge user_msg is JSON** `{"problem","submission","history"}` — do not change to plain text.
 3. **Statement joins with single `\n`** not `\n\n` (affects judging accuracy).
 4. **@mentions need markdown**: `<qqbot-at-user id="member_openid"/>` only works in `msg_type=2`
-   markdown; plain text @ is fake. @all = `<qqbot-at-everyone/>` (admin, 1/group/day).
+   markdown; plain text @ is fake. @all = `<qqbot-at-everyone/>` works in markdown AND plain
+   text (since 2026-10-26); needs admin, 1/group/day.
 5. **Contest notifications need @all** + 2s delay.
-6. **One content type per request**: msg_type 0/2/7 are mutually exclusive; markdown content/ark
-   must be empty when sending markdown. Text ~2000 / markdown ~3000 codepoints; longer → long image.
-7. **Passive reply window**: msg_id valid 5min/5 replies; same msg_id+msg_seq dup fails. ReplyBudget
-   handles passive→active degradation.
+6. **One content type per request**: msg_type 0/2/7 mutually exclusive (8=图文卡片 also exists);
+   markdown content/ark must be empty when sending markdown. Length limit ~2000 text / ~3000
+   markdown codepoints is empirical (official docs only give error 40054007, no exact number) —
+   longer → long image; verify by 实测.
+7. **Passive reply window**: msg_id valid 5min/5 replies; same msg_id+msg_seq dup fails; passive
+   does NOT consume active quota. Active rate limit is two-layer (per-group 20/qpm + bot-wide
+   60/qpm, 30 unverified). ReplyBudget handles passive→active degradation.
 8. **Nickname fallback is openid[:8]**, never a generic placeholder like "群友". Since
    2026-11-16 official group events carry `author.member_nickname`/`username` (use them;
    group card preferred); `users.nickname` stores the snapshot. `author.avatar` URL also

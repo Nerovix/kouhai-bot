@@ -273,7 +273,7 @@ def test_official_section_loaded(monkeypatch, tmp_path):
     assert cfg.app_id == "1900000000"
     assert cfg.app_secret == "secret"
     assert cfg.official_bot_name == "助手"
-    assert cfg.official_api_base == "https://api.sgroup.qq.com"
+    assert cfg.official_api_base == "https://api.bot.qq.com"
     cfg.validate_official()  # no raise
 
 
@@ -304,7 +304,7 @@ def test_official_defaults(monkeypatch, tmp_path):
     cfg = _from_yaml(_make_yaml(), monkeypatch, tmp_path)
     assert cfg.app_id == ""
     assert cfg.app_secret == ""
-    assert cfg.official_api_base == "https://api.sgroup.qq.com"
+    assert cfg.official_api_base == "https://api.bot.qq.com"
     assert cfg.official_token_base == "https://api.bot.qq.com"
     assert cfg.official_sandbox is False
     assert cfg.official_bot_name == ""
@@ -381,4 +381,4 @@ def test_official_credentials_are_stripped(monkeypatch, tmp_path):
 def test_official_non_mapping_section_ignored(monkeypatch, tmp_path):
     cfg = _from_yaml(_make_yaml(official="not-a-mapping"), monkeypatch, tmp_path)
     assert cfg.app_id == ""
-    assert cfg.official_api_base == "https://api.sgroup.qq.com"
+    assert cfg.official_api_base == "https://api.bot.qq.com"

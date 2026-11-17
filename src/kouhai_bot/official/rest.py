@@ -1,8 +1,9 @@
-"""Official QQ bot REST client (api.sgroup.qq.com v2).
+"""Official QQ bot REST client (api.bot.qq.com v2).
 
 Payload-agnostic: the sender builds message payloads (text / markdown /
 media); this layer adds ``Authorization: QQBot <token>`` and normalizes
-errors. Markdown template specifics are tracked as open question Q1.
+errors. Since 2026-08-10 all official endpoints unify on ``api.bot.qq.com``
+(the legacy ``api.sgroup.qq.com`` still aliases it).
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ class OfficialRestClient:
         self,
         tokens: AccessTokenManager,
         *,
-        api_base: str = "https://api.sgroup.qq.com",
+        api_base: str = "https://api.bot.qq.com",
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         self._tokens = tokens

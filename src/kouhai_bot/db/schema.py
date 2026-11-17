@@ -190,15 +190,4 @@ CREATE TABLE IF NOT EXISTS group_used (
     created_at   TEXT NOT NULL,
     PRIMARY KEY (group_openid, pid)
 );
-
--- Human-label annotation bundles per solved problem.
-CREATE TABLE IF NOT EXISTS annotations (
-    group_openid    TEXT NOT NULL,
-    pid             TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'pending',
-    bundle_json     TEXT NOT NULL DEFAULT '{}',
-    human_label_json TEXT NOT NULL DEFAULT '{}',
-    updated_at      TEXT NOT NULL,
-    PRIMARY KEY (group_openid, pid)
-);
 """

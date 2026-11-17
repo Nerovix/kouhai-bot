@@ -69,8 +69,8 @@ Transport: official/ (tokens/rest/gateway/sender/budget/media)
 - **Database (D3)**: SQLite + aiosqlite, single file `{data_dir}/kouhai.db`, WAL,
   foreign keys on, explicit `BEGIN IMMEDIATE` transactions. Tables: meta / users /
   groups / problems / editorials / group_posts / submissions / group_solves /
-  bad_reports / last_interaction / reply_budget / prefetch_slot / group_used /
-  annotations. Repos in `db/repos/*.py`; `Database` in `db/database.py`
+  bad_reports / last_interaction / reply_budget / prefetch_slot / group_used.
+  Repos in `db/repos/*.py`; `Database` in `db/database.py`
   (`get_database()`/`set_database()`). Transactions replace the old
   atomic_write_json + coordinator-lock read-modify-write sections.
 - **Transport (D4)**: `official/` exposes `OfficialSender` (send_group_text /
@@ -443,7 +443,7 @@ runtime/database/echo/cooldowns between tests. Handler tests inject a fake runti
 (`set_runtime(Runtime(db, OfficialSender(FakeRest(), ReplyBudget(db)), browser=None))`) and
 monkeypatch LLM helpers. The suite covers db repos, official transport, render, dispatch/registry/
 echo, coordinator/commands, sync, feedback, cards, model tags, config, main lifecycle, worker,
-prefetch/preparation, editorial followup/tutorials, scheduler, shared helpers, annotations.
+prefetch/preparation, editorial followup/tutorials, scheduler, shared helpers.
 
 ## GitHub CI
 

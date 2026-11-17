@@ -20,7 +20,7 @@
 
 ### D3 — 数据库：SQLite + aiosqlite
 - 单文件 `{data_dir}/kouhai.db`，WAL 模式，外键开启。单进程 bot 绝配。
-- schema：users / groups / problems / group_posts / submissions / user_solves(派生) / bad_reports / last_interaction / reply_budget / group_ctx / prefetch_slot / annotations。
+- schema：users / groups / problems / group_posts / submissions / user_solves(派生) / bad_reports / last_interaction / reply_budget / group_ctx / prefetch_slot / group_used。
 - 「群=视图」：每群 scoreboard = `submissions ⋈ group_posts WHERE group_openid=G` 的聚合；全局 user_solves 跨群。
 - 事务覆盖原 atomic_write_json 集合 + scoreboard read-modify-write（原仅 coordinator 锁保护）。
 - 保留语义：bad_reports 损坏 raise；last_interaction 损坏 warn+默认；request_id upsert；save-before-deliver；clear watermark；seq 首杀。
@@ -103,7 +103,7 @@
 - Q3 — ReplyBudget 主动配额持久化粒度（每群每日计数跨重启）与 20/qpm 节流实现。[P1 已实现：DB 每日计数 + 内存 qpm]
 - Q4 — picker 收敛为纯 fetch 后，选题排除集（used ∪ solved ∪ current）的 DB 查询口径。[P1 已实现 get_excluded_pids]
 - Q5 — 多群 scheduler_config 迁移（原 JSON 每群 enabled_jobs/rating override → groups 表）。[P1 groups 表已含 enabled_jobs/job_schedules/min_rating/max_rating]
-- Q6 — [owner 已知悉，建议本期搁置] annotations 是**离线人工标注工具**（非用户功能）：首杀导出 bundle（题面+每轮 submit 判定+judge 所见历史+human_label）到 annotations/pending/，配本地 HTML UI（tools/annotation_server.py）人工标「AI 判得对不对」攒评测集。现仍是旧 JSON 版，未接新 DB（新 submit 已移除自动导出 hook，仅 sync_annotation_bundles backfill 入口）。owner 记不起此功能；建议核心跑通后再单独迁 DB/openid，本期不动。测试已钉住边界（test_db_solves_are_not_visible_to_json_exporter_yet）。
+- Q6 — [已解决·整体删除] annotations（离线人工标注工具：首杀导出 bundle + 本地 HTML UI 标「AI 判得对不对」攒评测集）**owner 决定不要了，真删而非 disable**。已删除 src/kouhai_bot/annotations/、tools/annotation_server.py、tools/annotation_web/、tests/test_annotations.py，以及 DB schema 的 annotations 表。无任何运行时消费者（新 submit 早已移除自动导出 hook）。
 - Q7 — [已解决·owner 批准] /range 任何群友可设，维持现状（10s 冷却）。不加额外权限。
 - Q8 — [已解决·撤销] 不需要群名。group_openid 已唯一确定群；渲染/积分榜只用 bot 署名+用户昵称，无任何处依赖群名。（官方另有「获取群基本信息」API，若未来要显示群名可再接，本期不需要。）
 - Q9 — [已解决] 头像：官方 API **不暴露**用户头像 URL（「获取群成员信息」GET /v2/groups/{gid}/members/{member_openid} 返回 member_openid/username/member_role/bot/joined_at/union_openid，无 avatar 字段）→ 渲染用昵称首字母色块假头像（render/html.py 已实现）。昵称：该接口 `username` 即昵称，但属**白名单/内邀能力**（未开通返回 11253，需联系平台运营申请），默认拿不到。owner 定：忽略真昵称，保持 openid[:8] 短码兜底，不做 /nick；未来若申请到白名单可再接 username。
@@ -138,7 +138,7 @@
   - 测试套件 overhaul：conftest 改 aiohttp 网络隔离 + 全局 runtime 复位；删除/重写全部 legacy 测试，新增官方架构覆盖。全量 **618 passed**。
   - 实施发现（非 bug，记录备查）：
     - prefetch READY slot 实际仍是 JSON（`groups/<gid>/next_problem.json` v2）；DB `prefetch_slot` 表 + repos 已建但**未启用**（死代码）。DB 仅用于 slot 校验读取（rating/current/solves/statement sha）。是否收敛入 DB 留待 owner 定。
-    - annotations 导出仍是 JSON 离线工具（Q6 延后）：读 JSON scoreboard.json/problem_summaries.json，不读 SQLite group_solves；新 submit.py 已移除首杀自动导出 hook，仅 sync_annotation_bundles backfill 入口。测试用 `test_db_solves_are_not_visible_to_json_exporter_yet` 显式钉住该边界，Q6 落地时会响亮失败。
+    - annotations 导出当时仍是 JSON 离线工具（Q6）——**后于 2026-11-18 按 owner 决定整体删除**（见 Q6），相关边界测试一并移除。
     - cards.py `_bot_reply_text` 对「reply 内嵌 tag 但无 model_tag 字段」的 legacy 记录会渲染 0 次 tag（AGENTS.md 旧文档说渲染 1 次）。全新建库（D1）下所有记录都带 model_tag 字段，该 legacy 情形不可达，故不改源码。
 
 ## 变更日志
@@ -149,3 +149,4 @@
 - P4 完成：/sync 跨群拉取（群=视图物化，精确去重，含通过加分）。
 - P5 完成：删除 NapCat/私聊/打星/宵禁/jev 模块；README/AGENTS.md/config.example 改写；测试 overhaul 全量 618 passed；记录 prefetch JSON-slot/annotations Q6 边界/cards legacy-tag 三项实施发现。
 - owner 讨论（2026-11-18）：Q7 批准维持现状；Q8 撤销（group_openid 即唯一身份，不需群名）；Q9 定（官方无头像 URL，昵称仅白名单 username 可得→忽略，openid[:8] 兜底+字母色块头像）；Q6 知悉建议搁置（离线标注工具，核心跑通后再迁）；Q10 延后实测。PR 暂不合并，测到大体能用再合。
+- annotations 整体删除（2026-11-18，owner 定「不要了，真删」）：移除 annotations 包/annotation_server/annotation_web/test_annotations + DB annotations 表；Q6 关闭。确认个人开发者 bot 默认仅 openid 可得（昵称/角色需白名单，头像不暴露）。

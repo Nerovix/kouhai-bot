@@ -14,6 +14,16 @@ import warnings
 import pytest
 
 
+@pytest.fixture
+async def db(tmp_path):
+    from kouhai_bot.db import Database
+
+    database = Database(tmp_path / "test.db")
+    await database.open()
+    yield database
+    await database.close()
+
+
 @pytest.fixture(autouse=True)
 def _block_real_napcat_http(monkeypatch):
     async def _blocked(action, data):

@@ -131,6 +131,15 @@ class BotConfig:
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     qwen_model: str = ""
 
+    # --- Official QQ bot API ---
+    app_id: str = ""
+    app_secret: str = ""
+    official_api_base: str = "https://api.sgroup.qq.com"
+    official_token_base: str = "https://api.bot.qq.com"
+    official_sandbox: bool = False
+    official_bot_name: str = ""
+    official_intents: int = (1 << 25) | (1 << 26) | (1 << 24)
+
     # --- Group ---
     current_group: int = 0
 
@@ -154,6 +163,17 @@ class BotConfig:
     def __post_init__(self) -> None:
         if not self.sessions_dir:
             self.sessions_dir = os.path.join(self.data_dir, "sessions")
+
+    def validate_official(self) -> None:
+        """Fail fast when official-API credentials are missing (runtime gate)."""
+        if not self.app_id:
+            raise RuntimeError(
+                "official.app_id is required (or set KOUHAI_APP_ID)"
+            )
+        if not self.app_secret:
+            raise RuntimeError(
+                "official.app_secret is required (or set KOUHAI_APP_SECRET)"
+            )
 
     @classmethod
     def from_yaml(cls) -> BotConfig:
@@ -231,6 +251,32 @@ class BotConfig:
         c.qwen_api_key = str(qwen.get("api_key", c.qwen_api_key))
         c.qwen_base_url = str(qwen.get("base_url", c.qwen_base_url))
         c.qwen_model = str(qwen.get("model", ""))
+
+        # --- Official QQ bot API ---
+        official = data.get("official", {})
+        if not isinstance(official, dict):
+            official = {}
+        c.app_id = str(
+            official.get("app_id", "") or os.environ.get("KOUHAI_APP_ID", "")
+        ).strip()
+        c.app_secret = str(
+            official.get("app_secret", "") or os.environ.get("KOUHAI_APP_SECRET", "")
+        ).strip()
+        c.official_sandbox = bool(official.get("sandbox", c.official_sandbox))
+        default_base = (
+            "https://sandbox.api.sgroup.qq.com"
+            if c.official_sandbox
+            else "https://api.sgroup.qq.com"
+        )
+        c.official_api_base = str(
+            official.get("api_base", default_base) or default_base
+        ).rstrip("/")
+        c.official_token_base = str(
+            official.get("token_base", c.official_token_base) or c.official_token_base
+        ).rstrip("/")
+        c.official_bot_name = str(official.get("bot_name", c.official_bot_name))
+        if official.get("intents") is not None:
+            c.official_intents = int(official["intents"])
 
         # --- Group ---
         if "current_group" not in data:

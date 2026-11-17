@@ -245,3 +245,39 @@ def test_provider_entry_not_dict_raises(monkeypatch, tmp_path):
     data["llm"]["general_model"] = ["not-a-dict"]
     with pytest.raises(RuntimeError, match="must be a mapping"):
         _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+
+
+def test_official_section_loaded(monkeypatch, tmp_path):
+    monkeypatch.delenv("KOUHAI_APP_ID", raising=False)
+    monkeypatch.delenv("KOUHAI_APP_SECRET", raising=False)
+    cfg = _from_yaml(_make_yaml(official={
+        "app_id": "1900000000", "app_secret": "secret", "bot_name": "助手",
+    }), monkeypatch, tmp_path)
+    assert cfg.app_id == "1900000000"
+    assert cfg.app_secret == "secret"
+    assert cfg.official_bot_name == "助手"
+    assert cfg.official_api_base == "https://api.sgroup.qq.com"
+    cfg.validate_official()  # no raise
+
+
+def test_official_sandbox_base(monkeypatch, tmp_path):
+    cfg = _from_yaml(_make_yaml(official={
+        "app_id": "1", "app_secret": "s", "sandbox": True,
+    }), monkeypatch, tmp_path)
+    assert cfg.official_api_base == "https://sandbox.api.sgroup.qq.com"
+
+
+def test_official_env_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("KOUHAI_APP_ID", "env-app")
+    monkeypatch.setenv("KOUHAI_APP_SECRET", "env-secret")
+    cfg = _from_yaml(_make_yaml(), monkeypatch, tmp_path)
+    assert cfg.app_id == "env-app"
+    assert cfg.app_secret == "env-secret"
+
+
+def test_validate_official_missing_raises(monkeypatch, tmp_path):
+    monkeypatch.delenv("KOUHAI_APP_ID", raising=False)
+    monkeypatch.delenv("KOUHAI_APP_SECRET", raising=False)
+    cfg = _from_yaml(_make_yaml(), monkeypatch, tmp_path)
+    with pytest.raises(RuntimeError, match="app_id"):
+        cfg.validate_official()

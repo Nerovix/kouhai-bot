@@ -12,6 +12,18 @@ napcat_ws_port: 8097       # WebSocket 监听端口
 napcat_http_host: "127.0.0.1"  # NapCat HTTP API 地址
 napcat_http_port: 3000     # NapCat HTTP API 端口
 
+# ── 官方 QQ 机器人 API（移植目标） ──
+# 凭证也可用环境变量 KOUHAI_APP_ID / KOUHAI_APP_SECRET 提供（优先级低于此处显式值）。
+# 切勿把真实 app_secret 提交进 git。
+official:
+  app_id: "1900000000"          # 机器人 AppID（占位符）
+  app_secret: "your-app-secret"  # 机器人 AppSecret（占位符）
+  bot_name: "算法助手"           # 卡片署名显示名（官方无登录昵称 API）
+  sandbox: false                 # true 走沙箱 api 域名
+  # api_base: "https://api.sgroup.qq.com"   # 默认正式环境
+  # token_base: "https://api.bot.qq.com"
+  # intents: 50331648            # 默认 群+C2C(1<<25) | 互动(1<<26) | 群成员(1<<24)
+
 # ── LLM 配置 ──
 # Bot 使用两个模型队列，按顺序尝试每个 provider
 # 每个队列可以配置多个 provider，失败时自动 fallback

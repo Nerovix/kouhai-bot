@@ -2366,12 +2366,13 @@ async def translate_editorial_to_zh(
 
 # ── Contest checking ────────────────────────────────────────────────────
 
-async def check_contests_for_group(group_id: int) -> None:
-    """Check CF API for upcoming contests and notify group."""
+async def check_contests_for_group(group_openid: str) -> None:
+    """Check CF API for upcoming contests and notify group (@all, markdown)."""
     import asyncio
     import aiohttp
     from datetime import datetime, timezone, timedelta
-    from ..napcat.client import send_group_msg
+    from ..official.sender import at_everyone_tag
+    from .runtime import get_runtime
 
     TZ = timezone(timedelta(hours=8))
     try:
@@ -2429,7 +2430,5 @@ async def check_contests_for_group(group_id: int) -> None:
         lines.append(f"{start_str} {rel} | {name}（{dur_str}）")
 
     await asyncio.sleep(2)
-    await send_group_msg(group_id, [
-        {"type": "at", "data": {"qq": "all"}},
-        {"type": "text", "data": {"text": "\n" + "\n".join(lines)}},
-    ])
+    markdown = f"{at_everyone_tag()}\n" + "\n".join(lines)
+    await get_runtime().sender.send_group_markdown(group_openid, markdown)

@@ -1,24 +1,14 @@
-"""/help command — dynamically generated from command registry."""
+"""/help — dynamically generated from the command registry, delivered as a card."""
+
+from __future__ import annotations
 
 from .. import registry
 from ..registry import CommandDef, all_commands
-
-_PRIVATE_HELP_COMMANDS = {
-    "setproblem",
-    "problem",
-    "tag",
-    "submit",
-    "sbmjev",
-    "clarify",
-    "review",
-    "feedback",
-    "clear",
-    "sync",
-    "testcd",
-    "status",
-    "help",
-}
-_GROUP_HELP_HIDDEN_COMMANDS = {"setproblem", "sync", "testcd"}
+from ..context import Ctx
+from ..runtime import get_runtime
+from ...config import get_config
+from ...render.forward_card import send_forward_card
+from ...render.html import text_to_html
 
 
 def _format_command_name(cmd: CommandDef) -> str:
@@ -33,80 +23,37 @@ def _format_duration(seconds: int) -> str:
     if seconds == 0:
         return "无冷却"
     if seconds % 60 == 0:
-        minutes = seconds // 60
-        return f"{minutes}分钟"
+        return f"{seconds // 60}分钟"
     return f"{seconds}秒"
 
 
 def _description_for_help(cmd: CommandDef, newproblem_cooldown: int) -> str:
     if cmd.name == "newproblem":
-        cooldown = _format_duration(newproblem_cooldown)
-        return f"刷一道新题（未解须 --force；{cooldown}冷却）"
+        return f"刷一道新题（未解须 --force；{_format_duration(newproblem_cooldown)}冷却）"
     return cmd.description
 
 
-def _command_lines(cmds: list[CommandDef], newproblem_cooldown: int) -> list[str]:
-    lines: list[str] = []
-    for cmd in cmds:
-        args = f" {cmd.usage}" if cmd.usage else ""
-        description = _description_for_help(cmd, newproblem_cooldown)
-        lines.append(f"{_format_command_name(cmd)}{args} — {description}")
-    return lines
-
-
-async def handle(group_id: int, user_id: int, sender: dict,
-                 message_id: str, raw_text: str, segments: list,
-                 event: dict) -> None:
-    """Generate help text from registry, deliver as merged-forward card."""
-    from ...config import get_config
-    from ...napcat.client import (
-        build_node,
-        build_plain_message,
-        resolve_bot_display_name,
-        send_group_msg,
-        send_private_msg,
-        send_forward_card_with_legacy_fallback,
-    )
+def _help_text() -> str:
     cfg = get_config()
-    cmds = all_commands()
-    is_private = event.get("message_type") == "private"
-    if is_private:
-        visible = [cmd for cmd in cmds if cmd.name in _PRIVATE_HELP_COMMANDS]
-        lines = ["private judge 可用指令："]
-        lines.extend(_command_lines(visible, cfg.newproblem_cooldown))
-        lines.append("")
+    cooldown = int(getattr(cfg, "newproblem_cooldown", 300))
+    lines = ["可用指令："]
+    for cmd in all_commands():
+        args = f" {cmd.usage}" if cmd.usage else ""
         lines.append(
-            "🔒 private judge：私聊可用 /setproblem(/sp) 选当前群题、CF题号/链接、random 或引用题目卡片；"
-            "private 通过不自动加分，只有当前群题可在群里 /sync 同步。"
-            "/sync 会用另一侧记录覆盖当前侧，可能丢掉当前侧这题交流历史；打星用户提交 CD 内只同步 clarify，CD 后可正常同步。"
+            f"{_format_command_name(cmd)}{args} — {_description_for_help(cmd, cooldown)}"
         )
-    else:
-        visible = [cmd for cmd in cmds if cmd.name not in _GROUP_HELP_HIDDEN_COMMANDS]
-        lines = ["可用指令："]
-        lines.extend(_command_lines(visible, cfg.newproblem_cooldown))
-        lines.append("")
-        lines.append(
-            "🔒 private judge：可以私聊我单独选题、提交和复盘；当前群题可同步回来，详细用法请私聊发 /help。"
-        )
-    text = "\n".join(lines)
-    msg = build_plain_message(text)
+    return "\n".join(lines)
 
-    bot_name = await resolve_bot_display_name(None if is_private else group_id)
-    nodes = [build_node(user_id=cfg.bot_qq, nickname=bot_name, content=msg)]
 
-    if is_private:
-        if await send_forward_card_with_legacy_fallback(
-            destination="private", user_id=user_id, nodes=nodes, self_send_messages=[msg]
-        ):
-            return
-        await send_private_msg(user_id, msg)
-        return
-
-    if await send_forward_card_with_legacy_fallback(
-        destination="group", group_id=group_id, nodes=nodes, self_send_messages=[msg]
-    ):
-        return
-    await send_group_msg(group_id, msg)
+async def handle(ctx: Ctx) -> None:
+    text = _help_text()
+    rt = get_runtime()
+    bot_name = rt.sender.bot_name or "算法助手"
+    nodes = [{"nickname": bot_name, "content_html": text_to_html(text), "content_text": text}]
+    await send_forward_card(
+        rt.sender, ctx.group_openid, nodes, title="帮助",
+        msg_id=ctx.message_id, text_fallback=text, browser=rt.browser,
+    )
 
 
 def register() -> None:

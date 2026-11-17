@@ -1,308 +1,167 @@
-"""/sync — copy current-problem history between group and private judge."""
+"""/sync — pull this user's current-problem history from all other groups.
+
+Group = view: a solve/submission is global (user × problem); each group only
+sees problems posted in it. /sync in group G for the current problem P pulls
+the user's P records from every other group, materializes them into G's view
+(tagged ``synced``, source group hidden), and scores a first blood if the pull
+brings a correct verdict to an unsolved G.
+
+Merge is pure-string and zero-LLM: sort by global timestamp, exact-dedup on
+(content, result) keeping the earliest, and skip anything G already has — so
+re-running /sync is idempotent. Empty source aborts without overwriting.
+"""
 
 from __future__ import annotations
 
 import logging
 import re
-from collections import Counter
 
 from .. import registry
 from ..registry import CommandDef
-from ...napcat.client import build_at, build_plain_message, build_text, react_emoji, send_group_msg, send_private_msg
-from ...config import get_config
-from ...llm import append_model_tag
-from ...private_judge import (
-    GROUP_SCOPE,
-    PRIVATE_SCOPE,
-    copy_records,
-    current_group_pid,
-    first_correct_submit_record,
-    get_private_current_pid,
-    group_problem_history,
-    is_group_problem_solved,
-    load_private_last_interaction,
-    load_private_problem_history,
-    mark_private_solved,
-    remember_private_last_interaction,
-    replace_group_problem_clarifies,
-    replace_group_problem_history,
-    replace_private_problem_clarifies,
-    replace_private_problem_history,
-    send_history_card,
-)
-from ...user_groups import (
-    get_user_group,
-    is_default_group,
-    is_dynamic_submit_delay_enabled,
-    submit_remaining_sec,
-)
-from ..shared import (
-    fetch_group_member_nickname_map,
-    format_points,
-    get_today_problem,
-    load_group_last_interaction,
-    load_known_problem_ratings,
-    load_scoreboard,
-    rating_to_points,
-    remember_group_last_interaction,
-)
-from .submit import (
-    _reveal_problem_source,
-    _update_scoreboard_for_pid,
-    has_active_problem_request,
-    run_group_state_update,
-)
+from ..context import Ctx
+from .. import state
+from ..cards import send_history_card
+from ..shared import append_model_tag, format_points
+from ...db.repos import feedback, posts, submissions
+from ...db.repos.submissions import REPLIED_RESULTS
 from ...editorial_followup import schedule_post_solve_editorial_followup
+from .submit import has_active_problem_request, run_group_state_update
 
 logger = logging.getLogger("kouhai-bot.cmd.sync")
-OK_REACTION_ID = "128076"
 
 
-def _is_starred_limited(user_id: int, group_id: int) -> bool:
-    return is_dynamic_submit_delay_enabled(get_user_group(user_id)) and submit_remaining_sec(user_id, group_id) > 0
+def _problem_label(problem: dict, pid: str) -> str:
+    parts = [f"CF{pid}"]
+    name = str(problem.get("name", "") or "").strip()
+    if name:
+        parts.append(name)
+    rating = str(problem.get("rating", "") or "").strip()
+    if rating and rating != "?":
+        parts.append(rating)
+    return " ".join(parts)
 
 
-def _only_clarifies(records: list[dict]) -> list[dict]:
-    return [item for item in records if item.get("type") == "clarify"]
+def _dedup_key(record: dict) -> tuple[str, str]:
+    return (str(record.get("content", "") or ""), str(record.get("result", "") or ""))
 
 
-async def _history_display_names(group_id: int, user_id: int, sender: dict) -> tuple[str, str]:
-    """(user, bot) display names for the history chat-record card.
-
-    One member-list fetch; the user falls back to the sender payload, the bot
-    to an empty string (the card layer substitutes a generic name).
-    """
-    try:
-        nickname_map = await fetch_group_member_nickname_map(group_id)
-    except Exception:
-        nickname_map = {}
-    user_name = nickname_map.get(str(user_id)) or sender.get("card") or sender.get("nickname") or str(user_id)
-    bot_name = nickname_map.get(str(get_config().bot_qq), "")
-    return user_name, bot_name
-
-
-async def _send_text(scope: str, group_id: int, user_id: int, text: str) -> None:
-    if scope == PRIVATE_SCOPE:
-        await send_private_msg(user_id, build_plain_message(text))
-    else:
-        await send_group_msg(group_id, [build_at(user_id), build_text(f" {text}")])
-
-
-async def _react_group_success(message_id: str) -> None:
-    try:
-        await react_emoji(message_id, OK_REACTION_ID)
-    except Exception as e:
-        logger.warning("failed to react to successful sync %s: %s", message_id, e)
-
-
-def _synced_record_counts(records: list[dict], *, scored_correct: bool) -> dict[str, int]:
-    counter = Counter(str(item.get("type", "") or "") for item in records if isinstance(item, dict))
-    return {
-        "synced_submit_count": int(counter.get("submit", 0)),
-        "synced_clarify_count": int(counter.get("clarify", 0)),
-        "synced_review_count": int(counter.get("review", 0)),
-        "synced_correct_count": 1 if scored_correct else 0,
-    }
-
-
-async def _score_synced_private_ac(
-    group_id: int, user_id: int, sender: dict, pid: str, model_tag: str = "",
-) -> tuple[str, bool]:
-    problem = get_today_problem(group_id)
-    if not problem or str(problem.get("today", "") or "") != pid:
-        return "", False
-    if is_group_problem_solved(group_id, pid):
-        return "群里已经有人先通过这题了，本次只同步记录，不再加分。", False
-
-    nickname = sender.get("card") or sender.get("nickname") or str(user_id)
-
-    def _update():
-        sb = load_scoreboard(group_id)
-        if any(str(item.get("problem", "") or "") == pid for item in sb.get("solves", [])):
-            return None
-        return _update_scoreboard_for_pid(group_id, user_id, nickname, pid, problem)
-
-    updated = await run_group_state_update(group_id, _update)
-    if updated is None:
-        return "群里已经有人先通过这题了，本次只同步记录，不再加分。", False
-    is_fb, solved, top5, sb = updated
-    user_group = None
-    ranked = []
-    try:
-        user_group = get_user_group(user_id)
-        from ..shared import build_scoreboard_entries
-        ranked = build_scoreboard_entries(group_id, sb, user_group_name=user_group.name)
-    except Exception:
-        ranked = []
-    current_entry = next((entry for entry in ranked if str(entry["user_id"]) == str(user_id)), None)
-    rating = load_known_problem_ratings(group_id, {pid}).get(pid)
-    rank = int(current_entry["rank"]) if current_entry else 1
-    total_score = format_points(float(current_entry["score"])) if current_entry else "0"
-    score_gain = format_points(rating_to_points(rating)) if rating is not None else "0"
-    cheer = (
-        f"恭喜拿下本题一血！🎉 本题 +{score_gain} 分（共 {solved} 题，总分 {total_score}），当前第 {rank}"
-        if is_fb
-        else f"做对了！🎉 本题 +{score_gain} 分（共 {solved} 题，总分 {total_score}），当前第 {rank}"
-    )
-    lines = [cheer]
-    if top5:
-        nickname_map = await fetch_group_member_nickname_map(group_id)
-        top_title = (
-            "🏆 Top 5："
-            if user_group is None or is_default_group(user_group)
-            else f"🏆 {user_group.display_name} Top 5："
-        )
-        lines.extend(["", top_title])
-        for entry in top5:
-            uid = str(entry["user_id"])
-            name = nickname_map.get(uid) or entry["nickname"] or uid
-            lines.append(
-                f"{entry['rank']}. {name} ({entry['solved']} 题，{format_points(entry['score'])} 分)"
-            )
-    reveal = await _reveal_problem_source(group_id)
-    if reveal:
-        lines.extend(["", reveal])
-    schedule_post_solve_editorial_followup(group_id, pid)
-    return append_model_tag("\n".join(lines), model_tag), True
-
-
-async def handle(group_id: int, user_id: int, sender: dict,
-                 message_id: str, raw_text: str, segments: list,
-                 event: dict) -> None:
-    if not re.fullmatch(r"/sync(?:\s+)?", raw_text.strip()):
-        await _send_text(
-            PRIVATE_SCOPE if event.get("message_type") == "private" else GROUP_SCOPE,
-            group_id,
-            user_id,
-            "用法：/sync",
+async def handle(ctx: Ctx) -> None:
+    if not re.fullmatch(r"/sync(?:\s+)?", ctx.raw_text.strip()):
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid, "用法：/sync", msg_id=ctx.message_id,
         )
         return
 
-    target_scope = PRIVATE_SCOPE if event.get("message_type") == "private" else GROUP_SCOPE
-    source_scope = GROUP_SCOPE if target_scope == PRIVATE_SCOPE else PRIVATE_SCOPE
-    pid = get_private_current_pid(user_id) if target_scope == PRIVATE_SCOPE else current_group_pid(group_id)
-    group_pid = current_group_pid(group_id)
-
+    db = ctx.db
+    problem = await state.current_problem(db, ctx.group_openid)
+    pid = str(problem.get("today", "") or "") if problem else ""
     if not pid:
-        await _send_text(target_scope, group_id, user_id, "当前这边还没有题目，不能 sync。")
-        return
-    if not group_pid or pid != group_pid:
-        await _send_text(
-            target_scope,
-            group_id,
-            user_id,
-            "只有当前服务群题目可以 sync；其他 private 题会一直留在 private judge 里。",
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid, "当前这边还没有题目，不能 sync。",
+            msg_id=ctx.message_id,
         )
         return
 
-    if has_active_problem_request(scope=GROUP_SCOPE, group_id=group_id, user_id=user_id, pid=pid) \
-            or has_active_problem_request(scope=PRIVATE_SCOPE, group_id=group_id, user_id=user_id, pid=pid):
-        await _send_text(target_scope, group_id, user_id, "这题还有请求正在处理中，等它结束后再 /sync 吧。")
+    if has_active_problem_request(
+        group_openid=ctx.group_openid, user_openid=ctx.user_openid, pid=pid,
+    ):
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid,
+            "这题还有请求正在处理中，等它结束后再 /sync 吧。", msg_id=ctx.message_id,
+        )
         return
 
-    if source_scope == PRIVATE_SCOPE:
-        source_records = load_private_problem_history(user_id, pid)
-    else:
-        source_records = group_problem_history(group_id, user_id, pid)
-
-    starred_limited = _is_starred_limited(user_id, group_id)
-    if starred_limited:
-        source_records = _only_clarifies(source_records)
-
-    if not source_records:
-        if starred_limited:
-            await _send_text(
-                target_scope,
-                group_id,
-                user_id,
-                "你是打星用户且目前还在提交 CD 内，仅能同步 clarify 记录；"
-                "对面没有可同步的 clarify 记录，本次 sync 已取消，没有覆盖任何历史。",
-            )
-        else:
-            await _send_text(
-                target_scope,
-                group_id,
-                user_id,
-                "对面没有这道题的历史记录，本次 sync 已取消，没有覆盖任何历史。",
-            )
-        return
-
-    records_to_copy = copy_records(source_records)
-
-    # Carry the source side's last-interaction cache across too, so /feedback on
-    # this side after a sync targets the same latest reply the user saw on
-    # the other side (sync = the source session wins wholesale). Only when
-    # the cached record is part of what this sync actually copies: same pid,
-    # and clarify-only records when a CD-limited starred user syncs clarifies.
-    source_entry = (
-        load_private_last_interaction(user_id)
-        if source_scope == PRIVATE_SCOPE
-        else load_group_last_interaction(group_id, user_id)
+    source = await submissions.get_cross_group_submissions(
+        db, ctx.user_openid, pid, ctx.group_openid,
     )
-    source_record = source_entry.get("record") if isinstance(source_entry, dict) else None
-    carry_cache_record: dict | None = None
-    if isinstance(source_record, dict) and str(source_record.get("problem", "") or "") == pid:
-        if not starred_limited or source_record.get("type") == "clarify":
-            carry_cache_record = dict(source_record)
+    if not source:
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid,
+            "其他群没有这道题的历史记录，本次 sync 已取消，没有覆盖任何历史。",
+            msg_id=ctx.message_id,
+        )
+        return
 
-    if target_scope == GROUP_SCOPE:
-        def _replace_group_records() -> None:
-            if starred_limited:
-                replace_group_problem_clarifies(group_id, user_id, pid, records_to_copy)
+    async def _import() -> tuple[list[dict], str, bool]:
+        existing = await submissions.get_user_problem_submissions(
+            db, ctx.group_openid, ctx.user_openid, pid,
+        )
+        seen = {_dedup_key(r) for r in existing}
+        imported: list[dict] = []
+        for rec in sorted(source, key=lambda r: str(r.get("timestamp", ""))):
+            key = _dedup_key(rec)
+            if key in seen:
+                continue
+            seen.add(key)
+            await submissions.insert_synced_submission(db, ctx.group_openid, rec)
+            imported.append(rec)
+
+        cheer = ""
+        scored = False
+        correct = next((r for r in imported if r.get("result") == "correct"), None)
+        if correct is not None:
+            if await state.is_problem_solved(db, ctx.group_openid, pid):
+                cheer = "群里已经有人先通过这题了，本次只同步记录，不再加分。"
             else:
-                replace_group_problem_history(group_id, user_id, pid, records_to_copy)
-            if carry_cache_record is not None:
-                remember_group_last_interaction(group_id, user_id, carry_cache_record)
+                solve = await posts.record_solve(
+                    db, ctx.group_openid, ctx.user_openid, pid, ctx.name, source="synced",
+                )
+                if not solve["duplicate"]:
+                    scored = True
+                    ranked = await posts.group_scoreboard(db, ctx.group_openid)
+                    current = next(
+                        (e for e in ranked if e["user_openid"] == ctx.user_openid), None,
+                    )
+                    rating = await state.problem_rating(db, pid)
+                    rank = int(current["rank"]) if current else 1
+                    total = format_points(float(current["score"])) if current else "0"
+                    gain = format_points(posts.rating_to_points(rating)) if rating is not None else "0"
+                    solved = solve["solved_count"]
+                    head = (
+                        f"恭喜拿下本题一血！🎉 本题 +{gain} 分（共 {solved} 题，总分 {total}），当前第 {rank}"
+                        if solve["is_first_blood"]
+                        else f"做对了！🎉 本题 +{gain} 分（共 {solved} 题，总分 {total}），当前第 {rank}"
+                    )
+                    reveal = f"本题来自 {_problem_label(problem, pid)}✨"
+                    cheer = append_model_tag(
+                        f"{head}\n\n{reveal}", str(correct.get("model_tag", "") or ""),
+                    )
 
-        await run_group_state_update(group_id, _replace_group_records)
-    else:
-        if starred_limited:
-            replace_private_problem_clarifies(user_id, pid, records_to_copy)
-        else:
-            replace_private_problem_history(user_id, pid, records_to_copy)
-        if carry_cache_record is not None:
-            remember_private_last_interaction(user_id, carry_cache_record)
-        if source_scope == GROUP_SCOPE and is_group_problem_solved(group_id, pid):
-            mark_private_solved(user_id, pid, source="group")
+        replied = [r for r in imported if r.get("result") in REPLIED_RESULTS]
+        if replied:
+            latest = max(replied, key=lambda r: str(r.get("timestamp", "")))
+            await feedback.set_last_interaction(db, ctx.group_openid, ctx.user_openid, latest)
 
-    history_user_name, history_bot_name = await _history_display_names(group_id, user_id, sender)
+        return imported, cheer, scored
+
+    imported, cheer, scored = await run_group_state_update(ctx.group_openid, _import)
+
+    if not imported:
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid,
+            "其他群这道题的记录这边都已经有了，没有新增可同步的内容～",
+            msg_id=ctx.message_id,
+        )
+        return
+
     await send_history_card(
-        destination=target_scope,
-        user_id=user_id,
-        group_id=group_id,
-        records=source_records,
-        user_display_name=history_user_name,
-        bot_display_name=history_bot_name,
+        ctx.sender, ctx.group_openid, imported,
+        user_name=ctx.name, msg_id=ctx.message_id, browser=ctx.browser,
     )
-
-    extra = ""
-    scored_correct = False
-    if target_scope == GROUP_SCOPE and source_scope == PRIVATE_SCOPE and not starred_limited:
-        correct_record = first_correct_submit_record(source_records, pid)
-        if correct_record is not None:
-            extra, scored_correct = await _score_synced_private_ac(
-                group_id,
-                user_id,
-                sender,
-                pid,
-                model_tag=str(correct_record.get("model_tag", "") or ""),
-            )
-    elif starred_limited:
-        extra = "你是打星用户且目前还在提交 CD 内，本次仅同步 clarify，submit/review/通过记录已忽略。"
-
-    if target_scope == GROUP_SCOPE:
-        await _react_group_success(message_id)
-        if extra:
-            await _send_text(target_scope, group_id, user_id, extra)
-    elif extra:
-        await _send_text(target_scope, group_id, user_id, extra)
+    if cheer:
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid, cheer, msg_id=ctx.message_id,
+        )
+    if scored:
+        schedule_post_solve_editorial_followup(ctx.group_openid, pid)
+    await ctx.sender.react(ctx.group_openid, "👌", msg_id=ctx.message_id)
 
 
 def register() -> None:
     registry.register(CommandDef(
         name="sync",
         aliases=[],
-        description="在群聊和 private judge 间同步当前群题记录（另一侧覆盖当前侧）",
+        description="把你在其他群对当前题的提交记录同步到本群（含通过加分）",
         usage="",
         handler=handle,
         cooldown=3,

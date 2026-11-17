@@ -1,75 +1,28 @@
-"""Command dispatch — routes parsed QQ messages to handler functions."""
+"""Command dispatch for official-native group events (multi-group).
+
+The bot serves every group it receives events from (group = view); there is no
+single configured group and no private judge. C2C/notice/poke/friend-request
+events have no official equivalent and are ignored. Each parsed slash command
+is routed to its handler with a ``Ctx``; per-(group, user, command) cooldowns
+are enforced here.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
+import time
 import unicodedata
 
 from . import registry
 from .registry import CommandDef
-from ..config import get_config
+from .context import Ctx
 from .. import echo
-from ..friend_requests import handle_friend_request_event, is_service_group_member
-from .notice import handle_notice_event
-from ..napcat.client import (
-    build_plain_message,
-    build_reply,
-    send_group_msg,
-    send_private_msg,
-    react_emoji,
-)
 
 logger = logging.getLogger("kouhai-bot.handlers")
 
-_PRIVATE_ALLOWED_COMMANDS = {
-    "setproblem",
-    "problem",
-    "submit",
-    "sbmjev",
-    "clarify",
-    "review",
-    "feedback",
-    "clear",
-    "sync",
-    "testcd",
-    "status",
-    "help",
-    "tag",
-}
-
-
-# ── Message parsing ─────────────────────────────────────────────────────
-
-def extract_text(segments: list[dict]) -> tuple[str, bool]:
-    """Extract plain text from OneBot11 message segments.
-    Returns (text, was_mentioned).
-    """
-    parts = []
-    mentioned = False
-    cfg = get_config()
-    for seg in segments:
-        t = seg.get("type", "")
-        if t == "text":
-            parts.append(seg.get("data", {}).get("text", ""))
-        elif t == "at":
-            qq = str(seg.get("data", {}).get("qq", ""))
-            if qq == str(cfg.bot_qq):
-                mentioned = True
-                parts.append("")
-            else:
-                parts.append(f"@{qq}")
-    text = " ".join(p.strip() for p in parts if p.strip()).strip()
-    return text, mentioned
-
-
-def should_respond(msg_type: str, was_mentioned: bool) -> bool:
-    """Determine if bot should respond to a message."""
-    if msg_type == "private":
-        return True
-    # Group: only respond when mentioned
-    return was_mentioned
+# (group_openid, user_openid, command_name) → last accepted monotonic time.
+_cooldowns: dict[tuple[str, str, str], float] = {}
 
 
 def _normalize_leading_command_junk(text: str) -> str:
@@ -94,142 +47,98 @@ def _normalize_leading_command_junk(text: str) -> str:
     return text
 
 
-# ── Command dispatch ────────────────────────────────────────────────────
+def _cooldown_remaining(group_openid: str, user_openid: str, cmd: CommandDef) -> float:
+    if cmd.cooldown <= 0:
+        return 0.0
+    key = (group_openid, user_openid, cmd.name)
+    now = time.monotonic()
+    last = _cooldowns.get(key)
+    if last is not None:
+        remaining = cmd.cooldown - (now - last)
+        if remaining > 0:
+            return remaining
+    _cooldowns[key] = now
+    return 0.0
+
+
+def reset_cooldowns_for_tests() -> None:
+    _cooldowns.clear()
+
 
 async def process_event(
     event: dict,
     *,
     spawn_handlers: bool = True,
 ) -> asyncio.Task | None:
-    """Route a parsed OneBot11 event to the appropriate handler.
+    """Route a normalized official group event to its command handler.
 
-    ``spawn_handlers=True`` keeps the NapCat reverse-WS receive loop from waiting
-    for long-running command handlers. Tests can pass ``False`` to await a handler
-    directly.
+    ``spawn_handlers=True`` keeps the gateway receive loop from waiting on
+    long-running handlers. Tests pass ``False`` to await a handler directly.
     """
-    if event["type"] == "request":
-        if spawn_handlers:
-            return asyncio.create_task(
-                handle_friend_request_event(event),
-                name=f"request_{event.get('request_type', 'unknown')}_{event.get('user_id', 0)}",
-            )
-        await handle_friend_request_event(event)
+    if event.get("type") != "message" or event.get("message_type") != "group":
         return None
 
-    if event["type"] == "notice":
-        if event.get("notice_type") != "notify" or event.get("sub_type") != "poke":
-            return None
-        if spawn_handlers:
-            return asyncio.create_task(
-                handle_notice_event(event),
-                name=f"notice_poke_{event.get('group_id', 0)}_{event.get('user_id', 0)}",
-            )
-        await handle_notice_event(event)
+    group_openid = str(event.get("group_openid", "") or "")
+    user_openid = str(event.get("user_openid", "") or "")
+    message_id = str(event.get("message_id", "") or "")
+    if not group_openid or not user_openid:
         return None
 
-    if event["type"] != "message":
-        return
+    content = str(event.get("content", "") or "")
+    raw_text = _normalize_leading_command_junk(content.strip())
+    if not raw_text:
+        return None
 
-    msg_type = event["message_type"]
-    user_id = event["user_id"]
-    group_id = event.get("group_id", 0)
-    sender = event["sender"]
-    message_id = event["message_id"]
-    segments = event.get("message", [])
-
-    # Skip own messages
-    cfg = get_config()
-    if str(user_id) == str(cfg.bot_qq):
-        return
-
-    # The bot serves exactly one configured group.
-    if msg_type == "group" and group_id != cfg.current_group:
-        return
-    if msg_type == "private":
-        group_id = cfg.current_group
-
-    raw_text, was_mentioned = extract_text(segments)
-    raw_text = _normalize_leading_command_junk(raw_text)
-    if not segments:
-        return
-
-    if msg_type == "group":
-        await echo.check_and_echo(
-            group_id=group_id,
-            user_id=user_id,
-            segments=segments,
-            raw_text=raw_text,
-            message_id=message_id,
-        )
-
-    # Only respond to commands (starting with /) or DMs
-    if not raw_text.startswith("/"):
-        if msg_type == "private":
-            # DM — respond naturally
-            pass  # TODO: chat handler
-        return
-
-    # Extract command name
-    cmd_token = raw_text.split()[0]
-    cmd_name = cmd_token.lstrip("/").lower()
-    cmd_def: CommandDef | None = registry.get(cmd_name)
-
-    if cmd_def is None:
-        if msg_type == "private":
-            await send_private_msg(user_id, build_plain_message(
-                "这个 private judge 指令我还不会哦～可用 /help 看支持的命令。"
-            ))
-        return  # Unknown command, silently ignore
-
-    if msg_type == "private":
-        if cmd_def.name not in _PRIVATE_ALLOWED_COMMANDS:
-            await send_private_msg(user_id, build_plain_message(
-                "这个命令暂时只能在服务群里使用～private judge 可用 /help 查看支持的命令。"
-            ))
-            return
-        if not await is_service_group_member(group_id, user_id):
-            await send_private_msg(user_id, build_plain_message(
-                "private judge 目前只服务当前服务群成员。如果你已经在群里，稍后再试试。"
-            ))
-            return
-
-    if cmd_def.handler is None:
-        logger.warning(f"Command '{cmd_name}' has no handler")
-        return
-
-    # Dispatch
-    logger.info(
-        f"[group_{group_id}] user_{user_id} → /{cmd_name}"
+    await echo.check_and_echo(
+        group_openid=group_openid,
+        user_openid=user_openid,
+        content=content,
+        raw_text=raw_text,
+        message_id=message_id,
     )
 
+    if not raw_text.startswith("/"):
+        return None
+
+    cmd_token = raw_text.split()[0]
+    cmd_name = cmd_token.lstrip("/").lower()
+    cmd_def = registry.get(cmd_name)
+    if cmd_def is None or cmd_def.handler is None:
+        return None
+
+    if _cooldown_remaining(group_openid, user_openid, cmd_def) > 0:
+        return None
+
     handler_raw_text = raw_text
-    original_cmd_name = cmd_token.lstrip("/")
-    if original_cmd_name != cmd_def.name:
+    if cmd_token.lstrip("/") != cmd_def.name:
         handler_raw_text = f"/{cmd_def.name}{raw_text[len(cmd_token):]}"
+
+    ctx = Ctx(
+        group_openid=group_openid,
+        user_openid=user_openid,
+        message_id=message_id,
+        raw_text=handler_raw_text,
+        args=handler_raw_text[len(cmd_def.name) + 1:].strip(),
+        nickname=str((event.get("author") or {}).get("nickname", "") or ""),
+        event=event,
+    )
+
+    logger.info("[group_%s] user_%s → /%s", group_openid, user_openid, cmd_def.name)
 
     async def _run_handler() -> None:
         try:
-            await cmd_def.handler(
-                group_id=group_id,
-                user_id=user_id,
-                sender=sender,
-                message_id=message_id,
-                raw_text=handler_raw_text,
-                segments=segments,
-                event=event,
-            )
-        except Exception as e:
-            logger.error(f"Handler error for /{cmd_name}: {e}", exc_info=True)
+            await cmd_def.handler(ctx)
+        except Exception as exc:
+            logger.error("Handler error for /%s: %s", cmd_def.name, exc, exc_info=True)
 
     if spawn_handlers:
         return asyncio.create_task(
-            _run_handler(),
-            name=f"dispatch_{cmd_name}_{message_id}",
+            _run_handler(), name=f"dispatch_{cmd_def.name}_{message_id}",
         )
     await _run_handler()
     return None
 
 
 async def dispatch(event: dict) -> None:
-    """Legacy reverse-WS dispatch path."""
+    """Gateway dispatch path (spawn handlers so the receive loop never blocks)."""
     await process_event(event, spawn_handlers=True)

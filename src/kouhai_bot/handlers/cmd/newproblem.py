@@ -1,83 +1,78 @@
-"""/newproblem command — post a new problem on demand."""
+"""/newproblem — post a new problem on demand (group-only, multi-group).
+
+Keeps the deliberate "不鼓励换题" friction: a per-group post lock, a shared
+cooldown that starts only after successful delivery, and the exact
+``/newproblem --force`` requirement to skip an unsolved problem. Publication
+claims the group's one READY prefetch slot, delivers the problem as a long
+image, and commits the group's current view + verified summary to the DB only
+after delivery succeeds.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import os
 import time
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 
 from .. import registry
 from ..registry import CommandDef
-from ..shared import (
-    build_problem_card_nodes,
-    build_problem_card_legacy_segments,
-    get_today_problem,
-    high_difficulty_notice,
-    is_already_solved,
-    load_scoreboard,
-    save_problem_card_ref,
-    save_problem_summary,
-    save_scoreboard,
-    snake_replace,
-)
+from ..context import Ctx
+from ..runtime import get_runtime
+from .. import state
+from ..cards import apply_snake, send_problem_card
+from ..shared import high_difficulty_notice
 from ...config import get_config
-from ...context import append_group_ctx
+from ...db.repos import posts, problems
 from ...editorial_followup import (
-    deliver_official_tutorial_forward,
+    deliver_official_tutorial,
     schedule_prefetch_editorial,
 )
-from ...napcat.client import (
-    build_plain_message,
-    react_emoji,
-    resolve_bot_display_name,
-    send_group_msg,
-    send_forward_card_with_legacy_fallback,
-)
 from ...problem_prefetch import get_next_problem_prefetcher
-from ...problem_preparation import (
-    ProblemPreparationError,
-)
+from ...problem_preparation import ProblemPreparationError
 from ...tutorials import get_verified_official_editorial
-from ...user_groups import settle_dynamic_submit_wait_for_problem
-from .submit import run_group_state_update
 
 logger = logging.getLogger("kouhai-bot.cmd.newproblem")
 TZ = timezone(timedelta(hours=8))
 
-# ── Cooldown ────────────────────────────────────────────────────────────
-
-_cooldowns: dict[int, float] = {}
-_newproblem_locks: dict[int, asyncio.Lock] = {}
-_newproblem_active: dict[int, dict] = {}
+_cooldowns: dict[str, float] = {}
+_newproblem_locks: dict[str, asyncio.Lock] = {}
+_newproblem_active: dict[str, dict] = {}
 
 
-def has_unsolved_problem(group_id: int) -> bool:
-    problem = get_today_problem(group_id)
-    return bool(problem) and not is_already_solved(group_id)
+def _newproblem_lock(group_openid: str) -> asyncio.Lock:
+    lock = _newproblem_locks.get(group_openid)
+    if lock is None:
+        lock = asyncio.Lock()
+        _newproblem_locks[group_openid] = lock
+    return lock
 
 
-def _nickname(sender: dict) -> str:
-    return sender.get("card") or sender.get("nickname") or str(sender.get("user_id", "?"))
+def get_newproblem_status(group_openid: str) -> dict | None:
+    return _newproblem_active.get(group_openid)
 
 
-async def _send_high_difficulty_notice_group(group_id: int, problem: dict | None) -> None:
-    notice = high_difficulty_notice(problem)
-    if not notice:
-        return
-    try:
-        await send_group_msg(group_id, build_plain_message(notice))
-    except Exception as e:
-        logger.warning("[group_%s] Failed to send high-difficulty notice: %s", group_id, e)
+async def has_unsolved_problem(group_openid: str) -> bool:
+    db = get_runtime().db
+    problem = await state.current_problem(db, group_openid)
+    if not problem:
+        return False
+    pid = str(problem.get("today", "") or "")
+    return bool(pid) and not await state.is_problem_solved(db, group_openid, pid)
+
+
+async def _notify(group_openid: str, user_openid: str, message_id: str, text: str) -> str | None:
+    sender = get_runtime().sender
+    if user_openid:
+        return await sender.send_group_at(group_openid, user_openid, text, msg_id=message_id or None)
+    return await sender.send_group_text(group_openid, text, msg_id=message_id or None)
 
 
 def _format_forced_skip_notice(problem: object) -> str:
     if not isinstance(problem, dict) or not problem:
         return ""
-
     pid = str(problem.get("today", "") or "").strip()
     if not pid:
         return ""
@@ -86,359 +81,205 @@ def _format_forced_skip_notice(problem: object) -> str:
     if name:
         parts.append(name)
     rating = str(problem.get("rating", "") or "").strip()
-    if rating:
+    if rating and rating != "?":
         parts.append(rating)
     return f"当前题目已被跳过，原题为 {' '.join(parts)}。"
 
 
-async def _send_forced_skip_followup(group_id: int, problem: object) -> bool:
-    """Announce a forced skip and deliver its ready editorial, if available."""
+async def _send_forced_skip_followup(group_openid: str, problem: object) -> bool:
     notice = _format_forced_skip_notice(problem)
     if not notice:
         return True
-    sent = await send_group_msg(group_id, build_plain_message(notice))
+    sender = get_runtime().sender
+    sent = await sender.send_group_text(group_openid, notice)
     if not sent:
-        logger.error("[group_%s] Forced-skip notice send failed", group_id)
+        logger.error("[group_%s] Forced-skip notice send failed", group_openid)
         return False
-
     pid = str(problem.get("today", "") or "").strip()
     try:
-        editorial = get_verified_official_editorial(pid)
+        editorial = await get_verified_official_editorial(pid)
         if editorial is not None:
-            await deliver_official_tutorial_forward(group_id, pid, editorial)
+            await deliver_official_tutorial(group_openid, pid, editorial)
     except Exception as exc:
         logger.warning(
             "[group_%s] Forced-skip editorial delivery failed for %s: %s",
-            group_id,
-            pid,
-            exc,
-            exc_info=True,
+            group_openid, pid, exc, exc_info=True,
         )
     return True
 
 
 async def enqueue_new_problem(
-    group_id: int,
-    user_id: int,
-    sender: dict | None,
-    message_id: str,
+    group_openid: str,
     *,
+    user_openid: str = "",
+    message_id: str = "",
     command: str,
     force: bool = True,
     quiet: bool = False,
     prefix: str = "刷新了一道新题🌟",
 ) -> bool:
-    """Admit, pick, and post a new problem for commands or quiet triggers."""
+    """Admit, claim, and post a new problem for commands or quiet triggers."""
     cfg = get_config()
-    nickname = _nickname(sender or {})
-    lock = _newproblem_lock(group_id)
+    lock = _newproblem_lock(group_openid)
     if lock.locked():
         if not quiet:
-            await send_group_msg(group_id, build_plain_message(
-                f"@{nickname} 新的题目正在准备中，别急～"
-            ))
+            await _notify(group_openid, user_openid, message_id, "新的题目正在准备中，别急～")
         return False
 
     await lock.acquire()
     try:
         now = time.monotonic()
-        last = _cooldowns.get(group_id, 0)
+        last = _cooldowns.get(group_openid, 0)
         if now - last < cfg.newproblem_cooldown:
             if not quiet:
                 remaining = int(cfg.newproblem_cooldown - (now - last))
-                await send_group_msg(group_id, build_plain_message(
-                    f"@{nickname} 刷新太频繁啦，等 {remaining} 秒再试哦～"
-                ))
+                await _notify(
+                    group_openid, user_openid, message_id,
+                    f"刷新太频繁啦，等 {remaining} 秒再试哦～",
+                )
             return False
 
-        if not force and has_unsolved_problem(group_id):
+        if not force and await has_unsolved_problem(group_openid):
             if not quiet:
-                await send_group_msg(group_id, build_plain_message(
-                    f"@{nickname} 当前题目还没有人解出来呢～不能直接刷题哦。\n"
-                    f"可使用 /problem 查看当前题目。\n"
-                    f"如果确定要换题，请发 /newproblem --force"
-                ))
+                await _notify(
+                    group_openid, user_openid, message_id,
+                    "当前题目还没有人解出来呢～不能直接刷题哦。\n"
+                    "可使用 /problem 查看当前题目。\n"
+                    "如果确定要换题，请发 /newproblem --force",
+                )
             return False
 
-        logger.info(f"[group_{group_id}] {command} triggered")
-
-        _newproblem_active[group_id] = {
-            "group_id": group_id,
-            "user_id": user_id,
+        logger.info("[group_%s] %s triggered", group_openid, command)
+        _newproblem_active[group_openid] = {
+            "group_openid": group_openid,
+            "user_openid": user_openid,
             "message_id": message_id,
             "command": command,
             "admitted_at": now,
         }
         try:
-            post_kwargs = {
-                "prefix": prefix,
-                "notify_group": not quiet,
-            }
-            if force:
-                post_kwargs["announce_skipped"] = True
             posted = await _post_new_problem_locked(
-                group_id,
-                **post_kwargs,
+                group_openid,
+                prefix=prefix,
+                user_openid=user_openid,
+                message_id=message_id,
+                notify_group=not quiet,
+                announce_skipped=force,
             )
         except Exception:
             if not quiet:
                 raise
-            logger.exception("[group_%s] %s post failed", group_id, command)
+            logger.exception("[group_%s] %s post failed", group_openid, command)
             posted = False
         finally:
-            _newproblem_active.pop(group_id, None)
+            _newproblem_active.pop(group_openid, None)
         if posted:
-            _cooldowns[group_id] = time.monotonic()
+            _cooldowns[group_openid] = time.monotonic()
         return posted
     finally:
         lock.release()
 
-def _newproblem_lock(group_id: int) -> asyncio.Lock:
-    lock = _newproblem_locks.get(group_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _newproblem_locks[group_id] = lock
-    return lock
-
-
-def get_newproblem_status(group_id: int) -> dict | None:
-    return _newproblem_active.get(group_id)
-
-
-async def _commit_problem_state(group_id: int, state: dict) -> None:
-    cfg = get_config()
-    state_dir = os.path.join(cfg.data_dir, "groups", str(group_id))
-    os.makedirs(state_dir, exist_ok=True)
-    committed = dict(state)
-    committed["posted_at"] = int(time.time())
-
-    def _write() -> None:
-        try:
-            previous = get_today_problem(group_id)
-            previous_pid = str(previous.get("today", "") or "") if previous else ""
-            if previous_pid:
-                sb = load_scoreboard(group_id)
-                if settle_dynamic_submit_wait_for_problem(sb, previous_pid):
-                    save_scoreboard(group_id, sb)
-            with open(os.path.join(state_dir, "state.json"), "w", encoding="utf-8") as f:
-                json.dump(committed, f, ensure_ascii=False, indent=2)
-        except OSError as e:
-            logger.error("[group_%s] Failed to write state.json: %s", group_id, e)
-
-    await run_group_state_update(group_id, _write)
-
-
-def _save_daily_msg(
-    state_dir: str,
-    *,
-    pid: str,
-    post_msg: str,
-    sample_messages: list[str],
-    notes_message: str,
-    snake_enabled: bool,
-) -> None:
-    daily_msg = {
-        "pid": pid,
-        "post_msg": post_msg,
-        "sample_messages": sample_messages,
-        "notes_message": notes_message,
-        "snake_enabled": snake_enabled,
-    }
-    daily_msg_path = os.path.join(state_dir, "daily_msg.json")
-    with open(daily_msg_path, "w", encoding="utf-8") as f:
-        json.dump(daily_msg, f, ensure_ascii=False, indent=2)
-
-
-async def _send_problem_forward_card(
-    group_id: int,
-    post_msg: str,
-    sample_messages: list[str],
-    notes_message: str = "",
-    snake_enabled: bool = True,
-) -> tuple[int | None, dict]:
-    """Publish the problem card as a merged forward.
-
-    Custom nodes are fabricated with the bot's identity and tried first; on
-    failure the card falls back to the legacy self-send id card, and the
-    caller owns the final direct-send fallback.
-    """
-    cfg = get_config()
-    bot_name = await resolve_bot_display_name(group_id)
-    nodes = build_problem_card_nodes(
-        post_msg=post_msg,
-        sample_messages=list(sample_messages),
-        notes_message=notes_message or "",
-        snake_enabled=snake_enabled,
-        bot_qq=cfg.bot_qq,
-        bot_name=bot_name,
-    )
-    fwd_resp = await send_forward_card_with_legacy_fallback(
-        destination="group", group_id=group_id, nodes=nodes,
-        self_send_messages=build_problem_card_legacy_segments(
-            post_msg=post_msg, sample_messages=list(sample_messages),
-            notes_message=notes_message or "", snake_enabled=snake_enabled,
-        ),
-    )
-    return fwd_resp, {"node_count": len(nodes)}
-
-# ── New problem posting ─────────────────────────────────────────────────
-
 
 async def _post_new_problem_locked(
-    group_id: int,
-    prefix: str | None = None,
+    group_openid: str,
     *,
-    notify_group: bool = False,
-    announce_skipped: bool = False,
+    prefix: str | None,
+    user_openid: str,
+    message_id: str,
+    notify_group: bool,
+    announce_skipped: bool,
 ) -> bool:
-    cfg = get_config()
-    state_dir = os.path.join(cfg.data_dir, "groups", str(group_id))
-    os.makedirs(state_dir, exist_ok=True)
-    prefetcher = get_next_problem_prefetcher(group_id)
+    rt = get_runtime()
+    db = rt.db
+    prefetcher = get_next_problem_prefetcher(group_openid)
     try:
         slot = await prefetcher.claim()
     except ProblemPreparationError as exc:
         if notify_group:
-            await send_group_msg(group_id, build_plain_message(
-                f"刷题失败了…{exc.user_message}，连试 3 次都没成功，等一会儿再试试吧😢"
-            ))
+            await _notify(
+                group_openid, user_openid, message_id,
+                f"刷题失败了…{exc.user_message}，连试 3 次都没成功，等一会儿再试试吧😢",
+            )
         return False
 
     try:
-        previous_problem = get_today_problem(group_id)
+        previous_problem = await state.current_problem(db, group_openid)
         prepared = slot.problem
-        picked_state = dict(prepared.state)
-        picked_state["date"] = datetime.now(TZ).strftime("%Y-%m-%d")
         pid = prepared.pid
         desc = prepared.summary
         model_tag = prepared.model_tag
         sample_messages = list(prepared.sample_messages)
         notes_message = prepared.notes_message
 
-        # Preserve the original publication-time trigger.  Normally this
-        # deduplicates against preparation; after a process restart it resumes
-        # a crawler that may have died while the durable slot survived.
         try:
             schedule_prefetch_editorial(pid)
         except Exception as exc:
             logger.warning(
                 "[group_%s] Failed to schedule editorial prefetch for %s: %s",
-                group_id,
-                pid,
-                exc,
+                group_openid, pid, exc,
             )
-
-        if desc:
-            try:
-                save_problem_summary(
-                    group_id,
-                    pid,
-                    desc,
-                    source_sha256=prepared.statement_sha256,
-                )
-            except Exception as exc:
-                # Summary persistence was best-effort in the original path;
-                # a cache write must not prevent an otherwise ready card.
-                logger.warning(
-                    "[group_%s] Failed to save problem summary for %s: %s",
-                    group_id,
-                    pid,
-                    exc,
-                )
 
         greeting = prefix if prefix else "来看看这道新题吧！"
         post_msg = f"{greeting}\n\n{desc}" if desc else greeting
         if model_tag:
             post_msg += model_tag
-        post_msg = snake_replace(post_msg)
+        post_msg = apply_snake(post_msg)
 
         forced_skip_announced = False
         if announce_skipped:
-            forced_skip_announced = bool(
-                _format_forced_skip_notice(previous_problem)
-            )
-            if not await _send_forced_skip_followup(group_id, previous_problem):
+            forced_skip_announced = bool(_format_forced_skip_notice(previous_problem))
+            if not await _send_forced_skip_followup(group_openid, previous_problem):
                 return False
 
-        fwd_resp, node_payload = await _send_problem_forward_card(
-            group_id=group_id,
+        mid = await send_problem_card(
+            rt.sender, group_openid,
             post_msg=post_msg,
             sample_messages=sample_messages,
             notes_message=notes_message,
             snake_enabled=True,
+            msg_id=message_id or None,
+            browser=rt.browser,
         )
-        if not fwd_resp:
-            logger.error(
-                "[group_%s] Problem forward-card send failed, falling back to direct",
-                group_id,
-            )
-            ok = await send_group_msg(group_id, build_plain_message(post_msg))
-            if not ok:
-                logger.error("[group_%s] New problem post send failed", group_id)
+        if not mid:
+            logger.error("[group_%s] New problem card send failed", group_openid)
+            if notify_group:
+                await _notify(group_openid, user_openid, message_id, "新题发送失败，请稍后再试试～")
                 if forced_skip_announced:
-                    correction_sent = await send_group_msg(
-                        group_id,
-                        build_plain_message(
-                            "新题发送失败，目前仍暂使用原题。请联系管理员。"
-                        ),
+                    await _notify(
+                        group_openid, user_openid, message_id,
+                        "新题发送失败，目前仍暂使用原题。请联系管理员。",
                     )
-                    if not correction_sent:
-                        logger.error(
-                            "[group_%s] New problem failure correction send failed",
-                            group_id,
-                        )
-                return False
+            return False
 
-            await _send_high_difficulty_notice_group(group_id, picked_state)
-            await _commit_problem_state(group_id, picked_state)
-            try:
-                _save_daily_msg(
-                    state_dir,
-                    pid=pid,
-                    post_msg=post_msg,
-                    sample_messages=sample_messages,
-                    notes_message=notes_message,
-                    snake_enabled=True,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[group_%s] Failed to save fallback daily_msg.json: %s",
-                    group_id,
-                    exc,
-                )
-            append_group_ctx(group_id, {"role": "assistant", "content": post_msg})
-            logger.info("[group_%s] New problem post sent (fallback) ✓", group_id)
-            return True
-
-        append_group_ctx(group_id, {"role": "assistant", "content": post_msg})
-        logger.info(
-            "[group_%s] New problem post forwarded ✓ (%s msgs)",
-            group_id,
-            node_payload.get("node_count", 1 + len(sample_messages)),
+        card_json = json.dumps({
+            "post_msg": post_msg,
+            "sample_messages": sample_messages,
+            "notes_message": notes_message,
+            "snake_enabled": True,
+        }, ensure_ascii=False)
+        await posts.post_problem(
+            db, group_openid, pid,
+            posted_at=int(time.time()),
+            post_date=datetime.now(TZ).strftime("%Y-%m-%d"),
+            card_json=card_json,
         )
-        await _commit_problem_state(group_id, picked_state)
-        if pid:
-            save_problem_card_ref(group_id, fwd_resp, pid, "newproblem")
-        await _send_high_difficulty_notice_group(group_id, picked_state)
 
-        try:
-            _save_daily_msg(
-                state_dir,
-                pid=pid,
-                post_msg=post_msg,
-                sample_messages=sample_messages,
-                notes_message=notes_message,
-                snake_enabled=True,
+        if desc and prepared.summary_status.value == "ready":
+            await problems.set_problem_summary(
+                db, pid, desc, "verified", prepared.statement_sha256,
             )
-        except Exception as exc:
-            logger.warning(
-                "[group_%s] Failed to save daily_msg.json: %s",
-                group_id,
-                exc,
+        else:
+            await problems.set_problem_summary(
+                db, pid, "", "incomplete", prepared.statement_sha256,
             )
+
+        notice = high_difficulty_notice(prepared.state)
+        if notice:
+            await rt.sender.send_group_text(group_openid, notice)
+
+        logger.info("[group_%s] New problem posted ✓ pid=%s", group_openid, pid)
         return True
     finally:
-        # A cancelled command must not strand the coordinator in CLAIMED.
         release_task = asyncio.create_task(prefetcher.release(slot.slot_id))
         try:
             await asyncio.shield(release_task)
@@ -448,44 +289,39 @@ async def _post_new_problem_locked(
             raise
 
 
-# ── Command handler ─────────────────────────────────────────────────────
-
 _CMD_NEWPROBLEM = "/newproblem"
 _CMD_NEWPROBLEM_FORCE = "/newproblem --force"
 
 
-async def handle(group_id: int, user_id: int, sender: dict,
-                 message_id: str, raw_text: str, segments: list,
-                 event: dict) -> None:
-    """Handle /newproblem and exact ``/newproblem --force``."""
-    import random
-    await react_emoji(message_id, random.choice(["128064", "289"]))
-
-    text = raw_text.lstrip()
+async def handle(ctx: Ctx) -> None:
+    await ctx.sender.react(ctx.group_openid, "👀", msg_id=ctx.message_id)
+    text = ctx.raw_text.lstrip()
     if text == _CMD_NEWPROBLEM_FORCE:
         await enqueue_new_problem(
-            group_id, user_id, sender, message_id, command="newproblem --force",
+            ctx.group_openid, user_openid=ctx.user_openid, message_id=ctx.message_id,
+            command="newproblem --force",
         )
         return
-
     if text == _CMD_NEWPROBLEM:
         await enqueue_new_problem(
-            group_id, user_id, sender, message_id, command="newproblem", force=False,
+            ctx.group_openid, user_openid=ctx.user_openid, message_id=ctx.message_id,
+            command="newproblem", force=False,
         )
         return
-
     parts = text.split()
     head = parts[0] if parts else ""
     if head == _CMD_NEWPROBLEM and len(parts) > 1:
-        nickname = _nickname(sender)
-        await send_group_msg(group_id, build_plain_message(
-            f"@{nickname} 用法：/newproblem 刷题，/newproblem --force 强制换题"
-        ))
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid,
+            "用法：/newproblem 刷题，/newproblem --force 强制换题",
+            msg_id=ctx.message_id,
+        )
     elif head[: len(_CMD_NEWPROBLEM)] == _CMD_NEWPROBLEM and head != _CMD_NEWPROBLEM:
-        nickname = _nickname(sender)
-        await send_group_msg(group_id, build_plain_message(
-            f"@{nickname} 用法：/newproblem 刷题，/newproblem --force 强制换题"
-        ))
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid,
+            "用法：/newproblem 刷题，/newproblem --force 强制换题",
+            msg_id=ctx.message_id,
+        )
 
 
 def register() -> None:

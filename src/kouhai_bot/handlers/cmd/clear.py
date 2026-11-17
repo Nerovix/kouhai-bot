@@ -1,4 +1,4 @@
-"""/clear — clear the current user's stored context for today's problem."""
+"""/clear — clear the current user's stored context for the current problem."""
 
 from __future__ import annotations
 
@@ -7,36 +7,18 @@ import re
 
 from .. import registry
 from ..registry import CommandDef
-from ...napcat.client import (
-    build_private_reaction_message,
-    send_private_msg,
-    react_emoji,
-)
-from ...private_judge import GROUP_SCOPE, PRIVATE_SCOPE
+from ..context import Ctx
 from .submit import enqueue_clear_request
 
 logger = logging.getLogger("kouhai-bot.cmd.clear")
 
 
-async def handle(group_id: int, user_id: int, sender: dict,
-                 message_id: str, raw_text: str, segments: list,
-                 event: dict) -> None:
-    scope = PRIVATE_SCOPE if event.get("message_type") == "private" else GROUP_SCOPE
-    stripped = raw_text.strip()
+async def handle(ctx: Ctx) -> None:
+    stripped = ctx.raw_text.strip()
     if not re.fullmatch(r"/clear(?:\s+)?", stripped):
-        if scope == PRIVATE_SCOPE:
-            await send_private_msg(user_id, build_private_reaction_message("10060"))
-        else:
-            await react_emoji(message_id, "10060")
+        await ctx.sender.react(ctx.group_openid, "👌", msg_id=ctx.message_id)
         return
-
-    await enqueue_clear_request(
-        group_id,
-        user_id,
-        sender,
-        message_id,
-        scope=scope,
-    )
+    await enqueue_clear_request(ctx)
 
 
 def register() -> None:

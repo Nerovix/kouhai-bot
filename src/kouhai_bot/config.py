@@ -187,10 +187,8 @@ class BotConfig:
 
         c = cls()
 
-        # --- QQ ---
-        c.bot_qq = int(data.get("bot_qq", c.bot_qq))
-        if c.bot_qq <= 0:
-            raise RuntimeError("config.yaml: bot_qq is required")
+        # --- QQ (legacy NapCat fields; optional under the official API) ---
+        c.bot_qq = int(data.get("bot_qq", c.bot_qq) or 0)
         c.napcat_ws_host = str(data.get("napcat_ws_host", c.napcat_ws_host))
         c.napcat_ws_port = int(data.get("napcat_ws_port", c.napcat_ws_port))
         c.napcat_http_host = str(data.get("napcat_http_host", c.napcat_http_host))
@@ -278,10 +276,8 @@ class BotConfig:
         if official.get("intents") is not None:
             c.official_intents = int(official["intents"])
 
-        # --- Group ---
-        if "current_group" not in data:
-            raise RuntimeError("config.yaml: current_group is required")
-        c.current_group = int(data["current_group"])
+        # --- Group (legacy single-group key; optional under multi-group official) ---
+        c.current_group = int(data.get("current_group", c.current_group) or 0)
 
         # --- Problems ---
         problem = data.get("problem", {})

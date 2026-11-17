@@ -185,14 +185,26 @@ def _get_cached_targets() -> list[dict]:
     return _fetch_and_cache_targets()
 
 
-def select_problem() -> dict:
+def select_problem(exclude_override: set | None = None) -> dict:
     """
     Randomly select an unused problem within rating range.
     If all problems have been used, resets the used set.
+
+    When ``exclude_override`` is given (DB-driven selection), it is the full
+    exclusion set and the legacy disk used/solved/current reads and the
+    used-cycle reset are skipped — the caller owns reset semantics.
     """
     problems = _get_cached_targets()
     if not problems:
         raise RuntimeError(f"No problems found in range {RATING_MIN}-{RATING_MAX}")
+
+    if exclude_override is not None:
+        available = [p for p in problems if _problem_id(p) not in exclude_override]
+        if not available:
+            raise RuntimeError(
+                f"No unsolved problems found in range {RATING_MIN}-{RATING_MAX}"
+            )
+        return random.choice(available)
 
     used = _load_used()
     solved = _load_solved_problem_ids()
@@ -495,13 +507,14 @@ def write_state_for_problem(problem: dict) -> dict:
     return state
 
 
-def pick(with_statement: bool = False, write_state: bool = True) -> dict:
+def pick(with_statement: bool = False, write_state: bool = True,
+         exclude_override: set | None = None) -> dict:
     """Pick today's problem, mark as used, return the problem dict.
     If with_statement and fetch_statement returns None (fetch error),
     retry up to 10 times, marking failed picks as used."""
     MAX_RETRIES = 10
     for attempt in range(MAX_RETRIES):
-        problem = select_problem()
+        problem = select_problem(exclude_override=exclude_override)
         pid = _problem_id(problem)
 
         if with_statement:
@@ -569,6 +582,7 @@ if __name__ == "__main__":
     data_dir = STATE_DIR
     min_rating = RATING_MIN
     max_rating = RATING_MAX
+    exclude_file = ""
     skip_next = False
     cmd_args = []
     argv = sys.argv[1:]
@@ -592,6 +606,10 @@ if __name__ == "__main__":
             max_rating = int(argv[i + 1])
             skip_next = True
             continue
+        if a == "--exclude-file" and i + 1 < len(argv):
+            exclude_file = argv[i + 1]
+            skip_next = True
+            continue
         if a.startswith("--group="):
             group_id = a.split("=", 1)[1]
             continue
@@ -603,6 +621,9 @@ if __name__ == "__main__":
             continue
         if a.startswith("--max-rating="):
             max_rating = int(a.split("=", 1)[1])
+            continue
+        if a.startswith("--exclude-file="):
+            exclude_file = a.split("=", 1)[1]
             continue
         if a.startswith("--"):
             continue
@@ -622,7 +643,12 @@ if __name__ == "__main__":
         if cmd in {"pick", "pick-json"}:
             with_stmt = "--with-statement" in sys.argv
             write_state = "--no-write-state" not in sys.argv and cmd != "pick-json"
-            p = pick(with_statement=with_stmt, write_state=write_state)
+            exclude_override = None
+            if exclude_file:
+                with open(exclude_file) as f:
+                    exclude_override = set(json.load(f))
+            p = pick(with_statement=with_stmt, write_state=write_state,
+                     exclude_override=exclude_override)
             if cmd == "pick-json":
                 print(json.dumps(_state_from_problem(p), ensure_ascii=False))
                 sys.exit(0)

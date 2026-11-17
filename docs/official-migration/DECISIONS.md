@@ -51,6 +51,51 @@
 - echo 每群独立缓冲；需群开「获取群内全部消息」（GROUP_MESSAGE_CREATE，同 intent 1<<25）。
 - 私聊整边 disable；C2C 代码停用；WS 只订阅群事件（+ GROUP_MEMBER_EVENT 名册）。
 
+### D8 — P3 handler 接口与运行时持有者
+- handler 签名统一为 `async def handle(ctx: Ctx)`；`Ctx` 数据类携带 `db / sender / group_openid / user_openid / message_id / nickname / raw_text / args / event`。registry/dispatch 构建 Ctx。
+- `handlers/runtime.py` 全局持有活动 `Database` + `OfficialSender` + `RenderBrowser`（worker 启动时 set_runtime）；coordinator/handler 经 `get_runtime()` 取用。测试可注入 fake。
+- 群-only：移除 PRIVATE_SCOPE 整边；coordinator 仅按 group_openid(str) 键控。
+
+### D9 — 状态访问直连 DB repo（不重建 legacy dict）
+- coordinator 保留并发结构（PendingRequest/seq/supersede/clear watermark/首杀 seq 解析/save-before-deliver/request_id upsert），但状态读写改调 db repos（record_solve / get_user_problem_submissions / group_scoreboard / save_submission …），不再 load_scoreboard 整 dict。
+- 移除打星/user_groups/dynamic CD/settle_dynamic_submit_wait；移除 curfew；移除 top5（_send_scoreboard_success 只留 cheer+@winner+reveal）。
+- `_update_scoreboard_for_pid` → `posts.record_solve`（已含首杀/order/dedup/加权）；排名/总分用 `posts.group_scoreboard`。
+
+### D10 — 反馈重设计映射（保留原 UX 意图）
+- reaction 无官方等价 → 极短 emoji 字符群消息：👀/睁眼 ack→「👀」；offtopic 123→「😵」(face123 语义)；clear/feedback 👌→「👌」；LLM 失败 268→保留失败文本（无 emoji 必要）。
+- 314 二审信号 → 仅 emoji 字符消息（如「🧐」），**无文字**（「二审」是开发术语，原设计仅 reaction 无文字）。
+- 错误判定 / clarify → markdown `send_group_at`（@asker，短文本；真实中位 50/85 字）。
+- 恭喜 cheer + @winner + reveal → markdown @winner（保留 cheer 文案与本题来源揭示）。
+- 卡片级（题卡/help/scoreboard/review长/editorial/history）→ 长图 render/send_forward_card。
+- review 短回复 → markdown @asker；长回复 → 长图 + 一句「回复较长，已折叠到卡片里啦 👆」@asker。
+- 失败/无题面/用法提示 → 群文本（短）或 markdown @asker。
+
+### D11 — 题面缓存入 DB
+- statements 存 `problems.statement_json`（picker 纯 fetch/parse，主进程写 DB，D6）。`load_problem_statement_json(pid)`/`load_problem_statement(pid)` 改读 DB；复用 `problem_content.format_problem_statement_for_llm`（单 \n join，pitfall #3）。
+- clarify grounding 改用当前 pid 的 verified summary（problems.summary_zh + 指纹门控），替代 legacy groupctx 末条 assistant（更干净，与私聊路径一致）。
+
+### D12 — 昵称兜底（Q9 未决前的实现）
+- 官方群事件 author 仅 member_openid，无昵称。暂用 openid 短码兜底（前 8 位）作显示名；`users.nickname` 列预留，未来可加 /nick 自定义指令（待 owner 定）。scoreboard display-time 刷新群昵称无法移植（无 API），改用 users.nickname 快照。
+
+### D13 — picker / preparation / publication 持久化分工
+- picker.py 仍是子进程 CF-fetch 边界，写磁盘 statement 缓存镜像（editorial 爬虫也复用该镜像）；选题排除集改由 DB 驱动：主进程把 `get_excluded_pids`（used ∪ posted ∪ solved）写成临时 `pick_exclude.json`，经 `--exclude-file` 传入；picker 用其作完整排除集，不再读/重置磁盘 used.json。
+- preparation（`problem_preparation.prepare_problem`）写 DB `problems` 目录 + `group_used`；publication（`/newproblem`）写 `group_posts` + verified summary。磁盘 statement 缓存仅作爬虫镜像保留。
+- 题库耗尽（`ProblemPoolExhausted`）时把排除集放宽为 posted ∪ solved 重试一次（原 used-cycle reset 的等价物）。
+
+### D14 — dispatch 群-only 多群 + 冷却
+- `handlers.process_event` 只处理归一化群消息（`message_type=="group"`）；C2C/私聊事件整边忽略（private judge disable）。不再 drop 非 current_group——任何来事件的群都服务。
+- 别名归一化为规范指令文本后构建 `Ctx(raw_text=…)`；handler 自行解析 raw_text。
+- 每-(group,user,command) 冷却在 dispatch 层用内存表强制（CommandDef.cooldown）；冷却内静默丢弃（避免刷屏）。
+- 无官方 reaction/notice/poke/friend-request 等价 → 这些事件分支整体移除。
+
+### D15 — 群服务惰性发现
+- worker 维护 `group_openid → GroupServices`（每群一个 NextProblemPrefetcher + editorial 维护 loop）。首次见到某群事件时惰性启动该群服务；scheduler/echo 遍历已发现群集合。
+- 群无需预配置名单；发言即服务（群消息天然成员门禁）。
+
+### D16 — 实例生命周期按 app_id（D5 落地）
+- main.py start/restart/stop/status 改按 `{data_dir}/run/{app_id}.pid` pidfile + 进程存活/cwd 判定，取代原 napcat_ws_port 监听探测（官方外连 WS 无监听端口）。
+- 日志 `{data_dir}/logs/{app_id}/YYYY-MM-DD.log`。config 放宽：official 模式不再硬要求 bot_qq/current_group（保留字段供 legacy，validate_official 把关 app_id/app_secret）。
+
 ## 开放问题 / 待 owner 确认（实施中收集，最后统一讨论）
 
 - Q1 — [已解决] markdown 用原生 `msg_type=2, markdown.content`（template_id/custom_template_id 已废弃）；@ 用 `<qqbot-at-user id="member_openid"/>`、@all 用 `<qqbot-at-everyone/>`。一次请求只能携带一种内容（0/2/7 互斥）；传 markdown 时 content/ark 必须为空。出站长度上限：文本约 2000 码点 / markdown 约 3000 码点（超长→长图，P2）。被动 msg_id 5min 有效，msg_id+msg_seq 重复发送会失败。
@@ -62,6 +107,7 @@
 - Q7 — /range 指令的权限（任何群友可设）是否需要防滥用冷却。
 - Q8 — 群名/群头像获取（官方无群信息 API 白名单）：显示用群名从哪来（事件无群名，可能需 owner 配置或省略）。
 - Q9 — 用户昵称来源：官方群事件 author 只有 member_openid，无 nickname；无 get_group_member_list 等价 API。scoreboard 显示昵称从何而来？（候选：事件无→用 openid 短码兜底 / owner 配置 / 用户自定义昵称指令）。原设计 display-time 刷新群昵称无法直接移植。
+- Q10 — 官方**入站** @提及 / 引用回复 的 content 格式未实测确认。review 的「引用旧题卡定位」依赖引用消息携带 pid，官方引用格式未知 → 本期 review 仅定位最近 solved 题，引用定位延后。@提及解析按尽力而为 `<@!openid>` 正则（review 携带他人上下文）；待实测后校准。
 
 ## 实施进度
 

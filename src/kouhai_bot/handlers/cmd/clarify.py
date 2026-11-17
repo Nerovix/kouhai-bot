@@ -7,53 +7,29 @@ import re
 
 from .. import registry
 from ..registry import CommandDef
-from ...context import get_display_name
-from ...napcat.client import (
-    build_plain_message,
-    send_group_msg,
-    send_private_msg,
-)
-from ...private_judge import GROUP_SCOPE, PRIVATE_SCOPE
+from ..context import Ctx
 from .submit import enqueue_clarify_request
 
 logger = logging.getLogger("kouhai-bot.cmd.clarify")
 
 
-async def handle(group_id: int, user_id: int, sender: dict,
-                 message_id: str, raw_text: str, segments: list,
-                 event: dict) -> None:
-    nickname = get_display_name(sender)
-    scope = PRIVATE_SCOPE if event.get("message_type") == "private" else GROUP_SCOPE
-
-    stripped = raw_text.lstrip()
+async def handle(ctx: Ctx) -> None:
+    stripped = ctx.raw_text.lstrip()
     match = re.match(r'/clarify\s+', stripped)
     if not match:
-        if scope == PRIVATE_SCOPE:
-            await send_private_msg(user_id, build_plain_message("用法：/clarify 你的问题～"))
-        else:
-            await send_group_msg(group_id, build_plain_message(
-                f"@{nickname} 用法：/clarify 你的问题～"
-            ))
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid, "用法：/clarify 你的问题～",
+            msg_id=ctx.message_id,
+        )
         return
-
     question = stripped[match.end():].strip()
     if not question:
-        if scope == PRIVATE_SCOPE:
-            await send_private_msg(user_id, build_plain_message("/clarify 后面要写你的问题呀～"))
-        else:
-            await send_group_msg(group_id, build_plain_message(
-                f"@{nickname} /clarify 后面要写你的问题呀～"
-            ))
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid, "/clarify 后面要写你的问题呀～",
+            msg_id=ctx.message_id,
+        )
         return
-
-    await enqueue_clarify_request(
-        group_id,
-        user_id,
-        sender,
-        message_id,
-        question,
-        scope=scope,
-    )
+    await enqueue_clarify_request(ctx, question)
 
 
 def register() -> None:

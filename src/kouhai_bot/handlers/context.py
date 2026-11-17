@@ -17,8 +17,9 @@ from .runtime import get_runtime
 
 
 def display_name(user_openid: str, nickname: str = "") -> str:
-    """Best display name. Official group events carry no nickname (Q9), so
-    fall back to a short openid code — never a generic placeholder."""
+    """Best display name. Official group events carry member_nickname/username
+    (since 2026-11-16); when absent, fall back to a short openid code — never a
+    generic placeholder."""
     nick = (nickname or "").strip()
     if nick:
         return nick

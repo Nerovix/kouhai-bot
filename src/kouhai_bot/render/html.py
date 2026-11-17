@@ -1,8 +1,10 @@
 """Mobile QQ merged-forward card replica → HTML for long-image rendering.
 
 A opened forward card reads as a vertical list of chat bubbles: avatar +
-nickname + white bubble. The official API exposes no avatar URL, so avatars
-are deterministic initial-letter color circles (recorded as a fidelity note).
+nickname + white bubble. Avatars render as deterministic initial-letter color
+circles. Official events expose an ``author.avatar`` URL since 2026-11-16, but
+its real-world delivery is not yet verified, so we do not load remote avatar
+images here yet (letter circles are the safe fallback).
 """
 
 from __future__ import annotations

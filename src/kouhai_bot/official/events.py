@@ -3,6 +3,13 @@
 Identity is openid native: group messages carry ``author.member_openid``
 (cross-group stable, == C2C ``user_openid``); the group key is
 ``group_openid``. Message ids are opaque strings (``ROBOT1.0_…``).
+
+Since the 2026-11-16 official event update, the group ``author`` (GroupUser)
+also carries ``username`` (QQ nickname), ``member_nickname`` (in-group card),
+and ``avatar`` (avatar URL). We surface a resolved ``nickname`` (group card
+preferred, then QQ nickname) and ``avatar``; the structured ``mentions`` list
+and ``message_scene``/``msg_elements`` (quote/reference context) are passed
+through for @-mention and quoted-reply handling.
 """
 
 from __future__ import annotations
@@ -30,6 +37,11 @@ def _group_message(t: str, d: dict[str, Any]) -> dict[str, Any]:
         "content": str(d.get("content", "") or ""),
         "timestamp": d.get("timestamp", ""),
         "author": author,
+        "nickname": str(author.get("member_nickname") or author.get("username") or ""),
+        "avatar": str(author.get("avatar") or ""),
+        "mentions": d.get("mentions") or [],
+        "message_scene": d.get("message_scene") or {},
+        "msg_elements": d.get("msg_elements") or [],
         "attachments": d.get("attachments") or [],
         "at_bot": t == "GROUP_AT_MESSAGE_CREATE",
         "raw": d,

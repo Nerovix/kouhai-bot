@@ -36,6 +36,41 @@ def test_normalize_group_message():
     assert ev["at_bot"] is False
 
 
+def test_normalize_group_message_identity_and_context_fields():
+    # 2026-11-16 official update: author carries username/member_nickname/avatar;
+    # events carry structured mentions + message_scene + msg_elements.
+    ev = normalize_event("GROUP_MESSAGE_CREATE", {
+        "id": "M1", "content": "/review hi", "group_openid": "G1",
+        "author": {
+            "member_openid": "U1", "username": "全局昵称",
+            "member_nickname": "群名片", "avatar": "https://thirdqq.qlogo.cn/x",
+        },
+        "mentions": [{"member_openid": "U2", "username": "别人", "scope": "single"}],
+        "message_scene": {"source": "default", "ext": ["ref_msg_idx=TMP_x"]},
+        "msg_elements": [{"message_type": 103, "content": "引用内容"}],
+    })
+    assert ev["nickname"] == "群名片"          # group card preferred over username
+    assert ev["avatar"] == "https://thirdqq.qlogo.cn/x"
+    assert ev["mentions"][0]["member_openid"] == "U2"
+    assert ev["message_scene"]["ext"] == ["ref_msg_idx=TMP_x"]
+    assert ev["msg_elements"][0]["message_type"] == 103
+
+
+def test_normalize_group_nickname_falls_back_to_username():
+    ev = normalize_event("GROUP_MESSAGE_CREATE", {
+        "id": "M1", "content": "hi", "group_openid": "G1",
+        "author": {"member_openid": "U1", "username": "全局昵称"},
+    })
+    assert ev["nickname"] == "全局昵称"        # no group card → QQ nickname
+    assert ev["avatar"] == ""
+    assert ev["mentions"] == []
+    empty = normalize_event("GROUP_MESSAGE_CREATE", {
+        "id": "M2", "content": "hi", "group_openid": "G1",
+        "author": {"member_openid": "U1"},
+    })
+    assert empty["nickname"] == ""             # absent → Ctx falls back to openid[:8]
+
+
 def test_normalize_at_message_and_c2c():
     at = normalize_event("GROUP_AT_MESSAGE_CREATE", {
         "id": "M2", "content": " hi", "group_openid": "G1",

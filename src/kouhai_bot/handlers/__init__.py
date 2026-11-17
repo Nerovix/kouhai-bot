@@ -113,13 +113,20 @@ async def process_event(
     if cmd_token.lstrip("/") != cmd_def.name:
         handler_raw_text = f"/{cmd_def.name}{raw_text[len(cmd_token):]}"
 
+    author = event.get("author") or {}
+    nickname = str(
+        event.get("nickname")
+        or author.get("member_nickname")
+        or author.get("username")
+        or ""
+    )
     ctx = Ctx(
         group_openid=group_openid,
         user_openid=user_openid,
         message_id=message_id,
         raw_text=handler_raw_text,
         args=handler_raw_text[len(cmd_def.name) + 1:].strip(),
-        nickname=str((event.get("author") or {}).get("nickname", "") or ""),
+        nickname=nickname,
         event=event,
     )
 

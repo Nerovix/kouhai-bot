@@ -117,8 +117,10 @@ Transport: official/ (tokens/rest/gateway/sender/budget/media)
   message_id, raw_text, args, nickname, event)` with properties `db/sender/browser/name`
   reading `handlers/runtime.py` `get_runtime()`. Worker calls `set_runtime(Runtime(db,
   sender, browser))` at startup; tests inject a fake. `display_name(openid, nick)`
-  falls back to `openid[:8]` — never a generic placeholder (Q9: official events carry
-  no nickname).
+  falls back to `openid[:8]` — never a generic placeholder. Since the 2026-11-16
+  official event update, group `author` carries `username`/`member_nickname`/`avatar`;
+  `normalize_event` resolves `nickname` (group card preferred, then QQ nickname) and
+  passes `avatar` + structured `mentions`/`message_scene`/`msg_elements` through.
 - **Dispatch (D14)**: `handlers.process_event` handles only normalized group messages;
   normalizes leading command junk, runs `echo.check_and_echo` for non-command messages,
   resolves the command, enforces a per-(group,user,command) cooldown (`CommandDef.cooldown`,
@@ -409,8 +411,10 @@ markdown `<qqbot-at-everyone/>` + lines via `sender.send_group_markdown`. @all n
    must be empty when sending markdown. Text ~2000 / markdown ~3000 codepoints; longer → long image.
 7. **Passive reply window**: msg_id valid 5min/5 replies; same msg_id+msg_seq dup fails. ReplyBudget
    handles passive→active degradation.
-8. **Nickname fallback is openid[:8]**, never a generic placeholder like "群友". Official events
-   carry no nickname (Q9); `users.nickname` is a snapshot.
+8. **Nickname fallback is openid[:8]**, never a generic placeholder like "群友". Since
+   2026-11-16 official group events carry `author.member_nickname`/`username` (use them;
+   group card preferred); `users.nickname` stores the snapshot. `author.avatar` URL also
+   exists but real delivery is unverified — render still uses letter-color circles.
 9. **Every message text matters**: validation/error/success wording is deliberate; preserve intent.
 10. **Offtopic is model output** (`reaction="123"`), not local substring blacklists.
 11. **Save-before-deliver** for clarify/review/submit so /feedback targeting is consistent.

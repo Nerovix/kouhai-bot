@@ -76,7 +76,11 @@ def _event(
         "user_openid": user,
         "message_id": mid,
         "content": content,
-        "author": {"nickname": nickname},
+        "author": {
+            "member_openid": user,
+            "username": nickname,
+            "member_nickname": nickname,
+        },
     }
 
 

@@ -125,8 +125,26 @@
   - 11 测试（含真实 Chromium 集成）；样例题卡 PNG 目视验证通过。
   - 卡片**内容**构建器（题卡/help/scoreboard/review/editorial/history）随 P3 handler 迁移一并接入渲染器。
 - 生命周期（main/worker）重写与 handler 迁移强耦合（身份模型 int→openid 渗透所有 handler 签名 + coordinator + dispatch），归入 P3 起点统一做，避免半成品 worker。P1 先交付可测地基。
+- P3 命令移植 + 生命周期 [完成]：
+  - handler 签名统一 `async def handle(ctx: Ctx)`；`handlers/runtime.py` 全局持有 Database+OfficialSender+RenderBrowser；`handlers/context.py` Ctx + display_name(openid[:8] 兜底)。
+  - 13 指令全部移植（submit/clarify/review/newproblem/problem/tag/scoreboard/status/sync/clear/feedback/help/range）+ 6 别名；移除 setproblem/testcd/sbmjev/bad。
+  - GroupCoordinator DB 化（admission snapshot/seq 首杀/save-before-deliver/request_id upsert/clear watermark/supersede）；反馈重设计 D10（markdown @ / 长图 / 极短 emoji，🧐 二审无文字，删 top5）。
+  - dispatch 群-only 多群 + per-(group,user,cmd) 冷却（D14）；echo/scheduler 多群 openid 化；contest_check 改 official markdown @all。
+  - main.py app_id pidfile 生命周期（D16）；worker.py 官方外连 WS + 每群惰性 GroupServices（D15）；config 放宽 bot_qq/current_group。
+- P4 /sync 跨群拉取 [完成]：拉取 user×当前 pid 跨群完整历史→全局时间排序→精确去重（content+result，零 LLM）→import tagged synced（不显示来源群）→含 correct 则本群首杀计分；幂等；空源 abort；active 请求拒绝。
+- P5 清 NapCat + 文档 + 测试 [完成]：
+  - 删除 napcat/、friend_requests、handlers/notice、private_judge、user_groups、curfew、jev、根 context.py；shared.py 清除休眠 legacy 函数（napcat 卡构建/user_groups 榜/jev）。
+  - README.md / AGENTS.md / config.example.yaml 全面改写为官方架构（AGENTS.md 保留运营约束与 LLM 推理规则原文）。
+  - 测试套件 overhaul：conftest 改 aiohttp 网络隔离 + 全局 runtime 复位；删除/重写全部 legacy 测试，新增官方架构覆盖。全量 **618 passed**。
+  - 实施发现（非 bug，记录备查）：
+    - prefetch READY slot 实际仍是 JSON（`groups/<gid>/next_problem.json` v2）；DB `prefetch_slot` 表 + repos 已建但**未启用**（死代码）。DB 仅用于 slot 校验读取（rating/current/solves/statement sha）。是否收敛入 DB 留待 owner 定。
+    - annotations 导出仍是 JSON 离线工具（Q6 延后）：读 JSON scoreboard.json/problem_summaries.json，不读 SQLite group_solves；新 submit.py 已移除首杀自动导出 hook，仅 sync_annotation_bundles backfill 入口。测试用 `test_db_solves_are_not_visible_to_json_exporter_yet` 显式钉住该边界，Q6 落地时会响亮失败。
+    - cards.py `_bot_reply_text` 对「reply 内嵌 tag 但无 model_tag 字段」的 legacy 记录会渲染 0 次 tag（AGENTS.md 旧文档说渲染 1 次）。全新建库（D1）下所有记录都带 model_tag 字段，该 legacy 情形不可达，故不改源码。
 
 ## 变更日志
 - P1 启动：建立决策日志；确定 D1–D7 架构。
 - P1 完成：DB + official 传输 + config 地基；Q1 解决；新增 Q9（昵称来源）；生命周期归入 P3。
 - P2 完成：长图渲染器（Playwright 高保真 QQ 转发卡）+ MediaCache + base64 发图；Q2 解决；样例题卡目视验证。
+- P3 完成：13 指令 + Ctx/runtime + GroupCoordinator DB 化 + 反馈重设计 + dispatch/echo/scheduler 多群 + main/worker 官方生命周期；D8–D16 落地。
+- P4 完成：/sync 跨群拉取（群=视图物化，精确去重，含通过加分）。
+- P5 完成：删除 NapCat/私聊/打星/宵禁/jev 模块；README/AGENTS.md/config.example 改写；测试 overhaul 全量 618 passed；记录 prefetch JSON-slot/annotations Q6 边界/cards legacy-tag 三项实施发现。

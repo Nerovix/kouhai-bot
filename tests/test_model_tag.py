@@ -1,368 +1,211 @@
-"""Unit tests for model-tag persistence and rendering.
+"""Model-tag plumbing: display-only metadata, never LLM-visible.
 
-Covers the two gaps fixed together:
-- judge (submit) records persist `model_tag` as a dedicated field so the
-  forwarded history card can render it on 🤖 lines;
-- the /sync scored cheer appends the model tag of the synced private correct
-  record, matching the in-group /submit scoreboard message.
+Covers llm.append_model_tag (rstrip, no doubling), llm.strip_model_tags
+(trailing configured tags removed iteratively, mid-text preserved),
+configured_model_tags across both provider queues, and the prompt builders
+(shared._history_dialogue, submit._build_review_history) plus the history
+card rendering the tag exactly once for legacy embedded-tag records.
+
+Private-judge / sync-cheer / UserGroupConfig / top5 coverage is dropped
+(those features were removed in the official-API migration).
 """
 
-import sys, os, asyncio
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from __future__ import annotations
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+import pytest
 
-from kouhai_bot.annotations.exporter import _collect_rounds_for_problem, _history_item
-from kouhai_bot.config import UserGroupConfig
-from kouhai_bot.handlers.cmd import sync as sync_mod
-from kouhai_bot.handlers.cmd.submit import PendingRequest, _context_record
-from kouhai_bot.llm import append_model_tag
-from kouhai_bot.private_judge import (
-    copy_records,
-    first_correct_submit_record,
-    format_history_records,
-    private_correct_record_model_tag,
-    private_record_has_correct,
+from kouhai_bot.config import BotConfig
+from kouhai_bot.handlers.cards import build_history_card_nodes
+from kouhai_bot.handlers.cmd.submit import _build_review_history
+from kouhai_bot.handlers.shared import _history_dialogue
+from kouhai_bot.llm import (
+    append_model_tag,
+    configured_model_tags,
+    strip_model_tags,
 )
+from kouhai_bot.llm_config import LlmProviderConfig
 
-GID = 999999
-UID = 42
-PID = "542D"
-TAG = "『DSv4pro』"
+TAG = "🐳"
+TAG2 = "֎AI"
 
 
-def _req(**overrides) -> PendingRequest:
-    kwargs = dict(
-        kind="submit",
-        group_id=GID,
-        user_id=UID,
-        sender={"nickname": "Alice"},
-        message_id="m-1",
-        command="submit",
-        nickname="Alice",
-        payload="我的做法是……",
-        target_pid=PID,
-        seq=7,
+def _provider(name: str, tag: str) -> LlmProviderConfig:
+    return LlmProviderConfig(
+        name=name, api_key="test-key",
+        base_url="https://llm.example.invalid/v1", model="m", model_tag=tag,
     )
-    kwargs.update(overrides)
-    return PendingRequest(**kwargs)
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# _context_record: judge records persist the model tag as a field
-# ═══════════════════════════════════════════════════════════════════════
-
-def test_context_record_stores_model_tag_when_present():
-    record = _context_record(_req(), result="incorrect", reason="不对哦", reply="再想想～", model_tag=TAG)
-    assert record["model_tag"] == TAG
-    assert record["type"] == "submit"
-    assert record["result"] == "incorrect"
+@pytest.fixture
+def tagged_config(tmp_path, monkeypatch):
+    cfg = BotConfig(data_dir=str(tmp_path))
+    cfg.llm_smart_providers = [_provider("smart-a", TAG), _provider("smart-b", "")]
+    cfg.llm_general_providers = [_provider("general-a", TAG2), _provider("general-b", TAG)]
+    monkeypatch.setattr("kouhai_bot.config._config", cfg)
+    return cfg
 
 
-def test_context_record_omits_model_tag_when_empty():
-    record = _context_record(_req(), result="correct", reason="对！", reply="恭喜～")
-    assert "model_tag" not in record
+@pytest.fixture
+def unconfigured(tmp_path, monkeypatch):
+    monkeypatch.setattr("kouhai_bot.config._config", None)
+    monkeypatch.setenv("KOUHAI_CONFIG", str(tmp_path / "missing.yaml"))
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# format_history_records: forwarded history card renders the tag
-# ═══════════════════════════════════════════════════════════════════════
-
-def _judge_record(reply: str, model_tag: str = TAG) -> dict:
-    return {
-        "timestamp": "2026-09-09T12:00:00+08:00",
-        "type": "submit",
-        "content": "把(ai,bi)看成无序对……",
-        "result": "incorrect",
-        "reason": "还差一点",
-        "reply": reply,
-        "problem": PID,
-        "model_tag": model_tag,
-    }
+# ── append_model_tag ────────────────────────────────────────────────────
 
 
-def test_history_card_appends_model_tag_to_judge_reply():
-    text = format_history_records([_judge_record("相邻区间什么时候归入同一段呀～")], user_display_name="张三")
-    lines = text.splitlines()
-    assert lines[0] == "张三在当前的历史记录如下："
-    assert lines[1] == "👤：把(ai,bi)看成无序对……"
-    assert lines[2] == "🤖：相邻区间什么时候归入同一段呀～" + TAG
+def test_append_direct_no_separator():
+    assert append_model_tag("判对了", TAG) == "判对了" + TAG
 
 
-def test_history_card_renders_tag_on_reply_only_record():
-    record = _judge_record("再检查一下奇偶转移～")
-    record.pop("content")
-    text = format_history_records([record], user_display_name="张三")
-    assert text.splitlines()[1] == "🤖：再检查一下奇偶转移～" + TAG
+def test_append_empty_tag_is_noop_but_rstrips():
+    assert append_model_tag("判对了\n", "") == "判对了"
 
 
-def test_history_card_without_model_tag_field_unchanged():
-    record = _judge_record("嗯嗯思路对啦～")
-    record.pop("model_tag")
-    text = format_history_records([record], user_display_name="张三")
-    assert text.splitlines()[2] == "🤖：嗯嗯思路对啦～"
+def test_append_rstrips_before_appending():
+    assert append_model_tag("判对了 \n", TAG) == "判对了" + TAG
 
 
-def test_history_card_renders_new_style_clarify_field_tag():
-    # New clarify/review records store the raw reply + a dedicated field.
-    record = {
-        "timestamp": "2026-09-09T12:05:00+08:00",
-        "type": "clarify",
-        "content": "n 的范围是多少？",
-        "result": "clarify",
-        "reply": "n ≤ 1e5 哦～",
-        "problem": PID,
-        "model_tag": TAG,
-    }
-    text = format_history_records([record], user_display_name="张三")
-    assert text.splitlines()[2] == "🤖：n ≤ 1e5 哦～" + TAG
+def test_append_does_not_double_an_echoed_tag():
+    assert append_model_tag("判对了" + TAG, TAG) == "判对了" + TAG
+    # trailing whitespace after the echoed tag is still normalized
+    assert append_model_tag("判对了" + TAG + "\n", TAG) == "判对了" + TAG
 
 
-def test_history_card_renders_legacy_embedded_clarify_tag_once():
-    # Legacy clarify/review records embedded the tag in `reply` and carry no
-    # field — the card must still render it exactly once.
-    record = {
-        "timestamp": "2026-09-09T12:05:00+08:00",
-        "type": "clarify",
-        "content": "n 的范围是多少？",
-        "result": "clarify",
-        "reply": "n ≤ 1e5 哦～" + TAG,
-        "problem": PID,
-    }
-    text = format_history_records([record], user_display_name="张三")
-    assert text.splitlines()[2] == "🤖：n ≤ 1e5 哦～" + TAG
+def test_append_different_tag_still_appends():
+    assert append_model_tag("判对了" + TAG, TAG2) == "判对了" + TAG + TAG2
 
 
-def test_history_card_mixed_records_keep_order_and_tags():
-    records = [
-        _judge_record("第一步就错啦～", model_tag="『A』"),
-        {
-            "timestamp": "2026-09-09T12:05:00+08:00",
-            "type": "clarify",
-            "content": "时空限制？",
-            "result": "clarify",
-            "reply": "2s / 256MB～",
-            "problem": PID,
-        },
-        _judge_record("这次对啦🎉", model_tag="『B』"),
-    ]
-    text = format_history_records(records, user_display_name="张三")
-    lines = text.splitlines()
-    assert lines[2] == "🤖：第一步就错啦～『A』"
-    assert lines[4] == "🤖：2s / 256MB～"
-    assert lines[6] == "🤖：这次对啦🎉『B』"
+# ── strip_model_tags ────────────────────────────────────────────────────
 
 
-def test_history_card_skips_doubled_tag_when_reply_already_tagged():
-    # An LLM that saw tagged history can echo the suffix in its own reply;
-    # the card must render the tag exactly once.
-    record = _judge_record("思路对啦" + TAG)
-    text = format_history_records([record], user_display_name="张三")
-    assert text.splitlines()[2] == "🤖：思路对啦" + TAG
+def test_strip_trailing_tag_and_rstrip():
+    assert strip_model_tags("判对了" + TAG, [TAG]) == "判对了"
+    assert strip_model_tags("判对了 " + TAG, [TAG]) == "判对了"
 
 
-def test_history_card_incorrect_empty_reply_falls_back_to_reason():
-    # The live message for an empty-reply incorrect verdict sends
-    # "{reason}。再想想？🤔" + tag (submit.py _finalize_submit); the card mirrors it.
-    record = _judge_record("")
-    record["reason"] = "会 TLE"
-    text = format_history_records([record], user_display_name="张三")
-    assert text.splitlines()[2] == "🤖：会 TLE。再想想？🤔" + TAG
+def test_strip_stacked_tags_iteratively():
+    assert strip_model_tags("判对了" + TAG + TAG2, [TAG, TAG2]) == "判对了"
+    assert strip_model_tags("判对了" + TAG2 + TAG, [TAG, TAG2]) == "判对了"
 
 
-def test_history_card_correct_empty_reply_renders_no_bot_line():
-    record = _judge_record("")
-    record["result"] = "correct"
-    record["reason"] = "做法完全正确"
-    text = format_history_records([record], user_display_name="张三")
-    assert text.splitlines() == ["张三在当前的历史记录如下：", "👤：把(ai,bi)看成无序对……"]
+def test_strip_preserves_mid_text_occurrences():
+    assert strip_model_tags(f"用户引用了 {TAG} 这个符号", [TAG]) == f"用户引用了 {TAG} 这个符号"
+    assert strip_model_tags(f"a{TAG}b", [TAG]) == f"a{TAG}b"
 
 
-def test_copy_records_preserves_model_tag_across_sync():
-    copied = copy_records([_judge_record("回答～")])
-    assert copied[0]["model_tag"] == TAG
-    assert private_correct_record_model_tag(
-        [{**copied[0], "result": "correct", "reply": "做法完全正确！"}], PID,
-    ) == TAG
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# append_model_tag: shared append helper
-# ═══════════════════════════════════════════════════════════════════════
-
-def test_append_model_tag_cases():
-    assert append_model_tag("做法对啦", "") == "做法对啦"
-    assert append_model_tag("做法对啦", TAG) == "做法对啦" + TAG
-    assert append_model_tag("做法对啦" + TAG, TAG) == "做法对啦" + TAG
-    assert append_model_tag("做法对啦 \n", TAG) == "做法对啦" + TAG
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# strip_model_tags: the LLM never sees tags
-# ═══════════════════════════════════════════════════════════════════════
-
-def _patched_llm_tags():
-    provider = SimpleNamespace(model_tag=TAG)
-    cfg = SimpleNamespace(
-        llm_smart_providers=[provider],
-        llm_general_providers=[SimpleNamespace(model_tag="『B』")],
-    )
-    return patch("kouhai_bot.llm.get_config", return_value=cfg)
-
-
-def test_strip_model_tags_removes_trailing_tags_only():
-    from kouhai_bot.llm import strip_model_tags
-
-    assert strip_model_tags("思路对啦" + TAG, [TAG]) == "思路对啦"
-    assert strip_model_tags("思路对啦" + TAG + "『B』", [TAG, "『B』"]) == "思路对啦"
-    assert strip_model_tags("思路对啦", [TAG]) == "思路对啦"
-    # Mid-text occurrences are user content and must survive.
-    assert strip_model_tags(f"他发的{TAG}是啥", [TAG]) == f"他发的{TAG}是啥"
+def test_strip_unknown_tag_and_empty_text():
+    assert strip_model_tags("判对了" + TAG, [TAG2]) == "判对了" + TAG
     assert strip_model_tags("", [TAG]) == ""
+    assert strip_model_tags("判对了", []) == "判对了"
 
 
-def test_strip_model_tags_uses_configured_tags():
-    from kouhai_bot.llm import strip_model_tags
-
-    with _patched_llm_tags():
-        assert strip_model_tags("思路对啦" + TAG) == "思路对啦"
-        assert strip_model_tags("思路对啦" + "『B』") == "思路对啦"
-    with patch("kouhai_bot.llm.get_config", side_effect=RuntimeError("no config")):
-        assert strip_model_tags("思路对啦" + TAG) == "思路对啦" + TAG
+def test_strip_uses_configured_tags_by_default(tagged_config):
+    assert strip_model_tags("判对了" + TAG) == "判对了"
+    assert strip_model_tags("解释如下" + TAG2) == "解释如下"
+    # a tag nobody configured is user content and stays
+    assert strip_model_tags("判对了『未配置』") == "判对了『未配置』"
 
 
-def test_history_dialogue_strips_tags_from_bot_turns():
-    from kouhai_bot.handlers.shared import _history_dialogue
+def test_strip_without_config_leaves_text_untouched(unconfigured):
+    assert configured_model_tags() == []
+    assert strip_model_tags("判对了" + TAG) == "判对了" + TAG
 
-    records = [
-        # Legacy judge record with embedded tag in reply.
-        {**_judge_record("相邻区间讲清楚呀～" + TAG)},
-        # Reason-only incorrect record whose reason carries an echo tag.
-        {**_judge_record(""), "result": "incorrect", "reason": "会 TLE" + TAG},
+
+# ── configured_model_tags ───────────────────────────────────────────────
+
+
+def test_configured_tags_merge_queues_dedup_and_skip_empty(tagged_config):
+    assert configured_model_tags() == [TAG, TAG2]
+
+
+def test_configured_tags_strip_whitespace(tmp_path, monkeypatch):
+    cfg = BotConfig(data_dir=str(tmp_path))
+    cfg.llm_smart_providers = [_provider("p", "  🐳  ")]
+    monkeypatch.setattr("kouhai_bot.config._config", cfg)
+    assert configured_model_tags() == [TAG]
+
+
+# ── prompt builders never show tags to the LLM ──────────────────────────
+
+
+def test_history_dialogue_strips_reply_and_reason_tags(tagged_config):
+    history = [
+        {
+            "type": "submit", "result": "incorrect",
+            "content": "我的做法", "reply": "", "reason": "复杂度不对" + TAG,
+        },
+        {
+            "type": "clarify", "result": "clarify",
+            "content": "疑问", "reply": "解释如下" + TAG2, "reason": "",
+        },
     ]
-    with _patched_llm_tags():
-        dialogue = _history_dialogue(records)
-    bot_contents = [turn["content"] for turn in dialogue if turn["role"] == "assistant"]
-    assert bot_contents == ["相邻区间讲清楚呀～", "会 TLE"]
-    assert all(TAG not in content for content in bot_contents)
+    dialogue = _history_dialogue(history)
+    assert [d["role"] for d in dialogue] == ["user", "assistant", "user", "assistant"]
+    assert dialogue[1]["content"] == "复杂度不对"
+    assert dialogue[1]["kind"] == "submit_verdict_reason"
+    assert dialogue[3]["content"] == "解释如下"
+    assert dialogue[3]["kind"] == "clarify_feedback"
+    assert all(TAG not in d["content"] and TAG2 not in d["content"] for d in dialogue)
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# first_correct_submit_record: shared scoring gate + tag lookup
-# ═══════════════════════════════════════════════════════════════════════
+def test_history_dialogue_reply_wins_over_reason(tagged_config):
+    history = [{
+        "type": "submit", "result": "incorrect",
+        "content": "做法", "reply": "回复" + TAG, "reason": "理由" + TAG,
+    }]
+    dialogue = _history_dialogue(history)
+    assert len(dialogue) == 2
+    assert dialogue[1]["content"] == "回复"
+    assert dialogue[1]["note"] == "bot_feedback_not_user_claim"
 
-def test_first_correct_submit_record_matches_has_correct():
-    records = [
-        _judge_record("不对哦"),
-        {**_judge_record("这次对啦"), "result": "correct"},
+
+def test_history_dialogue_keeps_user_content_verbatim(tagged_config):
+    history = [{
+        "type": "submit", "result": "pending",
+        "content": f"我引用 {TAG} 符号", "reply": "", "reason": "",
+    }]
+    dialogue = _history_dialogue(history)
+    assert dialogue[0]["content"] == f"我引用 {TAG} 符号"
+    assert dialogue[0]["note"] == "user_claim"
+
+
+def test_build_review_history_strips_tags(tagged_config):
+    history = [
+        {
+            "type": "submit", "result": "incorrect",
+            "content": "做法", "reason": "判定" + TAG, "reply": "回复" + TAG2,
+        },
+        {
+            "type": "clarify", "result": "clarify",
+            "content": "疑问", "reason": "", "reply": "解释" + TAG,
+        },
     ]
-    found = first_correct_submit_record(records, PID)
-    assert found is not None and found["result"] == "correct" and found["model_tag"] == TAG
-    assert first_correct_submit_record(records, "100A") is None
-    assert private_record_has_correct(records, PID) is True
+    text = _build_review_history(history)
+    assert "Judge判定: 判定\n" in text
+    assert "Bot回复: 回复\n" in text
+    assert "Bot回复: 解释\n" in text
+    assert TAG not in text and TAG2 not in text
+    assert "统计：clarify=1，submit=1（correct=0，incorrect=1），review=0。" in text
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# annotation exporter keeps tag provenance symmetric with the card
-# ═══════════════════════════════════════════════════════════════════════
-
-def test_exporter_history_item_carries_model_tag():
-    item = _history_item(_judge_record("再想想～"))
-    assert item["model_tag"] == TAG
-    assert _history_item({"reply": "x"})["model_tag"] == ""
+# ── history card renders the tag exactly once ───────────────────────────
 
 
-def test_exporter_round_carries_model_tag():
-    scoreboard = {
-        "solves": [{"user_id": UID, "problem": PID, "nickname": "Alice"}],
-        "user_submissions": {str(UID): [{**_judge_record("做法对啦"), "result": "correct"}]},
-    }
-    rounds = _collect_rounds_for_problem(scoreboard, PID)
-    assert len(rounds) == 1
-    assert rounds[0]["model_tag"] == TAG
-    assert rounds[0]["history_before"] == []
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# private_correct_record_model_tag: tag lookup for the sync cheer
-# ═══════════════════════════════════════════════════════════════════════
-
-def test_correct_record_model_tag_returns_first_correct_submit_tag():
+def test_history_card_renders_tag_once_for_legacy_and_new_records(tagged_config):
     records = [
-        _judge_record("不对哦"),
-        {**_judge_record("这次对啦"), "result": "correct"},
-        {**_judge_record("又提交了一次"), "result": "correct", "model_tag": "『B』"},
+        # legacy echo: tag embedded in the stored reply AND the dedicated
+        # field set → strip the echo, append once
+        {"type": "submit", "result": "correct", "content": "旧做法",
+         "reply": "判对了" + TAG, "reason": "", "model_tag": TAG},
+        # new: raw reply + dedicated model_tag field
+        {"type": "submit", "result": "correct", "content": "新做法",
+         "reply": "判对了", "reason": "", "model_tag": TAG},
+        # incorrect with empty reply → reason fallback carries the tag once
+        {"type": "submit", "result": "incorrect", "content": "错做法",
+         "reply": "", "reason": "不对", "model_tag": TAG},
     ]
-    assert private_correct_record_model_tag(records, PID) == TAG
-
-
-def test_correct_record_model_tag_empty_without_correct_record():
-    records = [_judge_record("不对哦")]
-    assert private_record_has_correct(records, PID) is False
-    assert private_correct_record_model_tag(records, PID) == ""
-
-
-def test_correct_record_model_tag_empty_for_legacy_records():
-    record = {**_judge_record("对啦"), "result": "correct"}
-    record.pop("model_tag")
-    assert private_correct_record_model_tag([record], PID) == ""
-
-
-def test_correct_record_model_tag_ignores_other_problems_and_types():
-    records = [
-        {**_judge_record("别的题"), "problem": "100A", "result": "correct"},
-        {"type": "clarify", "result": "clarify", "problem": PID, "reply": "x", "model_tag": "『C』"},
-    ]
-    assert private_correct_record_model_tag(records, PID) == ""
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# /sync scored cheer appends the correct record's model tag
-# ═══════════════════════════════════════════════════════════════════════
-
-async def _run_scored_cheer(model_tag: str, user_group: UserGroupConfig | None = None) -> str:
-    ranked_entry = {"user_id": str(UID), "rank": 1, "score": 12.0, "nickname": "Alice"}
-    top5 = [{"rank": 1, "user_id": UID, "nickname": "Alice", "solved": 3, "score": 12.0}]
-    with patch.object(sync_mod, "get_today_problem", return_value={"today": PID}), \
-         patch.object(sync_mod, "is_group_problem_solved", return_value=False), \
-         patch.object(
-             sync_mod,
-             "run_group_state_update",
-             AsyncMock(return_value=(True, 3, top5, {"solves": []})),
-         ), \
-         patch.object(sync_mod, "get_user_group", return_value=user_group), \
-         patch(
-             "kouhai_bot.handlers.shared.build_scoreboard_entries",
-             return_value=[ranked_entry],
-         ), \
-         patch.object(sync_mod, "load_known_problem_ratings", return_value={PID: 2300}), \
-         patch.object(sync_mod, "fetch_group_member_nickname_map", AsyncMock(return_value={})), \
-         patch.object(sync_mod, "_reveal_problem_source", AsyncMock(return_value="本题来自 CF542D Matrix God 2300✨")), \
-         patch.object(sync_mod, "schedule_post_solve_editorial_followup", MagicMock()):
-        text, scored = await sync_mod._score_synced_private_ac(
-            GID, UID, {"nickname": "Alice"}, PID, model_tag=model_tag,
-        )
-    assert scored is True
-    return text
-
-
-def test_sync_cheer_appends_model_tag():
-    text = asyncio.run(_run_scored_cheer(TAG))
-    assert text.startswith("恭喜拿下本题一血！🎉")
-    assert text.endswith("本题来自 CF542D Matrix God 2300✨" + TAG)
-    assert "🏆 Top 5：" in text
-
-
-def test_sync_cheer_without_model_tag_unchanged():
-    text = asyncio.run(_run_scored_cheer(""))
-    assert text.endswith("本题来自 CF542D Matrix God 2300✨")
-    assert TAG not in text
-
-
-def test_sync_cheer_named_user_group_gets_group_titled_top5():
-    # Parity with the in-group /submit scoreboard message (submit.py
-    # _send_scoreboard_success): named user groups get "🏆 {display_name} Top 5：".
-    text = asyncio.run(_run_scored_cheer(TAG, UserGroupConfig(name="star", display_name="打星组")))
-    assert "🏆 打星组 Top 5：" in text
-    assert text.endswith("本题来自 CF542D Matrix God 2300✨" + TAG)
+    nodes = build_history_card_nodes(records, user_name="Alice", bot_name="算法助手")
+    bot_texts = [n["content_text"] for n in nodes if n["nickname"] == "算法助手"]
+    assert bot_texts == ["判对了" + TAG, "判对了" + TAG, "不对。再想想？🤔" + TAG]
+    assert all(t.count(TAG) == 1 for t in bot_texts)

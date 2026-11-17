@@ -1,394 +1,228 @@
-import asyncio
-import json
-import os
-import shutil
-import sys
-import tempfile
-from contextlib import ExitStack
-from unittest.mock import AsyncMock, patch
+"""Annotation bundle export/store tests.
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+The exporter is still JSON-file-based (``scoreboard.json`` + disk statements +
+``problem_summaries.json``); the Q6 migration to the SQLite state layer is
+deferred. The old auto-export-on-/submit test was dropped: the new official-API
+submit handler no longer calls ``export_problem_annotation_bundle`` (backfill
+via ``sync_annotation_bundles`` remains the only export entry point).
+"""
+
+import json
+from pathlib import Path
+
+import pytest
+
+from kouhai_bot.annotations import exporter, store
+from kouhai_bot.config import BotConfig
+from kouhai_bot.db import set_database
+from kouhai_bot.db.repos import posts
 
 GID = 123456
 UID = 42
 PID = "542D"
 
-_temp_dir = None
-_sent = []
-_reacted = []
-_deepseek_response = None
-_group_members = {}
+
+@pytest.fixture
+def cfg(tmp_path, monkeypatch):
+    cfg = BotConfig(data_dir=str(tmp_path))
+    monkeypatch.setattr("kouhai_bot.config._config", cfg)
+    (tmp_path / "groups" / str(GID)).mkdir(parents=True)
+    (tmp_path / "statements").mkdir()
+    return cfg
 
 
-def _reset_state():
-    global _temp_dir, _sent, _reacted, _deepseek_response, _group_members
-    _sent = []
-    _reacted = []
-    _deepseek_response = None
-    _group_members = {
-        GID: [{"user_id": UID, "nickname": "Alice", "card": ""}],
-    }
-    _temp_dir = tempfile.mkdtemp(prefix="xcpc_annotations_")
-    data_dir = os.path.join(_temp_dir, "data")
-    os.makedirs(os.path.join(data_dir, "groups", str(GID)), exist_ok=True)
-    os.makedirs(os.path.join(data_dir, "statements"), exist_ok=True)
+def _write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _cleanup():
-    global _temp_dir
-    if _temp_dir and os.path.exists(_temp_dir):
-        shutil.rmtree(_temp_dir)
-    _temp_dir = None
-    for name in [
-        "kouhai_bot.annotations",
-        "kouhai_bot.annotations.exporter",
-        "kouhai_bot.annotations.store",
-        "kouhai_bot.handlers.cmd.submit",
-        "kouhai_bot.handlers.cmd.review",
-        "kouhai_bot.handlers.cmd.clarify",
-    ]:
-        sys.modules.pop(name, None)
-
-
-def _data_dir() -> str:
-    return os.path.join(_temp_dir, "data")
-
-
-def _write_json(path: str, data: dict):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def _write_statement(pid: str, data: dict):
-    _write_json(os.path.join(_data_dir(), "statements", f"{pid}.json"), data)
-
-
-def _write_state(group_id: int, data: dict):
-    _write_json(os.path.join(_data_dir(), "groups", str(group_id), "state.json"), data)
-
-
-def _write_scoreboard(group_id: int, data: dict):
-    _write_json(os.path.join(_data_dir(), "groups", str(group_id), "scoreboard.json"), data)
-
-
-class _LazyConfig:
-    _config = {
-        "bot_qq": 1234567890,
-        "napcat_ws_port": 8095,
-        "napcat_http_host": "127.0.0.1",
-        "napcat_http_port": 3000,
-        "deepseek_api_key": "sk-test",
-        "deepseek_base_url": "https://api.deepseek.com",
-        "deepseek_model": "deepseek-reasoner",
-        "llm_provider": "deepseek",
-        "llm_openai_api_key": "",
-        "llm_openai_base_url": "https://api.openai.com/v1",
-        "llm_openai_model": "gpt-5",
-        "llm_reasoning_effort": "",
-        "smart_queue_model": "deepseek-v4-pro",
-        "general_queue_model": "deepseek-v4-flash",
-        "qwen_api_key": "",
-        "qwen_model": "qwen-vl-max",
-        "current_group": GID,
-        "min_rating": 2000,
-        "max_rating": 3000,
-        "newproblem_cooldown": 300,
-        "submit_ac_backdoor": "",
-        "max_context_per_session": 100,
-    }
-
-    def llm_provider_name(self):
-        return self._config.get("llm_provider", "deepseek")
-
-    def llm_api_key(self):
-        if self.llm_provider_name() == "openai":
-            return self._config.get("llm_openai_api_key", "")
-        return self._config.get("deepseek_api_key", "")
-
-    def llm_base_url(self):
-        if self.llm_provider_name() == "openai":
-            return self._config.get("llm_openai_base_url", "")
-        return self._config.get("deepseek_base_url", "")
-
-    def llm_default_model(self):
-        if self.llm_provider_name() == "openai":
-            return self._config.get("llm_openai_model", "")
-        return self._config.get("deepseek_model", "")
-
-    def llm_model_for(self, task: str = "", explicit_model: str = ""):
-        if explicit_model:
-            return explicit_model
-        task_name = (task or "").strip().lower()
-        if task_name in {"judge", "review"}:
-            return self._config.get("smart_queue_model") or "deepseek-v4-pro"
-        return self._config.get("general_queue_model") or "deepseek-v4-flash"
-
-    def __getattr__(self, name):
-        if name == "data_dir":
-            return _data_dir()
-        return self._config.get(name, getattr(super(), name, None))
-
-
-async def _mock_send_group(group_id, message):
-    _sent.append({"group_id": group_id, "message": message})
-    return True
-
-
-async def _mock_react(message_id, emoji_id):
-    _reacted.append((message_id, emoji_id))
-
-
-async def _mock_deepseek(messages, model="", task="", temperature=0.7, timeout=120,
-                         response_format=None, thinking=None):
-    return json.dumps(_deepseek_response) if isinstance(_deepseek_response, dict) else _deepseek_response
-
-
-async def _mock_chat_completion_result(messages, model="", task="", temperature=0.7, timeout=120,
-                                       response_format=None, thinking=None, problem_rating=None):
-    result = await _mock_deepseek(
-        messages,
-        model=model,
-        task=task,
-        temperature=temperature,
-        timeout=timeout,
-        response_format=response_format,
-        thinking=thinking,
-    )
-    from kouhai_bot.llm import ChatCompletionResult
-    if result is None:
-        return ChatCompletionResult(text=None, failure_kind="service_unavailable")
-    return ChatCompletionResult(text=result, failure_kind=None)
-
-
-async def _mock_judge_result(problem_text, submission, history=None, problem_rating=None):
-    return await _mock_chat_completion_result(
-        [{}, {"content": submission}],
-        task="judge",
-        timeout=1200,
-        response_format={"type": "json_object"},
-        thinking={"type": "enabled"},
+def _write_statement(cfg, pid=PID, data=None):
+    _write_json(
+        Path(cfg.data_dir) / "statements" / f"{pid}.json",
+        data if data is not None else {"name": "D. Superhero's Job", "description": "Test statement", "input": "A"},
     )
 
 
-async def _mock_send_private(user_id, message):
-    return 1000
+def _scoreboard_path(cfg, gid=GID):
+    return Path(cfg.data_dir) / "groups" / str(gid) / "scoreboard.json"
 
 
-async def _mock_send_group_forward(group_id, messages):
-    return 2000
+def _solve_entry(uid=UID, nickname="Alice", pid=PID, order=1):
+    return {
+        "user_id": uid,
+        "nickname": nickname,
+        "date": "2026-05-14",
+        "problem": pid,
+        "order": order,
+    }
 
 
-async def _mock_http_post(action, data):
-    if action == "get_group_member_list":
-        return {"status": "ok", "data": list(_group_members.get(int(data["group_id"]), []))}
-    return {"status": "failed", "data": {}}
+def _record(content, result, *, minute=0, pid=PID, reason="", reply="", **extra):
+    record = {
+        "timestamp": f"2026-05-14T12:{minute:02d}:00+08:00",
+        "content": content,
+        "result": result,
+        "reason": reason,
+        "reply": reply,
+        "problem": pid,
+    }
+    record.update(extra)
+    return record
 
 
-def _all_patches():
-    stack = ExitStack()
-    stack.enter_context(patch("kouhai_bot.config._config", _LazyConfig()))
-    stack.enter_context(patch("kouhai_bot.napcat.client.send_group_msg", _mock_send_group))
-    stack.enter_context(patch("kouhai_bot.napcat.client.react_emoji", _mock_react))
-    stack.enter_context(patch("kouhai_bot.napcat.client.send_private_msg", _mock_send_private))
-    stack.enter_context(patch("kouhai_bot.napcat.client.send_group_forward_msg", _mock_send_group_forward))
-    stack.enter_context(patch("kouhai_bot.napcat.client._http_post", _mock_http_post))
-    stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.send_group_msg", _mock_send_group))
-    stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.react_emoji", _mock_react))
-    stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.send_private_msg", _mock_send_private))
-    stack.enter_context(patch("kouhai_bot.handlers.shared.call_chat_completion_result", _mock_chat_completion_result))
-    stack.enter_context(patch("kouhai_bot.handlers.shared.judge_submission_result", _mock_judge_result))
-    stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.call_chat_completion_result", _mock_chat_completion_result))
-    stack.enter_context(patch("kouhai_bot.handlers.cmd.submit.judge_submission_result", _mock_judge_result))
-    return stack
-
-
-def test_collect_problem_annotation_bundle_includes_history():
-    _reset_state()
-    _write_statement(PID, {
-        "name": "D. Superhero's Job",
-        "description": "Test statement",
-        "input": "A",
+def _seed_scoreboard(cfg, records=None, solves=None):
+    _write_json(_scoreboard_path(cfg), {
+        "solves": solves if solves is not None else [_solve_entry()],
+        "user_submissions": {str(UID): records if records is not None else [
+            _record("accepted", "correct", minute=0, reason="ok"),
+        ]},
     })
-    _write_scoreboard(GID, {
-        "solves": [{
-            "user_id": UID,
-            "nickname": "Alice",
-            "date": "2026-05-14",
-            "problem": PID,
-            "order": 1,
-        }],
+
+
+def test_collect_problem_annotation_bundle_includes_history(cfg):
+    _write_statement(cfg)
+    _write_json(_scoreboard_path(cfg), {
+        "solves": [_solve_entry()],
         "user_submissions": {
             str(UID): [
-                {
-                    "timestamp": "2026-05-14T12:00:00+08:00",
-                    "content": "first wrong",
-                    "result": "incorrect",
-                    "reason": "wrong",
-                    "reply": "try again",
-                    "problem": PID,
-                },
-                {
-                    "timestamp": "2026-05-14T12:03:00+08:00",
-                    "content": "what does input mean",
-                    "result": "clarify",
-                    "reason": "",
-                    "reply": "input is A",
-                    "problem": PID,
-                },
-                {
-                    "timestamp": "2026-05-14T12:05:00+08:00",
-                    "content": "second correct",
-                    "result": "correct",
-                    "reason": "good",
-                    "reply": "",
-                    "problem": PID,
-                },
+                _record("first wrong", "incorrect", minute=0, reason="wrong", reply="try again"),
+                _record("what does input mean", "clarify", minute=3, reply="input is A"),
+                _record("second correct", "correct", minute=5, reason="good"),
             ],
-            "99": [{
-                "timestamp": "2026-05-14T12:04:00+08:00",
-                "content": "other wrong",
-                "result": "incorrect",
-                "reason": "bad",
-                "reply": "no",
-                "problem": PID,
-            }],
+            "99": [
+                _record("other wrong", "incorrect", minute=4, reason="bad", reply="no"),
+            ],
         },
     })
 
-    with _all_patches():
-        from kouhai_bot.annotations.exporter import collect_problem_annotation_bundle
-        bundle = collect_problem_annotation_bundle(GID, PID, source="test")
+    bundle = exporter.collect_problem_annotation_bundle(GID, PID, source="test")
 
     assert bundle is not None
     assert bundle["problem_id"] == PID
+    assert bundle["group_id"] == GID
+    assert bundle["first_solver"]["user_id"] == UID
+    assert bundle["statement"]["name"] == "D. Superhero's Job"
+    # 2 submit rounds for Alice + 1 for user 99; clarify is context only.
     assert len(bundle["rounds"]) == 3
-    alice_correct = next(item for item in bundle["rounds"] if item["model_verdict"] == "correct")
+    alice_correct = next(
+        item for item in bundle["rounds"]
+        if item["model_verdict"] == "correct" and item["user_id"] == UID
+    )
+    assert alice_correct["round_id"] == f"{PID}:{UID}:2"
     assert len(alice_correct["history_before"]) == 2
     assert alice_correct["history_before"][1]["result"] == "clarify"
-    _cleanup()
+    assert alice_correct["human_label"]["expected_verdict"] is None
+    assert bundle["first_correct_timestamp"] == alice_correct["timestamp"]
 
 
-def test_sync_annotation_bundles_is_idempotent():
-    _reset_state()
-    _write_statement(PID, {"name": "D. Superhero's Job", "description": "Test statement"})
-    _write_scoreboard(GID, {
-        "solves": [{
-            "user_id": UID,
-            "nickname": "Alice",
-            "date": "2026-05-14",
-            "problem": PID,
-            "order": 1,
-        }],
-        "user_submissions": {
-            str(UID): [{
-                "timestamp": "2026-05-14T12:00:00+08:00",
-                "content": "accepted",
-                "result": "correct",
-                "reason": "ok",
-                "reply": "",
-                "problem": PID,
-            }],
-        },
+def test_history_item_whitelist_and_model_tag(cfg):
+    record = _record("tagged", "correct", reason="ok", model_tag="『M』", request_id="r1")
+    item = exporter._history_item(record)
+    assert item == {
+        "timestamp": record["timestamp"],
+        "result": "correct",
+        "submission": "tagged",
+        "reason": "ok",
+        "reply": "",
+        "problem": PID,
+        "model_tag": "『M』",
+    }
+    assert "request_id" not in item
+
+
+def test_collect_returns_none_without_solve_or_rounds(cfg):
+    _write_statement(cfg)
+    # No solves at all.
+    _write_json(_scoreboard_path(cfg), {"solves": [], "user_submissions": {}})
+    assert exporter.collect_problem_annotation_bundle(GID, PID) is None
+
+    # Solve exists but only clarify history → no judge rounds to label.
+    _write_json(_scoreboard_path(cfg), {
+        "solves": [_solve_entry()],
+        "user_submissions": {str(UID): [_record("question", "clarify", reply="answer")]},
     })
+    assert exporter.collect_problem_annotation_bundle(GID, PID) is None
 
-    with _all_patches():
-        from kouhai_bot.annotations.exporter import sync_annotation_bundles
-        from kouhai_bot.annotations.store import list_bundle_summaries
-        first = sync_annotation_bundles(group_id=GID)
-        second = sync_annotation_bundles(group_id=GID)
-        summaries = list_bundle_summaries(status="pending", group_id=GID)
+    # Rounds exist but for a different problem.
+    _write_json(_scoreboard_path(cfg), {
+        "solves": [_solve_entry()],
+        "user_submissions": {str(UID): [_record("other", "correct", pid="999X")]},
+    })
+    assert exporter.collect_problem_annotation_bundle(GID, PID) is None
+
+
+def test_sync_annotation_bundles_is_idempotent(cfg):
+    _write_statement(cfg)
+    _seed_scoreboard(cfg)
+
+    first = exporter.sync_annotation_bundles(group_id=GID)
+    second = exporter.sync_annotation_bundles(group_id=GID)
+    summaries = store.list_bundle_summaries(status="pending", group_id=GID)
 
     assert len(first) == 1
-    assert len(second) == 0
+    assert second == []
     assert len(summaries) == 1
     assert summaries[0]["problem_id"] == PID
-    _cleanup()
+    assert summaries[0]["progress"] == "0/1"
+    assert summaries[0]["source"] == "backfill"
 
 
-def test_collect_bundle_prefers_saved_group_summary():
-    _reset_state()
-    _write_statement(PID, {"name": "D. Superhero's Job", "description": "Test statement"})
-    _write_scoreboard(GID, {
-        "solves": [{
-            "user_id": UID,
-            "nickname": "Alice",
-            "date": "2026-05-14",
-            "problem": PID,
-            "order": 1,
-        }],
-        "user_submissions": {
-            str(UID): [{
-                "timestamp": "2026-05-14T12:00:00+08:00",
-                "content": "accepted",
-                "result": "correct",
-                "reason": "ok",
-                "reply": "",
-                "problem": PID,
-            }],
-        },
-    })
+def test_export_skips_when_bundle_already_labeled(cfg):
+    _write_statement(cfg)
+    _seed_scoreboard(cfg)
+    bundle = exporter.collect_problem_annotation_bundle(GID, PID)
+    store.save_bundle(bundle, store.LABELED)
 
-    with _all_patches():
-        from kouhai_bot.annotations.exporter import collect_problem_annotation_bundle
-        from kouhai_bot.handlers.shared import save_problem_summary
-        save_problem_summary(GID, PID, "这是群里发题时生成的中文题意。")
-        bundle = collect_problem_annotation_bundle(GID, PID, source="test")
+    assert exporter.export_problem_annotation_bundle(GID, PID) is None
+    loaded, status = store.load_bundle(GID, PID)
+    assert status == "labeled"
+    assert loaded["problem_id"] == PID
+
+
+def test_collect_bundle_prefers_saved_group_summary(cfg):
+    from kouhai_bot.handlers.shared import save_problem_summary
+
+    _write_statement(cfg)
+    _seed_scoreboard(cfg)
+    save_problem_summary(GID, PID, "这是群里发题时生成的中文题意。")
+    bundle = exporter.collect_problem_annotation_bundle(GID, PID, source="test")
 
     assert bundle is not None
     assert bundle["statement"]["summary_zh"] == "这是群里发题时生成的中文题意。"
-    _cleanup()
 
 
-def test_submit_correct_exports_pending_annotation_bundle():
-    _reset_state()
-    _write_state(GID, {
-        "today": PID,
-        "contestId": 542,
-        "index": "D",
-        "name": "Superhero's Job",
-        "rating": 2600,
-        "tags": ["number theory"],
-        "date": "2026-05-14",
-    })
-    _write_statement(PID, {
-        "name": "D. Superhero's Job",
-        "description": "Statement",
-        "input": "A",
-    })
-    _write_scoreboard(GID, {"solves": [], "user_submissions": {}})
-    global _deepseek_response
-    _deepseek_response = {"correct": True, "reason": "Correct", "reply": ""}
+def test_store_save_moves_between_statuses_and_tracks_progress(cfg):
+    _write_statement(cfg)
+    _seed_scoreboard(cfg)
+    bundle = exporter.collect_problem_annotation_bundle(GID, PID)
 
-    event = {
-        "type": "message",
-        "message_type": "group",
-        "group_id": GID,
-        "user_id": UID,
-        "sender": {"nickname": "Alice", "card": "", "user_id": UID},
-        "message_id": "msg_001",
-        "raw_message": "/submit valid idea",
-        "message": [{"type": "text", "data": {"text": "/submit valid idea"}}],
-    }
+    pending_path = store.save_bundle(bundle, store.PENDING)
+    assert pending_path.exists()
+    assert store.bundle_exists(GID, PID)
 
-    with _all_patches():
-        from kouhai_bot.handlers.cmd.submit import handle
-        with patch("kouhai_bot.handlers.cmd.submit._reveal_problem_source", AsyncMock(return_value="")):
-            asyncio.run(handle(
-                group_id=GID,
-                user_id=UID,
-                sender=event["sender"],
-                message_id=event["message_id"],
-                raw_text=event["raw_message"],
-                segments=event["message"],
-                event=event,
-            ))
+    bundle["rounds"][0]["human_label"]["expected_verdict"] = "correct"
+    labeled_path = store.save_bundle(bundle, store.LABELED)
+    assert labeled_path.exists()
+    assert not pending_path.exists(), "saving as labeled must remove the pending copy"
 
-    pending_path = os.path.join(_data_dir(), "annotations", "pending", str(GID), f"{PID}.json")
-    assert os.path.exists(pending_path), f"Missing pending annotation bundle: {pending_path}"
-    with open(pending_path, encoding="utf-8") as f:
-        bundle = json.load(f)
-    assert bundle["problem_id"] == PID
-    assert len(bundle["rounds"]) == 1
-    assert bundle["rounds"][0]["model_verdict"] == "correct"
-    _cleanup()
+    summaries = store.list_bundle_summaries(group_id=GID)
+    assert len(summaries) == 1
+    assert summaries[0]["status"] == "labeled"
+    assert summaries[0]["progress"] == "1/1"
+
+    with pytest.raises(ValueError, match="invalid annotation status"):
+        store.save_bundle(bundle, "bogus")
+
+
+async def test_db_solves_are_not_visible_to_json_exporter_yet(cfg, db):
+    """Q6 deferred: the exporter reads scoreboard.json, not group_solves.
+
+    Documents the current boundary so the deferred migration is explicit:
+    a solve recorded only in SQLite does not produce an annotation bundle.
+    """
+    set_database(db)
+    _write_statement(cfg)
+    await posts.record_solve(db, str(GID), str(UID), PID, "Alice")
+
+    assert exporter.collect_problem_annotation_bundle(GID, PID) is None
+    assert exporter.sync_annotation_bundles(group_id=GID) == []

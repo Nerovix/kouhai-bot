@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from kouhai_bot.config import BotConfig
 from kouhai_bot.llm_config import LlmProviderConfig
 from kouhai_bot.handlers.shared import (
+    HIGH_DIFFICULTY_NOTICE,
     SummaryDoublecheckResult,
     build_judge_messages,
     build_multimodal_user_content,
@@ -22,16 +23,21 @@ from kouhai_bot.handlers.shared import (
     _summary_required_convention_issues,
     _summary_symbol_scope_issues,
     call_chat_completion,
+    format_points,
     get_judge_prompt,
     call_chat_completion_result,
     check_contests_for_group,
     doublecheck_problem_summary,
     get_problem_summary,
+    high_difficulty_notice,
     judge_submission,
     judge_submission_result,
     parse_json_with_llm_repair,
+    rating_to_points,
+    record_kind,
     robust_json_parse,
     save_problem_summary,
+    snake_replace,
     summarize_problem,
     translate_editorial_to_zh,
     translate_sample_notes,
@@ -40,7 +46,9 @@ from kouhai_bot.llm import (
     ChatCompletionResult,
     _ChatCompletionAttempt,
     _post_chat_completion_once,
+    append_model_tag,
     strip_leaked_thinking,
+    strip_model_tags,
 )
 from tools import summary_doublecheck as summary_doublecheck_tool
 
@@ -337,16 +345,32 @@ def _contest(*, name, contest_type, start_time_seconds):
     }
 
 
-def _run_contest_check(contests):
+def _run_contest_check(contests, *, http_status=200, api_status="OK"):
+    """Run the official-API contest check with a fake CF response + runtime."""
+    from kouhai_bot.handlers.runtime import Runtime, set_runtime
+
     response = _DummyResponse(
-        json_data={"status": "OK", "result": contests},
+        status=http_status,
+        json_data={"status": api_status, "result": contests},
     )
     sent = AsyncMock()
+    set_runtime(Runtime(
+        db=None,
+        sender=SimpleNamespace(send_group_markdown=sent),
+        browser=None,
+    ))
     with patch("aiohttp.ClientSession.get", return_value=response), \
-            patch("kouhai_bot.napcat.client.send_group_msg", sent), \
             patch("asyncio.sleep", new=AsyncMock()):
-        asyncio.run(check_contests_for_group(123))
+        asyncio.run(check_contests_for_group("G1"))
     return sent
+
+
+def _contest_markdown(sent):
+    assert sent.await_count == 1
+    group_openid, markdown = sent.await_args.args
+    assert group_openid == "G1"
+    assert markdown.startswith("<qqbot-at-everyone/>\n🏆 Codeforces 比赛提醒！")
+    return markdown
 
 
 def test_contest_check_includes_rated_cf_contest_within_24_hours():
@@ -355,9 +379,9 @@ def test_contest_check_includes_rated_cf_contest_within_24_hours():
         _contest(name="Rated CF", contest_type="CF", start_time_seconds=now + 3600),
     ])
 
-    assert sent.await_count == 1
-    message = sent.await_args.args[1][1]["data"]["text"]
+    message = _contest_markdown(sent)
     assert "Rated CF" in message
+    assert "（2h）" in message
 
 
 def test_contest_check_includes_normal_rated_cf_contest_within_24_hours():
@@ -366,8 +390,7 @@ def test_contest_check_includes_normal_rated_cf_contest_within_24_hours():
         _contest(name="Codeforces Round 2000 (Div. 1)", contest_type="CF", start_time_seconds=now + 3600),
     ])
 
-    assert sent.await_count == 1
-    message = sent.await_args.args[1][1]["data"]["text"]
+    message = _contest_markdown(sent)
     assert "Codeforces Round 2000 (Div. 1)" in message
 
 
@@ -377,9 +400,33 @@ def test_contest_check_includes_rated_icpc_contest_within_24_hours():
         _contest(name="Rated ICPC", contest_type="ICPC", start_time_seconds=now + 3600),
     ])
 
-    assert sent.await_count == 1
-    message = sent.await_args.args[1][1]["data"]["text"]
+    message = _contest_markdown(sent)
     assert "Rated ICPC" in message
+
+
+def test_contest_check_marks_coding_phase_as_ongoing():
+    now = int(time.time())
+    coding = _contest(name="Live CF", contest_type="CF", start_time_seconds=now - 600)
+    coding["phase"] = "CODING"
+    sent = _run_contest_check([coding])
+
+    message = _contest_markdown(sent)
+    assert "Live CF" in message
+    assert "正在进行" in message
+
+
+def test_contest_check_sorts_by_start_time_and_formats_duration():
+    now = int(time.time())
+    later = _contest(name="Later CF", contest_type="CF", start_time_seconds=now + 5 * 3600)
+    sooner = _contest(name="Sooner CF", contest_type="CF", start_time_seconds=now + 1800)
+    sooner["durationSeconds"] = 7200 + 900
+    sent = _run_contest_check([later, sooner])
+
+    message = _contest_markdown(sent)
+    assert message.index("Sooner CF") < message.index("Later CF")
+    assert "（2h15m）" in message
+    assert "分钟后" in message
+    assert "小时后" in message
 
 
 def test_contest_check_skips_missing_name_without_dropping_other_contests():
@@ -391,8 +438,7 @@ def test_contest_check_skips_missing_name_without_dropping_other_contests():
         _contest(name="Rated CF", contest_type="CF", start_time_seconds=now + 3600),
     ])
 
-    assert sent.await_count == 1
-    message = sent.await_args.args[1][1]["data"]["text"]
+    message = _contest_markdown(sent)
     assert "Rated CF" in message
 
 
@@ -457,6 +503,13 @@ def test_contest_check_excludes_rated_contests_beyond_24_hours():
     ])
 
     assert sent.await_count == 0
+
+
+def test_contest_check_ignores_failed_api_responses():
+    now = int(time.time())
+    contests = [_contest(name="Rated CF", contest_type="CF", start_time_seconds=now + 3600)]
+    assert _run_contest_check(contests, http_status=503).await_count == 0
+    assert _run_contest_check(contests, api_status="FAILED").await_count == 0
 
 
 def test_provider_model_for_uses_provider_model_and_explicit_override():
@@ -2244,3 +2297,76 @@ def test_streaming_chat_completion_malformed_sse_is_retryable():
     assert result.text is None
     assert result.retryable is True
     assert result.failure_kind == "service_unavailable"
+
+
+# --- pure display/scoring helpers ---------------------------------------------
+
+
+def test_rating_to_points_weighted_formula():
+    assert rating_to_points(2000) == pytest.approx(1.0)
+    assert rating_to_points(2300) == pytest.approx(2.0)
+    assert rating_to_points(2600) == pytest.approx(4.0)
+    assert rating_to_points(1700) == pytest.approx(0.5)
+
+
+def test_format_points_trims_trailing_zeros():
+    assert format_points(4.0) == "4"
+    assert format_points(2.5) == "2.5"
+    assert format_points(1.25) == "1.25"
+    assert format_points(1.0 / 3) == "0.33"
+
+
+def test_record_kind_classification():
+    assert record_kind({"type": "submit", "result": "correct"}) == "submit"
+    assert record_kind({"type": "clarify"}) == "clarify"
+    assert record_kind({"type": "review"}) == "review"
+    # Legacy records without explicit type fall back to result.
+    assert record_kind({"result": "correct"}) == "submit"
+    assert record_kind({"result": "incorrect"}) == "submit"
+    assert record_kind({"result": "clarify"}) == "clarify"
+    assert record_kind({"result": "review"}) == "review"
+    assert record_kind({"result": "pending"}) == ""
+    assert record_kind({"result": "superseded"}) == ""
+    assert record_kind({}) == ""
+
+
+def test_append_model_tag_no_double_and_rstrip():
+    assert append_model_tag("答案", "『M』") == "答案『M』"
+    assert append_model_tag("答案『M』", "『M』") == "答案『M』"
+    assert append_model_tag("答案\n", "『M』") == "答案『M』"
+    assert append_model_tag("答案", "") == "答案"
+    assert append_model_tag("", "『M』") == "『M』"
+
+
+def test_strip_model_tags_trailing_only():
+    tags = ["『M』", "🐳"]
+    assert strip_model_tags("答案『M』", tags) == "答案"
+    assert strip_model_tags("答案🐳『M』", tags) == "答案"
+    # Mid-text occurrences are user content and must survive.
+    assert strip_model_tags("引用『M』的正文", tags) == "引用『M』的正文"
+    assert strip_model_tags("", tags) == ""
+
+
+def test_robust_json_parse_handles_fences_and_garbage():
+    assert robust_json_parse('{"a": 1}') == {"a": 1}
+    assert robust_json_parse('```json\n{"a": 1}\n```') == {"a": 1}
+    assert robust_json_parse('prefix {"a": 1} suffix') == {"a": 1}
+    assert robust_json_parse("") == {}
+    assert robust_json_parse("not json at all") == {}
+
+
+def test_snake_replace_respects_probability():
+    with patch("kouhai_bot.handlers.shared.random.random", return_value=0.0):
+        assert snake_replace("开心😀庆祝🎉") == "开心🐍庆祝🐍"
+    with patch("kouhai_bot.handlers.shared.random.random", return_value=0.99):
+        assert snake_replace("开心😀庆祝🎉") == "开心😀庆祝🎉"
+    assert snake_replace("plain text") == "plain text"
+
+
+def test_high_difficulty_notice_threshold():
+    assert high_difficulty_notice({"rating": 2900}) == HIGH_DIFFICULTY_NOTICE
+    assert high_difficulty_notice({"rating": "2900"}) == HIGH_DIFFICULTY_NOTICE
+    assert high_difficulty_notice({"rating": 2800}) == ""
+    assert high_difficulty_notice({"rating": None}) == ""
+    assert high_difficulty_notice({}) == ""
+    assert high_difficulty_notice(None) == ""

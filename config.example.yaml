@@ -1,44 +1,43 @@
 # Kouhai Bot 配置文件示例
 # 复制此文件为 config.yaml 并填入你的配置
 # config.yaml 已在 .gitignore 中，不会被提交
+# 切勿把真实 app_secret / api_key / 群号 提交进 git。
 
-# ── QQ Bot 配置 ──
-bot_qq: 123456789  # 你的 Bot QQ 号
-
-# ── NapCat 连接配置 ──
-# Bot 通过 WebSocket 连接到 NapCat
-napcat_ws_host: "0.0.0.0"  # 如果 NapCat 在 Docker 中运行，必须是 0.0.0.0
-napcat_ws_port: 8097       # WebSocket 监听端口
-napcat_http_host: "127.0.0.1"  # NapCat HTTP API 地址
-napcat_http_port: 3000     # NapCat HTTP API 端口
-
-# ── 官方 QQ 机器人 API（移植目标） ──
+# ── 官方 QQ 机器人 API（必填） ──
+# 在 QQ 机器人开发者控制台 (q.qq.com) 创建机器人后获得 AppID / AppSecret。
 # 凭证也可用环境变量 KOUHAI_APP_ID / KOUHAI_APP_SECRET 提供（优先级低于此处显式值）。
-# 切勿把真实 app_secret 提交进 git。
 official:
-  app_id: "1900000000"          # 机器人 AppID（占位符）
+  app_id: "1900000000"           # 机器人 AppID（占位符，替换为你自己的）
   app_secret: "your-app-secret"  # 机器人 AppSecret（占位符）
-  bot_name: "算法助手"           # 卡片署名显示名（官方无登录昵称 API）
-  sandbox: false                 # true 走沙箱 api 域名
-  # api_base: "https://api.sgroup.qq.com"   # 默认正式环境
-  # token_base: "https://api.bot.qq.com"
+  bot_name: "算法助手"            # 卡片署名显示名（官方无登录昵称 API）
+  sandbox: false                 # true 走沙箱 api 域名（开发调试用）
+  # api_base: "https://api.sgroup.qq.com"   # 默认正式环境 REST 域名
+  # token_base: "https://api.bot.qq.com"    # 默认 access_token 域名
   # intents: 50331648            # 默认 群+C2C(1<<25) | 互动(1<<26) | 群成员(1<<24)
+                                 # 复读机需要群开启「获取群内全部消息」(GROUP_MESSAGE_CREATE)
 
 # ── LLM 配置 ──
-# Bot 使用两个模型队列，按顺序尝试每个 provider
-# 每个队列可以配置多个 provider，失败时自动 fallback
+# Bot 使用两个模型队列，按顺序尝试每个 provider，失败自动 fallback。
+# 所有 provider 均使用 OpenAI 兼容 /chat/completions 接口。
 llm:
-  # ── smart_model：判题和复盘 ──
-  # 用于 /submit 判题和 /review 复盘
-  # 需要强推理能力，建议使用顶级模型
+  max_retries: 2                 # 每个 provider 内部重试次数
+  retry_base_delay_sec: 1.0      # 指数退避基数
+  retry_max_delay_sec: 8.0       # 退避上限
+  judge_timeout_sec: 1200        # 判题超时
+  clarify_timeout_sec: 600       # 澄清超时
+  review_timeout_sec: 600        # 复盘超时
+  summary_timeout_sec: 120       # 摘要 / 题解翻译超时
+
+  # ── smart_model：判题 (/submit) 和复盘 (/review) ──
+  # 需要强推理能力，建议使用顶级模型。不要降低 reasoning_effort。
   smart_model:
     - name: "openai"
       api_key: "sk-..."
       base_url: "https://api.openai.com/v1"
       model: "gpt-5.6"
-      reasoning_effort: "high"  # 推理强度：low/medium/high/xhigh
-      model_tag: "『GPT5.6』"   # 显示在回复末尾的标记
-      stream: true              # 使用 SSE 流式传输（推荐）
+      reasoning_effort: "high"   # 推理强度：low/medium/high/xhigh/max
+      model_tag: "『GPT5.6』"     # 显示在回复末尾的标记
+      stream: true               # 使用 SSE 流式传输（推荐）
 
     # 备选 provider
     # - name: "deepseek"
@@ -50,9 +49,9 @@ llm:
     #   stream: true
 
   # ── general_model：判题复盘之外的一切 ──
-  # 题面摘要、样例解释、题解爬取、/clarify（含带图题面）
-  # 可以使用更便宜的模型，但必须支持图片输入（vision），
-  # 因为带图题面的摘要和澄清也走这个队列
+  # 题面摘要、样例解释、题解爬取翻译、/clarify（含带图题面）、JSON 修复等。
+  # 可以用更便宜的模型，但**必须支持图片输入 (vision)**：
+  # 带图题面（公式图、示意图）的摘要和澄清也走这个队列。
   general_model:
     - name: "openai"
       api_key: "sk-..."
@@ -67,36 +66,21 @@ llm:
     #   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     #   model: "qwen-vl-max"
     #   model_tag: "『QwenVL』"
-    #   stream: true  # DashScope 自动使用 SSE
+    #   stream: true  # DashScope/百炼 自动使用 SSE
 
-# ── Jev 娱乐判题（/sbmjev，可选） ──
-# TypeSafe System One 决策模型；key 需绑定 Jev 渠道。
-# 接口与题型见 https://docs.rightapi.ai/docs/rc_jev/
-# jev:
-#   api_key: "sk-..."
-#   base_url: "https://your-gateway.example"
-#   model: "jev-latest"
-#   timeout_sec: 60
-
-# ── 群聊配置 ──
-current_group: 987654321  # 服务的 QQ 群号
-
-# ── 题目选择 ──
+# ── 题目选择（全局默认难度） ──
+# 每个群可用 /range 指令覆盖本群难度区间（任何群友可设）。
 problem:
-  min_rating: 2600  # 最低难度
-  max_rating: 2800  # 最高难度
-  newproblem_cooldown: 60  # /newproblem 冷却时间（秒）
+  min_rating: 2600               # 全局最低难度
+  max_rating: 2800               # 全局最高难度
+  newproblem_cooldown: 300       # /newproblem 冷却时间（秒）
+  # submit_ac_backdoor: ""       # 非空时，包含该字符串的 /submit 直接判对（调试用）
 
-# ── 打星用户（可选） ──
-# 将某些用户从正式榜中踢出，单独记榜
-# user_groups:
-#   - name: "starred"
-#     display_name: "打星"
-#     user_ids: [123456789, 987654321]
-#     submit_delay_sec: 1800  # 题目公布后 30 分钟内无法提交
+# ── 数据目录 ──
+# SQLite 数据库 (kouhai.db)、题面缓存镜像、题解、日志、pidfile 都在此目录下。
+# data_dir: "~/.kouhai-bot"
 
-# ── 宵禁（可选） ──
-# 在指定时间段内禁止 /submit
-# curfew:
-#   start_hour: 23  # 开始时间（24小时制）
-#   duration_hours: 8  # 持续时间（小时）
+# ── 以下旧字段已废弃，官方多群架构不再使用，保留仅为兼容旧配置解析 ──
+# bot_qq / current_group：官方按群 openid 惰性发现服务群，无需预配置群号。
+# napcat_*：NapCat 传输层已移除。
+# user_groups（打星）/ curfew（宵禁）/ jev（娱乐判题）：功能已移除。

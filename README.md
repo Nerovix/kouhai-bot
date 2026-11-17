@@ -6,126 +6,72 @@
 
 口嗨 Bot 是一个 QQ 群算法竞赛助手 —— CF 题目随机推送、AI judge 评审、群聊交流、比赛预告。
 
+基于**官方 QQ 机器人 API**（api.bot.qq.com），一个 bot 实例可同时服务多个群，每群独立视图。
+
 ---
 
 ## 开始配置！
 
 ### 1. 准备环境
 
-首先，clone这个仓库。
+clone 仓库并用 `uv` 管理依赖：
 
 ```bash
 git clone https://github.com/Nerovix/kouhai-bot.git
 cd kouhai-bot
-```
-
-这个项目需要 `uv` 管理依赖：
-
-```bash
 uv sync
 ```
 
-这个项目需要一个 QQ 账号，以及需要配置 NapCat 用于连接 QQ。目前 QQ 合法地允许同一个人（同一个身份证）拥有至多 5 个 QQ 账号，只需要正常注册即可。关于 NapCat，可参考 `DEPENDENCIES.md` 配置，或者直接寻求 AI 协助。
+长图卡片渲染需要 Playwright Chromium：
 
-> NapCat 可简单理解为能够将 QQ 变成 API，只需要发出 HTTP 请求就能完成 QQ 操作。NapCat 可以反向代理出多个端口。本项目假定一个 bot 实例对应于一个端口和一个群，bot 独占使用此端口。如果你想配多个bot实例服务于多个群聊，需要修改 NapCat 配置启用更多端口。每个bot实例独立工作，但关于群聊的上下文在`~/.kouhai-bot/`下全局保存。
+```bash
+uv run playwright install chromium
+```
+
+在 [QQ 机器人开发者控制台](https://q.qq.com) 创建机器人，拿到 **AppID** 和 **AppSecret**，并在控制台「指令」页注册 bot 的指令（见下文指令清单）。把机器人拉进你想服务的群即可——无需预配置群号，bot 见到群消息就惰性为该群启动服务。
+
+> 复读机是自动娱乐行为（不是指令），需要群开启「获取群内全部消息」权限（GROUP_MESSAGE_CREATE intent）。
 
 ### 2. 配置
 
-配置写在 `config.yaml` 中。这个文件会被 gitignore 忽略，以防你的群号等隐私泄露。复制仓库中的 example 以填写你自己的配置：
+配置写在 `config.yaml`（被 gitignore 忽略，防止凭证/群号泄露）。复制示例填写：
 
 ```bash
 cp config.example.yaml config.yaml
 ```
 
-然后打开 config.yaml 进行编辑。不了解的配置可以直接留为默认值。
+#### 官方 QQ 机器人 API（必填）
 
-#### QQ Bot & NapCat 
+```yaml
+official:
+  app_id: "1900000000"
+  app_secret: "your-app-secret"
+  bot_name: "算法助手"
+```
 
-```
-# ── QQ Bot ──
-# ── NapCat WebSocket (bot listens here, NapCat connects to this) ──
-```
-写入 bot 的 QQ 号和你的 NapCat 配置。端口是每实例、每群聊唯一的。如果你不确定如何配置，寻求 AI 协助。
+凭证也可用环境变量 `KOUHAI_APP_ID` / `KOUHAI_APP_SECRET` 提供。`sandbox: true` 走沙箱域名调试。
 
 #### LLM 服务
 
-```
-# ── LLM Fallback ──
-```
-
-配置你的 LLM API。bot 需要 API 作为口粮才能思考！
-
-目前接口仅兼容 OpenAI 格式，不过大部分厂商都提供此格式。bot 在回答问题时会按照 llm 下的配置从上到下按顺序尝试连接。如果你不清楚如何填写配置，向 AI 提供你的厂商、模型需求和 apikey 以寻求帮助。
-
-#### Jev（可选）
-
-`/sbmjev` 娱乐判题使用独立的 `jev` 段。`api_key` 和 `base_url` 都必须显式配置，没有内置默认地址；缺任意一项时该功能会直接返回“未配置”，不会发起请求：
-
-```yaml
-jev:
-  api_key: "sk-..."
-  base_url: "https://your-gateway.example"
-  model: "jev-latest"
-```
-
-
-Bot 根据任务类型路由到两个模型队列：
+bot 需要 LLM API 作为口粮才能思考！接口兼容 OpenAI 格式，按配置从上到下顺序尝试、失败自动 fallback。两个队列：
 
 - `smart_model`：判题（`/submit`）和复盘（`/review`），需要强推理能力
-- `general_model`：其余一切 —— 题面摘要、样例解释、题解爬取、题意澄清（`/clarify`）等，可用更便宜的模型，但**必须支持多模态（图片输入 / vision）**：带图题面（公式图、示意图）的摘要和澄清也走这个队列，纯文本模型兜底时接不住带图请求
+- `general_model`：其余一切——题面摘要、样例解释、题解爬取翻译、题意澄清（`/clarify`）等，可用更便宜的模型，但**必须支持多模态（图片输入 / vision）**：带图题面的摘要和澄清也走这个队列
 
-> 配置中的 `model_tag` 是一个标记，会附在 bot 的每个需要 llm 接入的请求尾部，以便用户知晓自己的请求是由哪个模型处理的，~~以便开骂~~
+> `model_tag` 会附在每个 LLM 回复尾部，让用户知道请求由哪个模型处理，~~以便开骂~~。
 
-> 在我们的测试中，GPT-5.6 系列基本胜任，GLM-5.2/5.3 也相当不错，DeepSeek V4 系列可用。general_model 的候选：DeepSeek Flash、MiniMax M3、GPT-5.6 Luna、Gemini Flash 等支持图片输入的模型都是不错的选择。
+每个 provider 支持字段：`name`/`api_key`/`base_url`/`model`（必填），`reasoning_effort`/`model_tag`/`stream`/`send_thinking`/`temperature`/`extra_body`（可选）。DashScope/百炼 provider 自动使用 SSE 流式。
 
-每个 provider 支持的字段：
-- `name`（必填）：provider 名称
-- `api_key`（必填）：API key
-- `base_url`（必填）：API 地址（如 `https://api.openai.com/v1`）
-- `model`（必填）：模型名称
-- `reasoning_effort`（可选）：推理强度，如 `low`/`medium`/`high`/`xhigh`
-- `model_tag`（可选）：显示在回复末尾的标记
-- `stream`（可选，默认 false）：是否使用 SSE 流式传输
-- `send_thinking`（可选，默认 true）：是否发送 thinking 参数
-- `temperature`（可选）：温度参数
-- `extra_body`（可选）：额外的请求体字段
-- `min_rating` / `max_rating`（可选，int）：仅对 `smart_model` 的判题或复盘生效；当前题 rating 不在范围内时跳过该模型，继续尝试队列中的下一个
+#### 题目难度
 
-> DashScope/阿里云百炼的 provider 会自动使用 SSE 流式传输，无需手动设置 `stream: true`。
-
-#### 配置群聊
-
-```
-# ── Group ──
+```yaml
+problem:
+  min_rating: 2600
+  max_rating: 2800
+  newproblem_cooldown: 300
 ```
 
-配置群号。
-
-#### 打星 
-
-```
-# ── User Groups (optional) ──
-```
-
-我们将 Bot 配置到了北航集训队群聊当中，希望鼓励新生交流学习，但是出现了老选手把 bot 当摸鱼玩具高强度娱乐的情况。为了处理此情况，我们设计了打星功能。可以允许将打星用户从正式榜中踢出并单独记榜、设置打星用户在题目公布后的一段时间内无法提交以给小朋友提供更多机会。
-
-如果配置了提交等待，等待时间会跟着最近解题情况变化：这题是你做出来的，下一题多等一会；不是你做出来的，就慢慢降回最低等待。
-
-#### 题目
-
-```
-# ── Problem Selection ──
-```
-
-配置从cf上爬取题目的题目难度上下限。自动中午发题已移除，需要换题时在群里手动发送 `/newproblem`。
-
-#### 宵禁
-
-```
-# ── Curfew (宵禁) ──
-```
-
-允许配置在每天的某一时间段禁止 `\submit`。此功能是为了防止同学~~熬夜摸鱼哐哐口题~~
+这是全局默认难度。每个群可用 `/range` 指令覆盖本群区间（任何群友可设，智能解析如 `/range 2500~2700`）。自动中午发题已移除，需要换题时手动 `/newproblem`。
 
 ### 3. 启动!
 
@@ -133,68 +79,72 @@ Bot 根据任务类型路由到两个模型队列：
 uv run start
 ```
 
-`start` 会用 `nohup` 在配置好的 NapCat 端口后台启动 bot。bot 还支持 `uv run restart/stop/status`，表示重启、停止、查看bot状态。
+`start` 用 `nohup` 后台启动 bot，按 `app_id` 写 pidfile（`{data_dir}/run/{app_id}.pid`）区分实例。还支持 `uv run restart/stop/status`。日志在 `{data_dir}/logs/{app_id}/YYYY-MM-DD.log`。
+
+prod/test 双 bot = 双 app_id（各自 pidfile / 数据库），互不干扰。
 
 ### 4. 进群口题
 
-将 bot 拉入群聊。进入群聊发送 `/help` (无需at bot)，开始口胡吧！
+把 bot 拉进群，发送 `/help`（无需 at bot）开始口胡吧！
 
-### 5. bot 知道什么？
+## 指令清单
 
-这里解释 bot 的几种 llm 请求的上下文。
+需在开发者控制台注册的指令（13 个主指令 + 6 个别名）：
 
-> 一点补充:bot 会在开始处理你的 llm 消息时给你点一个“眼睛“表情。如果阅读你的请求后他认为你说的是 nonsense 或者纯捣乱，他会给你的消息点一个摇手指的QQ表情（/no）（除review）。
+| 指令 | 别名 | 说明 |
+|------|------|------|
+| `/submit` | `/sbm` | 提交做法，AI judge 判定 |
+| `/clarify` | `/clrf` | 澄清水题意（防剧透） |
+| `/review` | `/rv` | 复盘最近解出的题 |
+| `/newproblem` | `/np` | 换一道新题（未解出需 `--force`） |
+| `/problem` | `/pb` | 重发当前题卡 |
+| `/tag` | | 显示当前题 CF 标签 |
+| `/scoreboard` | | 加权积分榜 |
+| `/status` | | 查看是否有正在处理的请求 |
+| `/sync` | | 把你在其他群对当前题的提交同步到本群（含通过加分） |
+| `/clear` | | 清除你当前题的对话历史 |
+| `/feedback` | `/fb` | 标记 AI 最近一条回复不满意 |
+| `/help` | | 帮助 |
+| `/range` | | 设置本群难度区间 |
 
-#### clarify
+别名：`sbm` `clrf` `rv` `np` `pb` `fb`。
 
-bot 能看到原题面和简述题面。如果 bot 简述题意丢了东西，可以让 bot 详细阐述细节，甚至复述题面。
+> 已移除的旧指令：`/setproblem`(`/sp`)、`/testcd`、`/sbmjev`(`/jev`)、`/bad`。私聊 judge 整边停用（纯群 bot）。打星 / 宵禁 / 动态 CD 已移除。
 
-#### submit
+## bot 知道什么？
 
-bot 能看到原题面和你在此题的所有对话历史（包括 clarify、review、之前的 submit）。
+> bot 开始处理你的 LLM 消息时会回一个「👀」表情消息。如果认为你在捣乱 / nonsense，会回一个摇手指表情（😵，review 除外），不留记录。
 
-bot 会判断你的提交是否正确：你的做法必须能拓展出完整正确的解法，且包含所有关键要素。如果这道题有官方题解缓存，bot 会额外用题解复核一次，确保不会误判。
+- **clarify**：bot 能看到原题面和简述题面，可要求详细阐述细节甚至复述题面（不泄露原题身份）。
+- **submit**：bot 能看到原题面和你在此题的所有对话历史（clarify/review/之前的 submit）。做法必须能拓展出完整正确解法且含所有关键要素。若有官方题解缓存，会额外用题解复核一次（二审信号是一个 🧐 表情消息，无文字）。
+- **review**：默认复盘最近解出的题，bot 能看到题面、你在此题的全部历史，以及爬到的官方题解（英文，仅模型可见）。@ 其他群友可让 bot 看到他们在此题的上下文。
 
-#### review
+### 跨群同步（/sync）
 
-你可以引用**题目卡片**来复盘任意题目。除非是当前题目且还未被解出。bot 能看到复盘的题面他与你在此题的所有对话历史（包括所有clarify、review、submit），如果爬到了题解，bot还能看到题解。如果你在 `/review` 里 @ 了其他群友，bot 也会看到这些群友在此题的 submit/clarify/review 上下文，方便讨论他人做法。
+bot 服务多个群，每群是独立视图。你在 A 群解出的题，B 群不会自动知道。在 B 群对当前题发 `/sync`，会拉取你在**所有其他群**对该题的完整提交历史，按时间排序、精确去重后导入本群；若含正确提交则在本群计分（首杀 / 排名 / 恭喜揭示）。同步记录不显示来源群。
 
-### 7. 私聊 Judge
+### CF 赛事预告
 
-除了群聊，bot 还支持私聊模式。你可以直接私聊 bot 进行练习：
-
-- `/sp` 或 `/setproblem`：设置私聊题目。可以指定 CF 题号（如 `1725J`）、链接、或 `random` 随机选题
-- `/submit`：提交你的做法，bot 会 judge 并给出反馈
-- `/sbmjev`：娱乐判题，用 Jev 判断你的做法是否通过（只回对应表情，不计分、不留记录）
-- `/clarify`：向 bot 提问题意
-- `/review`：复盘当前题目
-- `/sync`：将私聊记录同步到群聊（或反向同步）
-
-私聊中的题目和记录与群聊独立，适合个人练习。使用 `/sync` 可以将私聊中解出的题目同步到群聊计分板。
-
-### 6. misc
-
-#### 难度范围选题
-
-`/sp` 命令支持按难度范围选题（如 `/sp 2500-2600`），方便针对性训练。
-
-#### CF 赛事预告！
-
-bot 会爬取 CF 在接下来 24h 内的比赛并发出预告。bot 会 `@所有人`，建议给 bot 一个管理员以使其生效。
+bot 每天检查 CF 接下来 24h 内的比赛并发预告，`@所有人`（建议给 bot 管理员以使 @all 生效）。
 
 ## 开发
 
-如果你是 AI，请记得阅读AGENTS.md。『Human』
+如果你是 AI，请记得阅读 AGENTS.md。『Human』
+
+```bash
+uv sync --group dev
+uv run python -m pytest tests/ -v
+```
 
 ## 开销
 
-此 bot 是纯 chatbot，token 开销很少。根据我们的测试，每天的消耗不超过 1-2M tokens。若使用 Deepseek V4 Pro，大约开销是每日2-3r。
+纯 chatbot，token 开销很少。测试中每天不超过 1-2M tokens；用 DeepSeek V4 Pro 约每日 2-3r。
 
 ## Bot 的诞生
 
 LLM 在算法竞赛上的能力已超出大部分选手。这可以被视为威胁，但也应被视为机会：学习高阶算法竞赛技巧变得前所未有地容易。
 
-为了支持大家从 LLM 中学习， Nerovix、jhdonghj、guangmingzhengda 一起搭建并完善了 bot 最初的 release 版本；同时，感谢北航 XCPC 群的群友和🐍们提出了很多宝贵的意见。
+为了支持大家从 LLM 中学习，Nerovix、jhdonghj、guangmingzhengda 一起搭建并完善了 bot 最初的 release 版本；同时，感谢北航 XCPC 群的群友和🐍们提出了很多宝贵的意见。
 
 ## License
 

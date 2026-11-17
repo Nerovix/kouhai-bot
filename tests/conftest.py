@@ -1,16 +1,16 @@
 """Shared pytest configuration for the kouhai-bot test-suite.
 
-Network isolation: the suite must never talk to a real NapCat instance
-(the production bot runs on this machine, so an unmocked call would reach
-it). Every message send/query in ``kouhai_bot.napcat.client`` goes through
-``_http_post``, so blocking it here makes unmocked calls degrade exactly
-like an unreachable NapCat (``{"status": "failed"}`` → the callers' normal
-None/failure paths) instead of touching production. Every blocked call
-emits a warning so the run summary shows it if a test forgot its mock.
+Network isolation: the suite must never talk to a real official QQ API (or
+any other live HTTP endpoint). Every outbound REST/token/LLM call in the new
+architecture funnels through ``aiohttp.ClientSession._request``, so blocking
+it here makes unmocked calls fail loudly (``aiohttp.ClientError``) instead of
+reaching production. Tests that exercise the transport inject a fake session
+or monkeypatch the call themselves, which overrides this autouse block.
 """
 
 import warnings
 
+import aiohttp
 import pytest
 
 
@@ -25,12 +25,27 @@ async def db(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _block_real_napcat_http(monkeypatch):
-    async def _blocked(action, data):
+def _block_real_http(monkeypatch):
+    async def _blocked(self, method, url, *args, **kwargs):
         warnings.warn(
-            f"tests attempted a real NapCat call ({action}); blocked by conftest",
+            f"tests attempted a real HTTP call ({method} {url}); blocked by conftest",
             stacklevel=2,
         )
-        return {"status": "failed", "data": {}}
+        raise aiohttp.ClientError(f"real HTTP call blocked in tests: {method} {url}")
 
-    monkeypatch.setattr("kouhai_bot.napcat.client._http_post", _blocked)
+    monkeypatch.setattr(aiohttp.ClientSession, "_request", _blocked)
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_runtime():
+    """Clear process-global runtime/database/echo/cooldown state between tests."""
+    yield
+    from kouhai_bot import echo
+    from kouhai_bot.db import set_database
+    from kouhai_bot.handlers import reset_cooldowns_for_tests
+    from kouhai_bot.handlers.runtime import set_runtime
+
+    set_runtime(None)
+    set_database(None)
+    echo.reset_echo_for_tests()
+    reset_cooldowns_for_tests()

@@ -62,10 +62,13 @@ async def resend_current_problem_group(
             browser=rt.browser,
         )
         if mid:
+            pid = str(current.get("today", "") or "")
+            ref_idx = rt.sender.ref_idx_for(mid)
+            if ref_idx and pid:
+                await posts.record_message_ref(db, group_openid, ref_idx, pid, mid)
             notice = high_difficulty_notice(current)
             if notice:
                 await rt.sender.send_group_text(group_openid, notice)
-            pid = str(current.get("today", "") or "")
             if pid and await state.is_problem_solved(db, group_openid, pid):
                 await rt.sender.send_group_text(
                     group_openid, "这题已经通过啦，可以发 /newproblem 挑战下一题～",

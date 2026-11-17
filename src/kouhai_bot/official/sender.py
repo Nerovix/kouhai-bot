@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import logging
 import random
+from collections import OrderedDict
 from typing import Any
 
 from .budget import ReplyBudget
@@ -75,6 +76,23 @@ class OfficialSender:
         self._budget = budget
         self.bot_name = bot_name
         self._media_cache = media_cache if media_cache is not None else MediaCache()
+        # message_id → outbound ext_info.ref_idx (for quoted-card targeting).
+        self._ref_by_id: OrderedDict[str, str] = OrderedDict()
+
+    def _remember(self, resp: dict[str, Any]) -> str | None:
+        mid = str(resp.get("id", "") or "") or None
+        ref = str((resp.get("ext_info") or {}).get("ref_idx", "") or "")
+        if mid and ref:
+            self._ref_by_id[mid] = ref
+            while len(self._ref_by_id) > 4096:
+                self._ref_by_id.popitem(last=False)
+        return mid
+
+    def ref_idx_for(self, message_id: str | None) -> str | None:
+        """The ref_idx returned when this message was sent (None if unknown)."""
+        if not message_id:
+            return None
+        return self._ref_by_id.get(message_id)
 
     async def _send(
         self,
@@ -89,7 +107,7 @@ class OfficialSender:
                 passive = dict(payload, msg_id=msg_id, msg_seq=seq)
                 try:
                     resp = await self._rest.send_group_message(group_openid, passive)
-                    return str(resp.get("id", "") or "") or None
+                    return self._remember(resp)
                 except OfficialApiError as e:
                     logger.warning(
                         "passive send failed (msg_id=%s seq=%s): %s; trying active",
@@ -101,7 +119,7 @@ class OfficialSender:
         active = dict(payload, msg_seq=random.randint(1, 1_000_000))
         try:
             resp = await self._rest.send_group_message(group_openid, active)
-            return str(resp.get("id", "") or "") or None
+            return self._remember(resp)
         except OfficialApiError as e:
             logger.error("active send failed for group %s: %s", group_openid, e)
             return None

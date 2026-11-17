@@ -89,7 +89,10 @@ async def env(db, tmp_path, monkeypatch):
 _msg_counter = 0
 
 
-def make_ctx(raw_text: str, *, user: str = U, group: str = G, nickname: str = "") -> Ctx:
+def make_ctx(
+    raw_text: str, *, user: str = U, group: str = G, nickname: str = "",
+    event: dict | None = None,
+) -> Ctx:
     global _msg_counter
     _msg_counter += 1
     return Ctx(
@@ -98,6 +101,7 @@ def make_ctx(raw_text: str, *, user: str = U, group: str = G, nickname: str = ""
         message_id=f"msg-{_msg_counter}",
         raw_text=raw_text,
         nickname=nickname,
+        event=event or {},
     )
 
 
@@ -654,7 +658,12 @@ async def test_review_folds_mentioned_user_context(env, monkeypatch):
         "reason": "他的判定", "reply": "", "timestamp": "2026-01-01T00:00:00+08:00",
     })
     calls = mock_chat(monkeypatch, "一起复盘～")
-    await review_cmd.handle(make_ctx(f"/review 聊聊 <@!{mentioned.lower()}>"))
+    await review_cmd.handle(make_ctx(
+        f"/review 聊聊 <@{mentioned.lower()}>",
+        event={"mentions": [
+            {"member_openid": mentioned, "is_you": False, "bot": False, "scope": "single"},
+        ]},
+    ))
     user_msg = calls[0]["messages"][1]["content"]
     assert "被 @ 群友在此题的上下文" in user_msg
     assert mentioned in user_msg
@@ -662,6 +671,42 @@ async def test_review_folds_mentioned_user_context(env, monkeypatch):
     # mentioned user's history is read-only: only the pre-seeded record remains
     recs = await submissions.get_user_problem_submissions(env.db, G, mentioned, PID)
     assert len(recs) == 1
+
+
+def test_review_mentions_skip_bot_and_self():
+    ctx = make_ctx("/review x", user=U, event={"mentions": [
+        {"member_openid": U, "scope": "single"},          # self → skip
+        {"member_openid": "BOT1", "is_you": True},         # bot → skip
+        {"member_openid": "BOT2", "bot": True},            # bot flag → skip
+        {"member_openid": "FRIEND", "scope": "single"},    # kept
+        {"member_openid": "FRIEND"},                       # duplicate → skip
+    ]})
+    assert review_cmd._mentioned_user_ids(ctx) == ["FRIEND"]
+
+
+async def test_review_quoted_card_targets_older_solved_problem(env, monkeypatch):
+    await seed_problem(env.db, PID, name="Latest Problem")
+    await seed_problem(env.db, "111A", name="Older Problem")
+    await posts.record_solve(env.db, G, U, "111A", "Alice")  # order 1
+    await posts.record_solve(env.db, G, U, PID, "Alice")     # order 2 → latest
+    await posts.record_message_ref(env.db, G, "REFIDX_old", "111A", "Mcard")
+    calls = mock_chat(monkeypatch, "复盘旧题～")
+    await review_cmd.handle(make_ctx("/review 聊聊", event={"ref_msg_idx": "REFIDX_old"}))
+    user_msg = calls[0]["messages"][1]["content"]
+    assert "Older Problem" in user_msg
+    assert "Latest Problem" not in user_msg
+
+
+async def test_review_quoted_unsolved_falls_back_to_latest(env, monkeypatch):
+    await seed_problem(env.db, PID, name="Latest Problem")
+    await seed_problem(env.db, "111A", name="Unsolved Problem")
+    await posts.record_solve(env.db, G, U, PID, "Alice")  # only PID solved
+    await posts.record_message_ref(env.db, G, "REFIDX_unsolved", "111A", "Mcard")
+    calls = mock_chat(monkeypatch, "复盘～")
+    await review_cmd.handle(make_ctx("/review 聊聊", event={"ref_msg_idx": "REFIDX_unsolved"}))
+    user_msg = calls[0]["messages"][1]["content"]
+    assert "Latest Problem" in user_msg
+    assert "Unsolved Problem" not in user_msg
 
 
 async def test_review_long_reply_uses_card_with_text_fallback(env, monkeypatch):

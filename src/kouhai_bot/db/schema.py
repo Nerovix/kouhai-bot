@@ -190,4 +190,17 @@ CREATE TABLE IF NOT EXISTS group_used (
     created_at   TEXT NOT NULL,
     PRIMARY KEY (group_openid, pid)
 );
+
+-- Outbound message ref_idx → problem map (quoted-card targeting). The official
+-- send response returns ext_info.ref_idx (REFIDX_…); a user quoting that card
+-- delivers the same value as inbound message_scene.ext ref_msg_idx.
+CREATE TABLE IF NOT EXISTS message_refs (
+    ref_idx      TEXT PRIMARY KEY,
+    group_openid TEXT NOT NULL,
+    pid          TEXT NOT NULL,
+    message_id   TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_message_refs_group_pid
+    ON message_refs (group_openid, pid);
 """

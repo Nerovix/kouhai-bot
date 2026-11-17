@@ -1,11 +1,9 @@
-"""/review — discuss the latest solved problem with AI.
+"""/review — discuss a solved problem with AI.
 
 Group-only. Defaults to the group's most recently solved problem (snapshotted
-at admission). @mentioned group members' same-problem context is folded in.
-
-Quoted-card targeting of older problems depends on the official incoming
-reply-reference format, which is not yet verified (see DECISIONS Q10); for now
-/review always targets the latest solved problem.
+at admission). Quoting an earlier problem card targets that problem instead
+(official ref_idx→pid map, 实测-verified); @mentioned group members' same-problem
+context is folded in.
 """
 
 from __future__ import annotations
@@ -18,22 +16,39 @@ from ..registry import CommandDef
 from ..context import Ctx
 from .. import state
 from .submit import enqueue_review_request
+from ...db.repos import posts
 
 logger = logging.getLogger("kouhai-bot.cmd.review")
 
-_MENTION_RE = re.compile(r"<@!([0-9A-Fa-f]+)>")
-
 
 def _mentioned_user_ids(ctx: Ctx) -> list[str]:
+    """Structured mentions[] (实测: inbound @ renders as <@openid>, no '!').
+    Skip the bot (is_you/bot), the requester, and duplicates."""
     seen: set[str] = set()
     result: list[str] = []
-    for openid in _MENTION_RE.findall(ctx.raw_text):
-        openid = openid.upper()
-        if openid == ctx.user_openid.upper() or openid in seen:
+    self_id = ctx.user_openid.upper()
+    for mention in ctx.event.get("mentions") or []:
+        if not isinstance(mention, dict):
+            continue
+        if mention.get("is_you") or mention.get("bot"):
+            continue
+        openid = str(mention.get("member_openid", "") or "").upper()
+        if not openid or openid == self_id or openid in seen:
             continue
         seen.add(openid)
         result.append(openid)
     return result
+
+
+async def _resolve_review_pid(ctx: Ctx) -> str:
+    """A quoted problem card targets its pid when that problem is solved here;
+    otherwise fall back to the latest solved problem."""
+    ref_idx = str(ctx.event.get("ref_msg_idx", "") or "")
+    if ref_idx:
+        quoted_pid = await posts.pid_for_ref(ctx.db, ctx.group_openid, ref_idx)
+        if quoted_pid and await state.is_problem_solved(ctx.db, ctx.group_openid, quoted_pid):
+            return quoted_pid
+    return await state.latest_solved_pid(ctx.db, ctx.group_openid) or ""
 
 
 async def handle(ctx: Ctx) -> None:
@@ -54,7 +69,7 @@ async def handle(ctx: Ctx) -> None:
         )
         return
 
-    review_pid = await state.latest_solved_pid(ctx.db, ctx.group_openid) or ""
+    review_pid = await _resolve_review_pid(ctx)
     if not review_pid:
         await ctx.sender.send_group_at(
             ctx.group_openid, ctx.user_openid,

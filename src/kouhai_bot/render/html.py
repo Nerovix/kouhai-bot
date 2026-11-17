@@ -1,10 +1,10 @@
 """Mobile QQ merged-forward card replica → HTML for long-image rendering.
 
 A opened forward card reads as a vertical list of chat bubbles: avatar +
-nickname + white bubble. Avatars render as deterministic initial-letter color
-circles. Official events expose an ``author.avatar`` URL since 2026-11-16, but
-its real-world delivery is not yet verified, so we do not load remote avatar
-images here yet (letter circles are the safe fallback).
+nickname + white bubble. Official events deliver ``author.avatar`` (实测: a
+public JPEG URL); the render layer pre-fetches it into a base64 data URI
+(``avatar_data`` on a node). When absent, avatars fall back to deterministic
+initial-letter color circles.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ body {
   display: flex; align-items: center; justify-content: center;
   margin-right: 10px; user-select: none;
 }
+img.avatar { object-fit: cover; display: block; }
 .col { flex: 1 1 auto; min-width: 0; }
 .nick { font-size: 12px; color: #8a8a8a; margin-bottom: 5px; }
 .bubble {
@@ -89,9 +90,17 @@ def build_forward_card_html(
     for node in nodes:
         nickname = str(node.get("nickname", "") or "")
         content_html = node.get("content_html", "")
+        avatar_data = str(node.get("avatar_data", "") or "")
+        if avatar_data:
+            avatar_html = f'<img class="avatar" src="{avatar_data}" alt="">'
+        else:
+            avatar_html = (
+                f'<div class="avatar" style="background:{_avatar_color(nickname)}">'
+                f"{_initial(nickname)}</div>"
+            )
         rows.append(
             '<div class="msg">'
-            f'<div class="avatar" style="background:{_avatar_color(nickname)}">{_initial(nickname)}</div>'
+            f"{avatar_html}"
             '<div class="col">'
             f'<div class="nick">{escape(nickname)}</div>'
             f'<div class="bubble">{content_html}</div>'

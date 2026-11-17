@@ -12,6 +12,7 @@ from html import unescape
 from typing import Any
 
 from ..official.sender import OfficialSender
+from .avatars import get_avatar_cache
 from .browser import RenderBrowser, get_render_browser
 from .html import build_forward_card_html
 
@@ -41,9 +42,26 @@ async def render_card_png(
     width: int = 720,
     browser: RenderBrowser | None = None,
 ) -> bytes:
-    html = build_forward_card_html(nodes, title=title, footer=footer)
+    html = build_forward_card_html(
+        await _resolve_avatars(nodes), title=title, footer=footer
+    )
     browser = browser or get_render_browser()
     return await browser.screenshot_html(html, width=width)
+
+
+async def _resolve_avatars(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pre-fetch each node's avatar_url into an embedded data URI (best-effort;
+    failures leave the letter-circle fallback)."""
+    cache = get_avatar_cache()
+    resolved: list[dict[str, Any]] = []
+    for node in nodes:
+        url = str(node.get("avatar_url", "") or "")
+        if url and not node.get("avatar_data"):
+            data = await cache.data_uri(url)
+            if data:
+                node = {**node, "avatar_data": data}
+        resolved.append(node)
+    return resolved
 
 
 async def send_forward_card(

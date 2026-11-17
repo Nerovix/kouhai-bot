@@ -25,8 +25,36 @@ MEMBER_ADD_EVENTS = frozenset({"GROUP_MEMBER_ADD"})
 MEMBER_REMOVE_EVENTS = frozenset({"GROUP_MEMBER_REMOVE"})
 
 
+def parse_scene_ext(ext: Any) -> dict[str, str]:
+    """``message_scene.ext`` is a list of ``"key=value"`` strings (实测), e.g.
+    ``["ref_msg_idx=REFIDX_…", "msg_idx=REFIDX_…", "auth_token=…"]``. Parse it
+    into a dict; tolerate a dict form too. Values may contain ``=`` so split
+    on the first only."""
+    result: dict[str, str] = {}
+    if isinstance(ext, dict):
+        return {str(k): str(v) for k, v in ext.items()}
+    if isinstance(ext, list):
+        for item in ext:
+            if isinstance(item, str) and "=" in item:
+                key, _, value = item.partition("=")
+                result[key.strip()] = value
+    return result
+
+
+def _quoted_element(elements: Any) -> dict[str, Any]:
+    """The first type-103 (quote) element carries the quoted message's text and
+    its own msg_idx (== scene.ext ref_msg_idx)."""
+    if isinstance(elements, list):
+        for el in elements:
+            if isinstance(el, dict) and el.get("message_type") == 103:
+                return el
+    return {}
+
+
 def _group_message(t: str, d: dict[str, Any]) -> dict[str, Any]:
     author = d.get("author") or {}
+    scene_ext = parse_scene_ext((d.get("message_scene") or {}).get("ext"))
+    quoted = _quoted_element(d.get("msg_elements"))
     return {
         "type": "message",
         "message_type": "group",
@@ -42,6 +70,9 @@ def _group_message(t: str, d: dict[str, Any]) -> dict[str, Any]:
         "mentions": d.get("mentions") or [],
         "message_scene": d.get("message_scene") or {},
         "msg_elements": d.get("msg_elements") or [],
+        "msg_idx": scene_ext.get("msg_idx", ""),
+        "ref_msg_idx": scene_ext.get("ref_msg_idx", "") or str(quoted.get("msg_idx", "") or ""),
+        "quoted_text": str(quoted.get("content", "") or ""),
         "attachments": d.get("attachments") or [],
         "at_bot": t == "GROUP_AT_MESSAGE_CREATE",
         "raw": d,

@@ -146,7 +146,9 @@ async def handle(ctx: Ctx) -> None:
 
     await send_history_card(
         ctx.sender, ctx.group_openid, imported,
-        user_name=ctx.name, msg_id=ctx.message_id, browser=ctx.browser,
+        user_name=ctx.name,
+        user_avatar_url=str(ctx.event.get("avatar", "") or ""),
+        msg_id=ctx.message_id, browser=ctx.browser,
     )
     if cheer:
         await ctx.sender.send_group_at(

@@ -269,7 +269,8 @@ class FakeRest:
         self.sent.append((group_openid, payload))
         if self.fail_passive and payload.get("msg_id"):
             raise OfficialApiError(400, {"code": 1, "message": "passive expired"})
-        return {"id": f"M{len(self.sent)}"}
+        n = len(self.sent)
+        return {"id": f"M{n}", "ext_info": {"ref_idx": f"REFIDX_{n}"}}
 
     async def upload_group_media(self, group_openid, payload):
         self.uploads.append((group_openid, payload))
@@ -343,6 +344,58 @@ async def test_sender_active_quota_exhausted_returns_none():
         assert rest.sent == []
     finally:
         budget_mod.ACTIVE_DAILY_MAX = orig
+
+
+async def test_sender_captures_outbound_ref_idx():
+    rest = FakeRest()
+    s = OfficialSender(rest, ReplyBudget())
+    mid = await s.send_group_text("G1", "题卡")
+    assert mid == "M1"
+    assert s.ref_idx_for(mid) == "REFIDX_1"
+    assert s.ref_idx_for("unknown") is None
+    assert s.ref_idx_for(None) is None
+
+
+# ── scene.ext parsing + quote normalization (实测 shapes) ────────────────
+
+def test_parse_scene_ext_list_and_dict():
+    from kouhai_bot.official.events import parse_scene_ext
+    ext = ["ref_msg_idx=REFIDX_a=b", "msg_idx=REFIDX_m", "auth_token=tok"]
+    parsed = parse_scene_ext(ext)
+    assert parsed["ref_msg_idx"] == "REFIDX_a=b"  # split on first '=' only
+    assert parsed["msg_idx"] == "REFIDX_m"
+    assert parsed["auth_token"] == "tok"
+    assert parse_scene_ext({"msg_idx": "X"}) == {"msg_idx": "X"}
+    assert parse_scene_ext(None) == {}
+    assert parse_scene_ext(["noequals", 5]) == {}
+
+
+def test_normalize_quote_message_fields():
+    ev = normalize_event("GROUP_MESSAGE_CREATE", {
+        "id": "M1", "content": " 引用bot的消息", "group_openid": "G1",
+        "message_type": 103,
+        "author": {"member_openid": "U1", "avatar": "https://thirdqq.qlogo.cn/x"},
+        "msg_elements": [
+            {"message_type": 103, "content": "被引正文", "msg_idx": "REFIDX_quoted"},
+        ],
+        "message_scene": {"ext": [
+            "ref_msg_idx=REFIDX_quoted", "msg_idx=REFIDX_self", "auth_token=t",
+        ]},
+    })
+    assert ev["ref_msg_idx"] == "REFIDX_quoted"
+    assert ev["msg_idx"] == "REFIDX_self"
+    assert ev["quoted_text"] == "被引正文"
+
+
+def test_normalize_ordinary_message_has_no_ref():
+    ev = normalize_event("GROUP_MESSAGE_CREATE", {
+        "id": "M1", "content": "普通你好", "group_openid": "G1",
+        "author": {"member_openid": "U1"},
+        "message_scene": {"ext": ["msg_idx=REFIDX_self", "auth_token=t"]},
+    })
+    assert ev["ref_msg_idx"] == ""
+    assert ev["msg_idx"] == "REFIDX_self"
+    assert ev["quoted_text"] == ""
 
 
 # ── gateway (local WS server) ───────────────────────────────────────────

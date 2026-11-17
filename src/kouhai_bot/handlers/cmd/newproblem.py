@@ -263,6 +263,9 @@ async def _post_new_problem_locked(
             post_date=datetime.now(TZ).strftime("%Y-%m-%d"),
             card_json=card_json,
         )
+        ref_idx = rt.sender.ref_idx_for(mid)
+        if ref_idx:
+            await posts.record_message_ref(db, group_openid, ref_idx, pid, mid)
 
         if desc and prepared.summary_status.value == "ready":
             await problems.set_problem_summary(

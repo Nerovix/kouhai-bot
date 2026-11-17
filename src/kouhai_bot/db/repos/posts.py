@@ -214,3 +214,30 @@ async def get_excluded_pids(db: Database, group_openid: str) -> set[str]:
         (group_openid, group_openid, group_openid),
     )
     return {r["pid"] for r in rows}
+
+
+async def record_message_ref(
+    db: Database, group_openid: str, ref_idx: str, pid: str, message_id: str = ""
+) -> None:
+    """Map an outbound card's ref_idx to its pid (for quoted-card targeting)."""
+    if not ref_idx or not pid:
+        return
+    await db.execute(
+        "INSERT INTO message_refs (ref_idx, group_openid, pid, message_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(ref_idx) DO UPDATE SET "
+        "group_openid=excluded.group_openid, pid=excluded.pid, "
+        "message_id=excluded.message_id",
+        (ref_idx, group_openid, pid, message_id, now_iso()),
+    )
+
+
+async def pid_for_ref(db: Database, group_openid: str, ref_idx: str) -> str | None:
+    """Resolve a quoted card's ref_idx to a pid posted in this group."""
+    if not ref_idx:
+        return None
+    row = await db.fetch_one(
+        "SELECT pid FROM message_refs WHERE ref_idx=? AND group_openid=?",
+        (ref_idx, group_openid),
+    )
+    return row["pid"] if row else None

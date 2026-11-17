@@ -28,6 +28,7 @@ from .official.rest import OfficialRestClient
 from .official.sender import OfficialSender
 from .official.tokens import AccessTokenManager
 from .problem_prefetch import get_next_problem_prefetcher
+from .render.avatars import get_avatar_cache
 from .render.browser import get_render_browser
 from .runtime import bootstrap_runtime, setup_logging
 from .scheduler.engine import scheduler_loop
@@ -136,6 +137,7 @@ class WorkerRuntime:
                 await self._scheduler_task
         await self._wait_for_background_tasks()
         await self._browser.close()
+        await get_avatar_cache().close()
         await self._rest.close()
         await self._tokens.close()
         await self._db.close()

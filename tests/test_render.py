@@ -41,6 +41,36 @@ def test_build_card_html_structure():
     assert 'class="avatar"' in html
 
 
+def test_build_card_html_avatar_img_vs_letter_circle():
+    with_avatar = build_forward_card_html(
+        [{"nickname": "Alice", "content_html": "hi", "avatar_data": "data:image/jpeg;base64,AAAA"}],
+    )
+    assert '<img class="avatar" src="data:image/jpeg;base64,AAAA"' in with_avatar
+    without = build_forward_card_html([{"nickname": "Alice", "content_html": "hi"}])
+    assert '<img class="avatar"' not in without
+    assert 'class="avatar"' in without  # letter-color circle fallback
+
+
+async def test_resolve_avatars_embeds_data_uri(monkeypatch):
+    from kouhai_bot.render import forward_card as fc
+
+    class FakeCache:
+        async def data_uri(self, url):
+            return "data:image/png;base64,Zm9v" if url == "https://ok/a.png" else None
+
+    monkeypatch.setattr(fc, "get_avatar_cache", lambda: FakeCache())
+    nodes = [
+        {"nickname": "A", "content_html": "x", "avatar_url": "https://ok/a.png"},
+        {"nickname": "B", "content_html": "y", "avatar_url": "https://fail/b.png"},
+        {"nickname": "C", "content_html": "z"},
+    ]
+    resolved = await fc._resolve_avatars(nodes)
+    assert resolved[0]["avatar_data"] == "data:image/png;base64,Zm9v"
+    assert "avatar_data" not in resolved[1]  # fetch failure → letter circle
+    assert "avatar_data" not in resolved[2]  # no url
+    assert "avatar_data" not in nodes[0]     # caller dicts not mutated
+
+
 def test_build_card_html_escapes_nickname():
     html = build_forward_card_html(
         [{"nickname": "<script>", "content_html": "x"}]

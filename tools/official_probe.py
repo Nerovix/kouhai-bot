@@ -161,11 +161,40 @@ async def _length(args) -> None:
             await asyncio.sleep(args.delay)
     finally:
         await rest.close()
+        await tokens.close()
     if threshold is None:
         print("\nno length error reached within ladder; raise --max.")
 
 
+async def _send(args) -> None:
+    if not args.group:
+        print("send probe requires --group <group_openid>", file=sys.stderr)
+        raise SystemExit(2)
+    cfg, tokens, rest = _clients()
+    if args.kind == "markdown":
+        payload = {"msg_type": 2, "markdown": {"content": args.text}}
+    else:
+        payload = {"content": args.text, "msg_type": 0}
+    try:
+        resp = await rest.send_group_message(args.group, payload)
+        print("FULL SEND RESPONSE:")
+        print(json.dumps(resp, ensure_ascii=False, indent=2))
+        ref = (resp.get("ext_info") or {}).get("ref_idx")
+        print(f"\next_info.ref_idx = {ref!r}")
+        mid = str(resp.get("id", "") or "")
+        if args.recall and mid:
+            ok = await rest.recall_group_message(args.group, mid)
+            print(f"recall({mid[:12]}…): {'ok' if ok else 'FAILED'}")
+    except OfficialApiError as e:
+        print(f"SEND ERROR HTTP {e.status} body={e.body}")
+    finally:
+        await rest.close()
+        await tokens.close()
+
+
 def main() -> None:
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(description="Official QQ bot API field probe")
     sub = parser.add_subparsers(dest="cmd")
 
@@ -182,12 +211,20 @@ def main() -> None:
     ln.add_argument("--step", type=int, default=None)
     ln.add_argument("--delay", type=float, default=1.0, help="seconds between sends")
 
+    sd = sub.add_parser("send", help="send one test message, dump full response (ref_idx)")
+    sd.add_argument("--group", default="", help="target group_openid (required)")
+    sd.add_argument("--kind", choices=["text", "markdown"], default="text")
+    sd.add_argument("--text", default="探针出站测试（稍后撤回）", help="message body")
+    sd.add_argument("--recall", action="store_true", help="recall the message after dumping")
+
     args = parser.parse_args()
     cmd = args.cmd or "capture"
     if cmd == "capture":
         if not hasattr(args, "group"):
             args.group, args.out = "", ""
         asyncio.run(_capture(args))
+    elif cmd == "send":
+        asyncio.run(_send(args))
     else:
         asyncio.run(_length(args))
 

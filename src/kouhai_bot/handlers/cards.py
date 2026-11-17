@@ -121,7 +121,7 @@ def _bot_reply_text(record: dict) -> str:
 
 
 def build_history_card_nodes(
-    records: list[dict], *, user_name: str, bot_name: str,
+    records: list[dict], *, user_name: str, bot_name: str, user_avatar_url: str = "",
 ) -> list[dict]:
     """Per-sender chat-record nodes: user bubble + bot bubble per interaction.
 
@@ -135,7 +135,12 @@ def build_history_card_nodes(
         content = str(record.get("content", "") or "")
         if content:
             nodes.append(
-                {"nickname": user_name, "content_html": text_to_html(content), "content_text": content}
+                {
+                    "nickname": user_name,
+                    "content_html": text_to_html(content),
+                    "content_text": content,
+                    "avatar_url": user_avatar_url,
+                }
             )
         if str(record.get("result", "") or "") in {"pending", "superseded"}:
             continue
@@ -169,11 +174,14 @@ async def send_history_card(
     records: list[dict],
     *,
     user_name: str,
+    user_avatar_url: str = "",
     msg_id: str | None = None,
     browser: RenderBrowser | None = None,
 ) -> str | None:
     bot_name = sender.bot_name or "算法助手"
-    nodes = build_history_card_nodes(records, user_name=user_name, bot_name=bot_name)
+    nodes = build_history_card_nodes(
+        records, user_name=user_name, bot_name=bot_name, user_avatar_url=user_avatar_url,
+    )
     if not nodes:
         return None
     fallback = history_card_text(records, user_name=user_name, bot_name=bot_name)

@@ -136,14 +136,21 @@ Transport: official/ (tokens/rest/gateway/sender/budget/media)
   silent drop within cooldown), canonicalizes alias→canonical text, builds Ctx, and
   spawns (`create_task`) or awaits the handler. No reaction/notice/poke/friend-request
   branches (no official equivalent).
-- **Inbound events & quote (Q10, audit 2026-11-18)**: group events carry structured
-  `mentions[]` (member_openid/username/member_nickname/scope=all|single/is_you),
-  `message_scene.ext` (msg_idx/ref_msg_idx/auth_token), and recursive `msg_elements[]`
-  (message_type=103 = quote, whose nested `content` IS the quoted message text — no
-  history-fetch API exists). Send responses return `ext_info.ref_idx`, so a bot can map
-  its own posted cards' ref_idx→pid locally and match inbound `ref_msg_idx` to locate a
-  quoted problem card (review quoted-card targeting is feasible this way; still pending
-  real-payload 实测). Outbound quotes use `message_reference.message_id` (=REFIDX).
+- **Inbound events & quote (Q10, E3 — 实测-verified 2026-11-18)**: group events carry
+  structured `mentions[]` (member_openid/username/member_nickname/bot/is_you/
+  scope=all|single/member_role); inbound @ renders in `content` as `<@openid>` (no `!`).
+  `message_scene.ext` is a **list of `"key=value"` strings** (`msg_idx`/`ref_msg_idx`/
+  `auth_token`); `parse_scene_ext` splits on the first `=` only. A quote is top-level
+  `message_type=103` whose `msg_elements[0]` (message_type=103) carries the quoted `content`
+  and `msg_idx`; `ref_msg_idx` == that element's `msg_idx` (ordinary messages have only
+  `msg_idx`+`auth_token`, no `ref_msg_idx`). No history-fetch API exists — the quoted text
+  arrives inline. Send responses return `ext_info.ref_idx` in the same REFIDX format;
+  `OfficialSender._remember` captures id→ref_idx (bounded LRU) and `ref_idx_for(message_id)`
+  exposes it. `/newproblem` and `/problem` persist card ref_idx→pid in `message_refs`
+  (`posts.record_message_ref`); `/review` matches inbound `ref_msg_idx` via
+  `posts.pid_for_ref` (group-scoped) to target a quoted older **solved** card
+  (`_resolve_review_pid`), else falls back to the latest solved pid. Outbound quotes use
+  `message_reference.message_id` (=REFIDX).
   **Gateway may push duplicate events** — dispatch dedups inbound by message_id
   (global LRU, silent drop before echo/cooldown) so a redelivery cannot run a command
   twice. Member-info/list and group-basic-info REST APIs remain
@@ -269,7 +276,7 @@ trigger; private chat ignored.
 |---------|------|-------|
 | `/submit` (`/sbm`) | submit.py | Judge via `smart_model`; coordinator-scheduled; first-blood scoring; offtopic 😵 leaves no record; second judge 🧐 only when verified editorial cached |
 | `/clarify` (`/clrf`) | clarify.py | `general_model`, JSON output, anti-spoiler (no original identity); markdown @asker |
-| `/review` (`/rv`) | review.py | Latest solved problem (admission snapshot); `smart_model`; @others' context; English editorial in LLM context only; short→markdown @asker, long→long image |
+| `/review` (`/rv`) | review.py | Latest solved problem, or a quoted older solved card (`ref_msg_idx`→`message_refs`); admission snapshot; `smart_model`; structured `mentions[]` @others' context; English editorial in LLM context only; short→markdown @asker, long→long image |
 | `/newproblem` (`/np`) | newproblem.py | Claims READY slot; unsolved needs exact `--force`; cooldown; long-image card; commits state only after delivery |
 | `/problem` (`/pb`) | stubs.py | Resend current problem card |
 | `/tag` | stubs.py | Current problem CF tags |
@@ -348,8 +355,12 @@ Grounding uses the current pid's verified summary (`problems.summary_zh` + finge
 
 ### `/review`
 
-Targets the latest solved problem at admission. Loads caller's history; @mentioned users'
-same-problem context appended (ignore @all/bot/self/duplicates; nothing persisted to mentioned
+Targets the latest solved problem at admission, or — when the message quotes one of the
+bot's own older problem cards — that card's pid: `_resolve_review_pid` reads
+`ctx.event["ref_msg_idx"]`, looks it up group-scoped in `message_refs` (`posts.pid_for_ref`),
+and uses it only if that problem is solved; otherwise it falls back to the latest solved pid.
+Loads caller's history; @mentioned users' same-problem context appended from the structured
+`mentions[]` list (ignore `is_you`/`bot`/self/duplicates; nothing persisted to mentioned
 users). `smart_model`, free text. If a verified editorial exists, append the **English** source
 via `format_editorial_for_review()` (truncated 12k) — model-only, never pasted to the user.
 Short reply → markdown @asker; long (>400) → long image + a short @asker note.
@@ -439,8 +450,11 @@ markdown `<qqbot-at-everyone/>` + lines via `sender.send_group_markdown`. @all n
    60/qpm, 30 unverified). ReplyBudget handles passive→active degradation.
 8. **Nickname fallback is openid[:8]**, never a generic placeholder like "群友". Since
    2026-11-16 official group events carry `author.member_nickname`/`username` (use them;
-   group card preferred); `users.nickname` stores the snapshot. `author.avatar` URL also
-   exists but real delivery is unverified — render still uses letter-color circles.
+   group card preferred); `users.nickname` stores the snapshot. `author.avatar` is a real
+   public image URL (实测: `thirdqq.qlogo.cn/bqqthird?…`, HTTP 200 image/jpeg, no auth);
+   `render/avatars.py:AvatarCache` pre-fetches it in Python (aiohttp, 5s/2MB cap, LRU+6h TTL)
+   to a base64 data URI embedded in the card HTML — no browser network. Fetch failure or no
+   URL falls back to a letter-color circle. History-card user nodes carry the sender's avatar.
 9. **Every message text matters**: validation/error/success wording is deliberate; preserve intent.
 10. **Offtopic is model output** (`reaction="123"`), not local substring blacklists.
 11. **Save-before-deliver** for clarify/review/submit so /feedback targeting is consistent.
@@ -478,10 +492,15 @@ prefetch/preparation, editorial followup/tutorials, scheduler, shared helpers.
 ### Live field probe (owner-led 实测)
 
 `tools/official_probe.py` gathers ground-truth payloads for features whose live shape is
-documented but unverified (Q10/E3/E4) — implement those only after calibration, never speculate:
+documented but unverified — implement those only after calibration, never speculate.
+E3 (avatar/mentions/quote/outbound ref_idx) is now 实测-calibrated and implemented; E4
+length bracketing still awaits an owner-chosen group:
 - `capture` — read-only gateway listener; dumps raw group events to `{data_dir}/probe/*.jsonl`
   and highlights `author.avatar` / `mentions[]` / `msg_elements[]` (type 103 quote) /
   `message_scene.ext` (ref_msg_idx). Stop the live bot first (same app_id gateway conflict).
+- `send --group <gid> [--kind text|markdown] [--text …] [--recall]` — posts one real message,
+  prints the FULL send response (incl. `ext_info.ref_idx`), optionally recalls it (≤2min).
+  Used to verify the outbound ref_idx shape and recall behavior.
 - `length --group <gid> [--kind text|markdown] [--send]` — brackets the 40054007 codepoint
   limit; dry-run by default, `--send` posts real messages (owner picks the group).
 

@@ -220,3 +220,19 @@ async def test_excluded_pids_union(db):
     await posts.record_solve(db, "G1", "U1", "SOLVED", "n")
     excluded = await posts.get_excluded_pids(db, "G1")
     assert excluded == {"USED", "POSTED", "SOLVED"}
+
+
+async def test_message_ref_maps_to_pid_group_scoped(db):
+    await posts.record_message_ref(db, "G1", "REFIDX_a", "542D", "M1")
+    assert await posts.pid_for_ref(db, "G1", "REFIDX_a") == "542D"
+    # group-scoped: another group cannot resolve G1's ref
+    assert await posts.pid_for_ref(db, "G2", "REFIDX_a") is None
+    assert await posts.pid_for_ref(db, "G1", "REFIDX_missing") is None
+    assert await posts.pid_for_ref(db, "G1", "") is None
+    # upsert: re-posting the same pid under a new ref keeps both resolvable
+    await posts.record_message_ref(db, "G1", "REFIDX_b", "542D", "M2")
+    assert await posts.pid_for_ref(db, "G1", "REFIDX_b") == "542D"
+    # empty ref/pid are no-ops
+    await posts.record_message_ref(db, "G1", "", "X")
+    await posts.record_message_ref(db, "G1", "REFIDX_c", "")
+    assert await posts.pid_for_ref(db, "G1", "REFIDX_c") is None

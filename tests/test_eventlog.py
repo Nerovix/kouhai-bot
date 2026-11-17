@@ -8,6 +8,7 @@ spawns the handler as a task or awaits it inline.
 """
 
 import asyncio
+import itertools
 
 import pytest
 
@@ -25,6 +26,10 @@ from kouhai_bot.official import OfficialSender, ReplyBudget
 
 GROUP = "GROUP_A"
 USER = "USER_1"
+
+# Each call to _event() represents a distinct gateway message, so default to a
+# fresh unique message_id (the dispatcher dedups repeats by id).
+_msg_seq = itertools.count(1)
 
 
 class FakeRest:
@@ -64,7 +69,7 @@ def _event(
     *,
     group: str = GROUP,
     user: str = USER,
-    mid: str = "MSG_1",
+    mid: str | None = None,
     nickname: str = "Alice",
     message_type: str = "group",
     type_: str = "message",
@@ -74,7 +79,7 @@ def _event(
         "message_type": message_type,
         "group_openid": group,
         "user_openid": user,
-        "message_id": mid,
+        "message_id": mid if mid is not None else f"MSG_{next(_msg_seq)}",
         "content": content,
         "author": {
             "member_openid": user,
@@ -327,3 +332,33 @@ async def test_handler_exceptions_are_swallowed():
     task = await process_event(_event("/dispatchboom y", user="USER_2"))
     await task
     assert task.exception() is None
+
+
+async def test_duplicate_message_id_dispatched_once():
+    seen: list[str] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append(ctx.raw_text)
+
+    _register("dispatchdup", _handler)
+    # The gateway may redeliver the same event; the same message_id must only
+    # run the handler once even across separate process_event calls.
+    await process_event(_event("/dispatchdup x", mid="DUP_1"), spawn_handlers=False)
+    await process_event(_event("/dispatchdup x", mid="DUP_1"), spawn_handlers=False)
+    assert seen == ["/dispatchdup x"]
+    # A different message_id is a distinct message and dispatches normally.
+    await process_event(_event("/dispatchdup y", mid="DUP_2"), spawn_handlers=False)
+    assert seen == ["/dispatchdup x", "/dispatchdup y"]
+
+
+async def test_duplicate_drop_does_not_consume_cooldown():
+    seen: list[str] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append(ctx.raw_text)
+
+    _register("dispatchdupcd", _handler, cooldown=60)
+    await process_event(_event("/dispatchdupcd a", mid="DUP_3"), spawn_handlers=False)
+    # Redelivery of the same id is dropped before cooldown is even consulted.
+    await process_event(_event("/dispatchdupcd a", mid="DUP_3"), spawn_handlers=False)
+    assert seen == ["/dispatchdupcd a"]

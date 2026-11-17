@@ -123,6 +123,20 @@ async def test_active_qpm_limit():
     assert await b.acquire_active("G1") is False
 
 
+async def test_active_bot_wide_qpm_limit():
+    # The bot-wide cap binds even when no single group hits its per-group cap.
+    b = ReplyBudget()
+    orig = budget_mod.ACTIVE_BOT_QPM_MAX
+    budget_mod.ACTIVE_BOT_QPM_MAX = 3
+    try:
+        for i in range(3):
+            assert await b.acquire_active(f"G{i}") is True  # 1 per group, 3 total
+        assert await b.acquire_active("G3") is False  # bot-wide exhausted
+        assert await b.acquire_active("G0") is False  # even a group with spare quota
+    finally:
+        budget_mod.ACTIVE_BOT_QPM_MAX = orig
+
+
 async def test_active_daily_limit_memory():
     b = ReplyBudget()
     monkeypatch_daily = budget_mod.ACTIVE_DAILY_MAX

@@ -13,6 +13,7 @@ import asyncio
 import logging
 import time
 import unicodedata
+from collections import OrderedDict
 
 from . import registry
 from .registry import CommandDef
@@ -23,6 +24,24 @@ logger = logging.getLogger("kouhai-bot.handlers")
 
 # (group_openid, user_openid, command_name) → last accepted monotonic time.
 _cooldowns: dict[tuple[str, str, str], float] = {}
+
+# The official gateway may push the same event more than once. Remember recently
+# seen message ids (globally unique, ``ROBOT1.0_…``) and drop repeats so a duplicate
+# delivery cannot trigger a command twice. Bounded LRU; duplicates arrive close
+# together so a few thousand entries cover the replay window comfortably.
+_seen_message_ids: OrderedDict[str, None] = OrderedDict()
+_SEEN_MESSAGE_IDS_MAX = 8192
+
+
+def _is_duplicate_message(message_id: str) -> bool:
+    if not message_id:
+        return False
+    if message_id in _seen_message_ids:
+        return True
+    _seen_message_ids[message_id] = None
+    while len(_seen_message_ids) > _SEEN_MESSAGE_IDS_MAX:
+        _seen_message_ids.popitem(last=False)
+    return False
 
 
 def _normalize_leading_command_junk(text: str) -> str:
@@ -65,6 +84,10 @@ def reset_cooldowns_for_tests() -> None:
     _cooldowns.clear()
 
 
+def reset_message_dedup_for_tests() -> None:
+    _seen_message_ids.clear()
+
+
 async def process_event(
     event: dict,
     *,
@@ -82,6 +105,10 @@ async def process_event(
     user_openid = str(event.get("user_openid", "") or "")
     message_id = str(event.get("message_id", "") or "")
     if not group_openid or not user_openid:
+        return None
+
+    if _is_duplicate_message(message_id):
+        logger.debug("[group_%s] duplicate message %s dropped", group_openid, message_id)
         return None
 
     content = str(event.get("content", "") or "")

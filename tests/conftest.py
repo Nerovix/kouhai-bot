@@ -42,10 +42,14 @@ def _reset_global_runtime():
     yield
     from kouhai_bot import echo
     from kouhai_bot.db import set_database
-    from kouhai_bot.handlers import reset_cooldowns_for_tests
+    from kouhai_bot.handlers import (
+        reset_cooldowns_for_tests,
+        reset_message_dedup_for_tests,
+    )
     from kouhai_bot.handlers.runtime import set_runtime
 
     set_runtime(None)
     set_database(None)
     echo.reset_echo_for_tests()
     reset_cooldowns_for_tests()
+    reset_message_dedup_for_tests()

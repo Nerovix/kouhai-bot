@@ -144,8 +144,9 @@ Transport: official/ (tokens/rest/gateway/sender/budget/media)
   its own posted cards' ref_idx→pid locally and match inbound `ref_msg_idx` to locate a
   quoted problem card (review quoted-card targeting is feasible this way; still pending
   real-payload 实测). Outbound quotes use `message_reference.message_id` (=REFIDX).
-  **Gateway may push duplicate events** — dedup inbound by message_id (recommended; not
-  yet enforced in dispatch). Member-info/list and group-basic-info REST APIs remain
+  **Gateway may push duplicate events** — dispatch dedups inbound by message_id
+  (global LRU, silent drop before echo/cooldown) so a redelivery cannot run a command
+  twice. Member-info/list and group-basic-info REST APIs remain
   whitelist-only (11253); user-info `/v2/users/{openid}/info` needs friendship (40184001).
   Nickname/avatar come from the event author, not those APIs.
 - **Echo (auto-repeater)**: `echo.py` per-group `GroupEcho` buffers recent messages;
@@ -468,11 +469,21 @@ uv run python -m pytest tests/ -v
 ```
 `tests/conftest.py` provides an async `db` fixture (tmp SQLite), an autouse fixture blocking
 real `aiohttp.ClientSession._request` (no live network), and an autouse fixture resetting global
-runtime/database/echo/cooldowns between tests. Handler tests inject a fake runtime
+runtime/database/echo/cooldowns/message-dedup between tests. Handler tests inject a fake runtime
 (`set_runtime(Runtime(db, OfficialSender(FakeRest(), ReplyBudget(db)), browser=None))`) and
 monkeypatch LLM helpers. The suite covers db repos, official transport, render, dispatch/registry/
 echo, coordinator/commands, sync, feedback, cards, model tags, config, main lifecycle, worker,
 prefetch/preparation, editorial followup/tutorials, scheduler, shared helpers.
+
+### Live field probe (owner-led 实测)
+
+`tools/official_probe.py` gathers ground-truth payloads for features whose live shape is
+documented but unverified (Q10/E3/E4) — implement those only after calibration, never speculate:
+- `capture` — read-only gateway listener; dumps raw group events to `{data_dir}/probe/*.jsonl`
+  and highlights `author.avatar` / `mentions[]` / `msg_elements[]` (type 103 quote) /
+  `message_scene.ext` (ref_msg_idx). Stop the live bot first (same app_id gateway conflict).
+- `length --group <gid> [--kind text|markdown] [--send]` — brackets the 40054007 codepoint
+  limit; dry-run by default, `--send` posts real messages (owner picks the group).
 
 ## GitHub CI
 

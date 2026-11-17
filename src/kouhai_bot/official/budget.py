@@ -1,9 +1,11 @@
 """Reply budget: passive-first, active-fallback.
 
-Passive replies ride an incoming ``msg_id`` (5 replies within 5 minutes).
-When that window/quota is exhausted, fall back to active messages
-(1000/group/day, 20/group/minute). The daily active count is persisted in
-SQLite so it survives restarts; the per-minute throttle is in-memory.
+Passive replies ride an incoming ``msg_id`` (5 replies within 5 minutes) and do
+not consume active quota. When that window/quota is exhausted, fall back to
+active messages (1000/group/day). Active rate limiting is two-layer: a per-group
+20/minute cap plus a bot-wide 60/minute cap (30 if the bot is unverified). The
+daily active count is persisted in SQLite so it survives restarts; both
+per-minute throttles are in-memory (one worker process == one bot app_id).
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ PASSIVE_WINDOW_SEC = 300.0
 PASSIVE_MAX_REPLIES = 5
 ACTIVE_DAILY_MAX = 1000
 ACTIVE_QPM_MAX = 20
+ACTIVE_BOT_QPM_MAX = 60
 
 
 class ReplyBudget:
@@ -27,6 +30,7 @@ class ReplyBudget:
         self._db = db
         self._passive: dict[str, deque[float]] = {}
         self._active_qpm: dict[str, deque[float]] = {}
+        self._bot_qpm: deque[float] = deque()
         self._memory_daily: dict[tuple[str, str], int] = {}
         self._lock = asyncio.Lock()
 
@@ -44,13 +48,17 @@ class ReplyBudget:
         return len(window)
 
     async def acquire_active(self, group_openid: str) -> bool:
-        """Reserve an active-message slot (daily + per-minute quota)."""
+        """Reserve an active-message slot (daily + per-group + bot-wide quota)."""
         async with self._lock:
             now = time.monotonic()
             qpm = self._active_qpm.setdefault(group_openid, deque())
             while qpm and now - qpm[0] > 60.0:
                 qpm.popleft()
             if len(qpm) >= ACTIVE_QPM_MAX:
+                return False
+            while self._bot_qpm and now - self._bot_qpm[0] > 60.0:
+                self._bot_qpm.popleft()
+            if len(self._bot_qpm) >= ACTIVE_BOT_QPM_MAX:
                 return False
             day = beijing_date()
             if self._db is not None:
@@ -65,4 +73,5 @@ class ReplyBudget:
                     return False
                 self._memory_daily[key] = count + 1
             qpm.append(now)
+            self._bot_qpm.append(now)
             return True

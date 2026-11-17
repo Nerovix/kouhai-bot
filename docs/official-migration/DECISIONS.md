@@ -158,11 +158,11 @@
 - **GROUP_JOIN_REQUEST 入群申请事件** + 群成员管理/禁言/入群审批接口（近期新增，多需权限）。
 - **keyboard 按钮**：markdown 底部挂按钮（≤5行×5），action 0跳转/1回调/2指令，permission 0指定/1管理员/2所有人；回调 INTERACTION_CREATE 须 3s 内 `PUT /interactions/{id}` 回应（同 id 仅一次）。FAQ(11/11) 称已开放所有机器人。
 
-### E. 实施待办（核实暴露的改进点，非阻塞）
-- **E1 入站事件去重**：官方提示消息可能重复推送，应按 message_id 去重。当前 dispatch **未做入站去重**——重复事件可能触发重复命令（如双 /submit）。建议加 per-group 近期 message_id LRU 去重。（待实现）
-- **E2 bot 全局 60/qpm**：多群规模上来后 ReplyBudget 需补 bot 维度节流。（当前规模无碍）
-- **E3 引用定位 + avatar 实测**：抓真实 @/引用/头像载荷校准（Q10），再实现 review 引用旧题卡 + 决定是否加载远程头像。
-- **E4 长度上限实测**：发超长文本/markdown 触发 40054007 校准确切码点数。
+### E. 实施待办（核实暴露的改进点）
+- **E1 入站事件去重 [已实现]**：官方提示消息可能重复推送。dispatch 现按 message_id 全局 LRU（8192）去重，重复事件静默丢弃（在 echo/冷却之前），防重复命令（如双 /submit）。`reset_message_dedup_for_tests` + conftest 复位；新增 2 测试。
+- **E2 bot 全局 60/qpm [已实现]**：ReplyBudget 在原 per-group 20/qpm 之上叠加 bot 维度 `ACTIVE_BOT_QPM_MAX=60`（未认证 30 可调常量）全局窗口，扣每日配额前先检查；新增测试。单 worker==单 app_id，内存全局窗口正确。
+- **E3 引用定位 + avatar 实测 [探针就绪，待 owner 实测]**：机制已核实可行（Q10），但真实载荷形状（avatar 是否真下发、ref_idx/ref_msg_idx 实际格式、非文本被引类型是否带 content）需实测校准，**不臆想实现**。已备 `tools/official_probe.py capture`（只读监听网关，dump 原始群事件 JSONL + 高亮 avatar/mentions/msg_elements/message_scene）。owner 停 live bot（或另用测试 app_id）后运行，发真实 @/引用消息抓载荷，再据此实现 review 引用旧题卡定位 + 决定是否加载远程头像。
+- **E4 长度上限实测 [探针就绪，待 owner 实测]**：`tools/official_probe.py length --group <gid> [--kind text|markdown] [--send]` 发递增长度消息定位 40054007 阈值；默认 dry-run，--send 才真发（占主动配额、发真实消息，owner 指定群）。无法自主实测（需 live API）。
 
 ### 核实总结
 设计决定的背景知识**基本完整且正确**：所有「不能做」的替代方案（reaction→emoji 文本、无 poke、无历史拉取、openid 主键、多群惰性、长图卡片）经核实**全部成立**；「能做」的核心链路（markdown @ / 被动主动配额 / 富媒体 / 撤回 / 网关 / intents / 全量群消息）经核实**全部可行**。唯一实质纠正为 **C1 域名统一**（已修代码默认值）；其余为细节补全（双层频控、@all 文本、长度经验值、沙箱废弃、上传细节）与新能力记录。**最大正向发现**：引用旧题卡定位机制比原设想更明确可行（Q10/E3）。无推翻性错误。
@@ -210,3 +210,4 @@
 - annotations 整体删除（2026-11-18，owner 定「不要了，真删」）：移除 annotations 包/annotation_server/annotation_web/test_annotations + DB annotations 表；Q6 关闭。确认个人开发者 bot 默认仅 openid 可得（昵称/角色需白名单，头像不暴露）。
 - Q9 纠正 + 昵称接线（2026-11-18，子 Agent 上网调查 + 官方文档原文核实）：官方 2026-11-16 起群事件 author 已带 username/member_nickname/avatar，「拿不到昵称/头像」结论过时推翻。修复 dispatch 误读 author.nickname（恒空）→ member_nickname/username；normalize_event 解析 nickname + 透传 avatar/mentions/message_scene/msg_elements；新增 2 测试，全量 612 passed。头像实际下发待实测，渲染暂仍用字母色块。Q10 入站 @/引用已有结构化文档字段（mentions[]/msg_elements type103/ref_msg_idx），透传就绪，仍待实测校准引用定位。
 - 官方 API 能力全面核实（2026-11-18，4 路子 Agent 抓现行文档逐条对照 D1–D16/Q1–Q10）：新增「官方 API 能力核实」章节（A 确认不能做 / B 确认能做 / C 纠正过时 / D 新能力 / E 待办）。结论：设计背景知识基本完整正确，所有「不能做」的替代方案与「能做」的核心链路全部核实成立，无推翻性错误。唯一实质纠正 C1 域名统一 api.bot.qq.com（已改 config.py/rest.py 默认值 + example/AGENTS.md）；细节补全 C2 双层频控(bot 60/qpm+群 20/qpm)、C3 @all 支持纯文本、C4 长度上限为经验值、C5 沙箱废弃、C6 无 GROUP_MEMBER_UPDATE、C7 富媒体上传细节。最大正向发现：引用旧题卡定位机制可行（msg_elements[].content 带被引正文 + 出站 ext_info.ref_idx 可建本地映射，Q10/E3）。待办 E1 入站事件去重（官方提示可能重复推送，dispatch 尚未去重）/E2 bot 全局节流/E3 引用+avatar 实测/E4 长度实测。
+- E1/E2 落地 + E3/E4 探针（2026-11-18，owner「都去做」）：E1 dispatch 按 message_id 全局 LRU(8192) 入站去重（echo/冷却前静默丢弃重复事件），conftest 复位 + 2 新测试，test_eventlog _event 默认 mid 改自动唯一（真实事件 id 唯一）；E2 ReplyBudget 叠加 bot 全局 ACTIVE_BOT_QPM_MAX=60 窗口（扣每日配额前检查）+ 1 新测试。E3/E4 需 live 实测校准真实载荷，不臆想实现：备 tools/official_probe.py（capture 只读 dump 原始群事件高亮 avatar/mentions/msg_elements/message_scene；length 默认 dry-run、--send 才真发定位 40054007）。引用定位/远程头像加载待 owner 抓真实 @/引用载荷后再实现。全量 615 passed。

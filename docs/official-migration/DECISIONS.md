@@ -103,11 +103,11 @@
 - Q3 — ReplyBudget 主动配额持久化粒度（每群每日计数跨重启）与 20/qpm 节流实现。[P1 已实现：DB 每日计数 + 内存 qpm]
 - Q4 — picker 收敛为纯 fetch 后，选题排除集（used ∪ solved ∪ current）的 DB 查询口径。[P1 已实现 get_excluded_pids]
 - Q5 — 多群 scheduler_config 迁移（原 JSON 每群 enabled_jobs/rating override → groups 表）。[P1 groups 表已含 enabled_jobs/job_schedules/min_rating/max_rating]
-- Q6 — annotations 导出/UI 改 openid + DB 的范围（本期是否含标注工具迁移）。
-- Q7 — /range 指令的权限（任何群友可设）是否需要防滥用冷却。
-- Q8 — 群名/群头像获取（官方无群信息 API 白名单）：显示用群名从哪来（事件无群名，可能需 owner 配置或省略）。
-- Q9 — 用户昵称来源：官方群事件 author 只有 member_openid，无 nickname；无 get_group_member_list 等价 API。scoreboard 显示昵称从何而来？（候选：事件无→用 openid 短码兜底 / owner 配置 / 用户自定义昵称指令）。原设计 display-time 刷新群昵称无法直接移植。
-- Q10 — 官方**入站** @提及 / 引用回复 的 content 格式未实测确认。review 的「引用旧题卡定位」依赖引用消息携带 pid，官方引用格式未知 → 本期 review 仅定位最近 solved 题，引用定位延后。@提及解析按尽力而为 `<@!openid>` 正则（review 携带他人上下文）；待实测后校准。
+- Q6 — [owner 已知悉，建议本期搁置] annotations 是**离线人工标注工具**（非用户功能）：首杀导出 bundle（题面+每轮 submit 判定+judge 所见历史+human_label）到 annotations/pending/，配本地 HTML UI（tools/annotation_server.py）人工标「AI 判得对不对」攒评测集。现仍是旧 JSON 版，未接新 DB（新 submit 已移除自动导出 hook，仅 sync_annotation_bundles backfill 入口）。owner 记不起此功能；建议核心跑通后再单独迁 DB/openid，本期不动。测试已钉住边界（test_db_solves_are_not_visible_to_json_exporter_yet）。
+- Q7 — [已解决·owner 批准] /range 任何群友可设，维持现状（10s 冷却）。不加额外权限。
+- Q8 — [已解决·撤销] 不需要群名。group_openid 已唯一确定群；渲染/积分榜只用 bot 署名+用户昵称，无任何处依赖群名。（官方另有「获取群基本信息」API，若未来要显示群名可再接，本期不需要。）
+- Q9 — [已解决] 头像：官方 API **不暴露**用户头像 URL（「获取群成员信息」GET /v2/groups/{gid}/members/{member_openid} 返回 member_openid/username/member_role/bot/joined_at/union_openid，无 avatar 字段）→ 渲染用昵称首字母色块假头像（render/html.py 已实现）。昵称：该接口 `username` 即昵称，但属**白名单/内邀能力**（未开通返回 11253，需联系平台运营申请），默认拿不到。owner 定：忽略真昵称，保持 openid[:8] 短码兜底，不做 /nick；未来若申请到白名单可再接 username。
+- Q10 — [延后·需实测] 官方**入站** @提及 / 引用回复 的 content 格式未实测确认。review 的「引用旧题卡定位」依赖引用消息携带 pid，官方引用格式未知 → 本期 review 仅定位最近 solved 题，引用定位延后。@提及解析按尽力而为 `<@!openid>` 正则（review 携带他人上下文）。owner 指示：先把别的 issue 弄好，再发真实 @/引用消息实测校准。PR 暂不合并，测到大体能用再合。
 
 ## 实施进度
 
@@ -148,3 +148,4 @@
 - P3 完成：13 指令 + Ctx/runtime + GroupCoordinator DB 化 + 反馈重设计 + dispatch/echo/scheduler 多群 + main/worker 官方生命周期；D8–D16 落地。
 - P4 完成：/sync 跨群拉取（群=视图物化，精确去重，含通过加分）。
 - P5 完成：删除 NapCat/私聊/打星/宵禁/jev 模块；README/AGENTS.md/config.example 改写；测试 overhaul 全量 618 passed；记录 prefetch JSON-slot/annotations Q6 边界/cards legacy-tag 三项实施发现。
+- owner 讨论（2026-11-18）：Q7 批准维持现状；Q8 撤销（group_openid 即唯一身份，不需群名）；Q9 定（官方无头像 URL，昵称仅白名单 username 可得→忽略，openid[:8] 兜底+字母色块头像）；Q6 知悉建议搁置（离线标注工具，核心跑通后再迁）；Q10 延后实测。PR 暂不合并，测到大体能用再合。

@@ -757,8 +757,8 @@ BAD_REPORTS_FORMAT_VERSION = 1
 def atomic_write_json(path: Path | str, payload: dict) -> None:
     """Atomically replace `path` with `payload`.
 
-    Same discipline as save_private_state in private_judge.py: same-directory
-    tempfile, fsync, os.replace, then fsync the parent directory.
+    Same-directory tempfile, fsync, os.replace, then fsync the parent directory.
+    Used by the JSON-based offline tools and the next-problem READY slot mirror.
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)

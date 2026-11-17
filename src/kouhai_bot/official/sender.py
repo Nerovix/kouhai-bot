@@ -8,11 +8,13 @@ markdown (``<qqbot-at-user id="member_openid"/>``).
 
 from __future__ import annotations
 
+import base64
 import logging
 import random
 from typing import Any
 
 from .budget import ReplyBudget
+from .media import MediaCache, content_key
 from .rest import OfficialApiError, OfficialRestClient
 
 logger = logging.getLogger("kouhai-bot.official.sender")
@@ -67,10 +69,12 @@ class OfficialSender:
         budget: ReplyBudget,
         *,
         bot_name: str = "",
+        media_cache: MediaCache | None = None,
     ) -> None:
         self._rest = rest
         self._budget = budget
         self.bot_name = bot_name
+        self._media_cache = media_cache if media_cache is not None else MediaCache()
 
     async def _send(
         self,
@@ -162,6 +166,53 @@ class OfficialSender:
         except OfficialApiError as e:
             logger.error("media upload failed for group %s: %s", group_openid, e)
             return None
+        return await self._send_uploaded_media(
+            group_openid, up, msg_id=msg_id, content=content
+        )
+
+    async def send_group_image_bytes(
+        self,
+        group_openid: str,
+        image_bytes: bytes,
+        *,
+        msg_id: str | None = None,
+        content: str = "",
+        file_type: int = 1,
+    ) -> str | None:
+        """Upload locally rendered PNG bytes (base64), reusing cached file_info."""
+        key = content_key(image_bytes)
+        cached = self._media_cache.get(key)
+        if cached:
+            return await self.send_group_media(
+                group_openid, cached, msg_id=msg_id, content=content
+            )
+        try:
+            up = await self._rest.upload_group_media(
+                group_openid,
+                {
+                    "file_type": file_type,
+                    "file_data": base64.b64encode(image_bytes).decode("ascii"),
+                    "srv_send_msg": False,
+                },
+            )
+        except OfficialApiError as e:
+            logger.error("base64 media upload failed for group %s: %s", group_openid, e)
+            return None
+        file_info = str(up.get("file_info", "") or "")
+        if file_info:
+            self._media_cache.put(key, file_info, float(up.get("ttl", 300) or 300))
+        return await self._send_uploaded_media(
+            group_openid, up, msg_id=msg_id, content=content
+        )
+
+    async def _send_uploaded_media(
+        self,
+        group_openid: str,
+        up: dict[str, Any],
+        *,
+        msg_id: str | None,
+        content: str,
+    ) -> str | None:
         file_info = str(up.get("file_info", "") or "")
         if not file_info:
             logger.error("media upload returned no file_info: %s", up)

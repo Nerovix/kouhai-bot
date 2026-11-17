@@ -54,7 +54,7 @@
 ## 开放问题 / 待 owner 确认（实施中收集，最后统一讨论）
 
 - Q1 — [已解决] markdown 用原生 `msg_type=2, markdown.content`（template_id/custom_template_id 已废弃）；@ 用 `<qqbot-at-user id="member_openid"/>`、@all 用 `<qqbot-at-everyone/>`。一次请求只能携带一种内容（0/2/7 互斥）；传 markdown 时 content/ark 必须为空。出站长度上限：文本约 2000 码点 / markdown 约 3000 码点（超长→长图，P2）。被动 msg_id 5min 有效，msg_id+msg_seq 重复发送会失败。
-- Q2 — 长图分片上传的 file_info ttl 与复用策略（题卡重发是否复用已上传 media）。
+- Q2 — [已解决] 长图用 `file_data`（base64）直传 `/v2/groups/{gid}/files`（`srv_send_msg:false` 仅返回 file_info）；MediaCache 按内容 sha256 缓存 file_info，ttl 到期前 30s 失效，跨群复用（群上传文件仅发群）。大文件可走分片上传，当前题卡 PNG ~100KB 直传足够。
 - Q3 — ReplyBudget 主动配额持久化粒度（每群每日计数跨重启）与 20/qpm 节流实现。[P1 已实现：DB 每日计数 + 内存 qpm]
 - Q4 — picker 收敛为纯 fetch 后，选题排除集（used ∪ solved ∪ current）的 DB 查询口径。[P1 已实现 get_excluded_pids]
 - Q5 — 多群 scheduler_config 迁移（原 JSON 每群 enabled_jobs/rating override → groups 表）。[P1 groups 表已含 enabled_jobs/job_schedules/min_rating/max_rating]
@@ -70,8 +70,17 @@
   - `official/`：tokens（到期前刷新）、rest（gateway/send/media/recall）、events（归一化）、budget（被动优先/主动降级）、sender（text/markdown/@/media/react）、gateway（identify/heartbeat/resume/reconnect）。20 测试。
   - `config.py`：新增 official 字段（app_id/app_secret/api_base/sandbox/bot_name/intents）+ validate_official()；旧字段暂留（strangler）。
   - 全量套件 650 passed。
+- P2 长图渲染器 [完成]：
+  - `render/browser.py`：Playwright Chromium 单例（headless，一次启动复用），`screenshot_html` 全页 PNG（width=720, device_scale_factor=2，load + 150ms 稳定）。
+  - `render/html.py`：高保真手机 QQ 转发卡样式（灰底 #ededed、白气泡圆角、头像首字母色块、昵称灰字、等宽样例块）；`text_to_html`/`pre_block`/escape。
+  - `render/forward_card.py`：`nodes_to_text`（先 br→\n 再剥标签再 unescape，纯文本降级）；`render_card_png`；`send_forward_card`（渲染→base64 上传→发图，失败降级文本）。
+  - `official/media.py`：MediaCache（内容 sha256 → file_info，ttl-30s 过期）。
+  - `official/sender.py`：新增 `send_group_image_bytes`（base64 上传 + 缓存复用）/`send_group_image_url`。
+  - 11 测试（含真实 Chromium 集成）；样例题卡 PNG 目视验证通过。
+  - 卡片**内容**构建器（题卡/help/scoreboard/review/editorial/history）随 P3 handler 迁移一并接入渲染器。
 - 生命周期（main/worker）重写与 handler 迁移强耦合（身份模型 int→openid 渗透所有 handler 签名 + coordinator + dispatch），归入 P3 起点统一做，避免半成品 worker。P1 先交付可测地基。
 
 ## 变更日志
 - P1 启动：建立决策日志；确定 D1–D7 架构。
 - P1 完成：DB + official 传输 + config 地基；Q1 解决；新增 Q9（昵称来源）；生命周期归入 P3。
+- P2 完成：长图渲染器（Playwright 高保真 QQ 转发卡）+ MediaCache + base64 发图；Q2 解决；样例题卡目视验证。

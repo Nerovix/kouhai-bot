@@ -442,9 +442,12 @@ markdown `<qqbot-at-everyone/>` + lines via `sender.send_group_markdown`. @all n
    text (since 2026-10-26); needs admin, 1/group/day.
 5. **Contest notifications need @all** + 2s delay.
 6. **One content type per request**: msg_type 0/2/7 mutually exclusive (8=图文卡片 also exists);
-   markdown content/ark must be empty when sending markdown. Length limit ~2000 text / ~3000
-   markdown codepoints is empirical (official docs only give error 40054007, no exact number) —
-   longer → long image; verify by 实测.
+   markdown content/ark must be empty when sending markdown. The ~2000 text / ~3000 markdown
+   codepoint figures are third-party empirical values, **not a hard error threshold**: E4 实测
+   (2026-11-18) returned OK with no 40054007 up to 60000 text / 8000 markdown codepoints. Whether
+   the server silently truncates is unverified (no read-back API; bot outbound isn't echoed to the
+   gateway). Long-image cards sidestep truncation entirely and remain the primary path; keep text
+   fallbacks conservative but do not chunk aggressively for an unproven hard limit.
 7. **Passive reply window**: msg_id valid 5min/5 replies; same msg_id+msg_seq dup fails; passive
    does NOT consume active quota. Active rate limit is two-layer (per-group 20/qpm + bot-wide
    60/qpm, 30 unverified). ReplyBudget handles passive→active degradation.
@@ -493,16 +496,18 @@ prefetch/preparation, editorial followup/tutorials, scheduler, shared helpers.
 
 `tools/official_probe.py` gathers ground-truth payloads for features whose live shape is
 documented but unverified — implement those only after calibration, never speculate.
-E3 (avatar/mentions/quote/outbound ref_idx) is now 实测-calibrated and implemented; E4
-length bracketing still awaits an owner-chosen group:
+E3 (avatar/mentions/quote/outbound ref_idx) and E4 (length) are now 实测-calibrated. E4 found
+no 40054007 within tested ranges; silent truncation remains an open question (see DECISIONS.md):
 - `capture` — read-only gateway listener; dumps raw group events to `{data_dir}/probe/*.jsonl`
   and highlights `author.avatar` / `mentions[]` / `msg_elements[]` (type 103 quote) /
   `message_scene.ext` (ref_msg_idx). Stop the live bot first (same app_id gateway conflict).
 - `send --group <gid> [--kind text|markdown] [--text …] [--recall]` — posts one real message,
   prints the FULL send response (incl. `ext_info.ref_idx`), optionally recalls it (≤2min).
   Used to verify the outbound ref_idx shape and recall behavior.
-- `length --group <gid> [--kind text|markdown] [--send]` — brackets the 40054007 codepoint
-  limit; dry-run by default, `--send` posts real messages (owner picks the group).
+- `length --group <gid> [--kind text|markdown] [--send] [--recall]` — sends an increasing-length
+  ladder to bracket 40054007; dry-run by default, `--send` posts real messages, `--recall` recalls
+  each OK message (keep the group clean). 实测: no 40054007 up to 60000 text / 8000 markdown — a
+  clean ladder does NOT prove untruncated delivery (no read-back path); eyeball a long message's tail.
 
 ## GitHub CI
 

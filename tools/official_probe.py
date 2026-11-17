@@ -11,11 +11,18 @@ those features can be implemented against real shapes instead of speculation:
            message_scene.ext (msg_idx / ref_msg_idx). READ-ONLY: it sends nothing
            except the gateway identify/heartbeat needed to connect.
 
-  length   Bracket the outbound text/markdown codepoint limit (official docs only
-           give error 40054007, no number). Sends a ladder of increasing-length
-           messages to ONE explicit group and reports where 40054007 starts.
-           DRY-RUN by default; pass --send to actually send (consumes active
-           quota and posts real messages — owner decides the target group).
+  length   Bracket the outbound text/markdown codepoint limit. Sends a ladder of
+           increasing-length messages to ONE explicit group and reports where
+           40054007 starts. DRY-RUN by default; pass --send to actually send
+           (consumes active quota and posts real messages — owner decides the
+           target group). --recall recalls each OK message so the group stays clean.
+           NOTE (2026-11-18 实测): the unified API returned OK with NO 40054007 up to
+           60000 text / 8000 markdown codepoints — the error code may never fire, so a
+           clean ladder does NOT prove the content was delivered untruncated. Server-side
+           silent truncation cannot be ruled out (no message read-back API; the bot's own
+           outbound messages are not echoed to the gateway). Verify truncation by eyeballing
+           a delivered long message's tail, or accept the uncertainty. Long-image cards
+           sidestep the question entirely.
 
 Usage:
   KOUHAI_CONFIG=/path/to/config.yaml uv run python tools/official_probe.py capture
@@ -146,7 +153,11 @@ async def _length(args) -> None:
             try:
                 resp = await rest.send_group_message(args.group, payload)
                 ref = (resp.get("ext_info") or {}).get("ref_idx")
-                print(f"len={n}: OK id={resp.get('id', '')[:12]} ref_idx={ref}")
+                mid = str(resp.get("id", "") or "")
+                print(f"len={n}: OK id={mid[:12]} ref_idx={ref}")
+                if args.recall and mid:
+                    ok = await rest.recall_group_message(args.group, mid)
+                    print(f"  recalled: {'ok' if ok else 'FAILED'}")
             except OfficialApiError as e:
                 code = (e.body or {}).get("code") if isinstance(e.body, dict) else None
                 print(f"len={n}: ERROR HTTP {e.status} code={code} body={e.body}")
@@ -210,6 +221,7 @@ def main() -> None:
     ln.add_argument("--max", type=int, default=None)
     ln.add_argument("--step", type=int, default=None)
     ln.add_argument("--delay", type=float, default=1.0, help="seconds between sends")
+    ln.add_argument("--recall", action="store_true", help="recall each OK message after recording (keep group clean)")
 
     sd = sub.add_parser("send", help="send one test message, dump full response (ref_idx)")
     sd.add_argument("--group", default="", help="target group_openid (required)")

@@ -7,9 +7,12 @@ API has no merged-forward primitive; the long image is the replica).
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
+from functools import lru_cache
 from html import unescape
+from pathlib import Path
 from typing import Any
 
 from ..official.sender import OfficialSender
@@ -42,26 +45,64 @@ async def render_card_png(
     footer: str = "",
     width: int = 720,
     browser: RenderBrowser | None = None,
+    bot_name: str = "",
+    bot_avatar_url: str = "",
 ) -> bytes:
     html = build_forward_card_html(
-        await _resolve_avatars(nodes), title=title, footer=footer
+        await _resolve_avatars(
+            nodes, bot_name=bot_name, bot_avatar_url=bot_avatar_url
+        ),
+        title=title,
+        footer=footer,
     )
     browser = browser or get_render_browser()
     return await browser.screenshot_html(html, width=width)
 
 
-async def _resolve_avatars(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+@lru_cache(maxsize=1)
+def _default_bot_avatar_data_uri() -> str | None:
+    """Bundled KouhaiBot avatar as a data URI (loaded once). The official API
+    exposes no bot avatar (READY has no avatar field; the bot id only yields
+    the default QQ penguin), so the bot's real face ships as a package asset.
+    Owners may override via official.bot_avatar_url. Missing asset → None."""
+    path = Path(__file__).resolve().parent / "assets" / "bot_avatar.jpg"
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if not data:
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
+
+
+async def _resolve_avatars(
+    nodes: list[dict[str, Any]],
+    *,
+    bot_name: str = "",
+    bot_avatar_url: str = "",
+) -> list[dict[str, Any]]:
     """Pre-fetch each node's avatar_url into an embedded data URI (best-effort;
     failures leave the letter-circle fallback). Fetches run concurrently so one
-    slow avatar host does not head-of-line-block the whole card."""
+    slow avatar host does not head-of-line-block the whole card. Bot-authored
+    nodes (nickname == bot_name) resolve own avatar → configured bot_avatar_url
+    → bundled default avatar, so every card shows the bot's real identity."""
     cache = get_avatar_cache()
 
     async def resolve(node: dict[str, Any]) -> dict[str, Any]:
+        if node.get("avatar_data"):
+            return node
         url = str(node.get("avatar_url", "") or "")
-        if url and not node.get("avatar_data"):
+        is_bot = bool(bot_name) and str(node.get("nickname", "")) == bot_name
+        if not url and is_bot:
+            url = bot_avatar_url
+        if url:
             data = await cache.data_uri(url)
             if data:
                 return {**node, "avatar_data": data}
+        if is_bot:
+            default = _default_bot_avatar_data_uri()
+            if default:
+                return {**node, "avatar_data": default}
         return node
 
     return list(await asyncio.gather(*(resolve(node) for node in nodes)))
@@ -87,7 +128,8 @@ async def send_forward_card(
     png = None
     try:
         png = await render_card_png(
-            nodes, title=title, footer=footer, browser=browser
+            nodes, title=title, footer=footer, browser=browser,
+            bot_name=sender.bot_name, bot_avatar_url=sender.bot_avatar_url,
         )
     except Exception as e:
         logger.warning("card render failed; using text fallback: %s", e)

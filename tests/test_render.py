@@ -71,6 +71,64 @@ async def test_resolve_avatars_embeds_data_uri(monkeypatch):
     assert "avatar_data" not in nodes[0]     # caller dicts not mutated
 
 
+async def test_resolve_avatars_injects_bot_avatar(monkeypatch):
+    from kouhai_bot.render import forward_card as fc
+
+    class FakeCache:
+        async def data_uri(self, url):
+            return "data:image/png;base64,Zm9v" if url.startswith("https://ok/") else None
+
+    monkeypatch.setattr(fc, "get_avatar_cache", lambda: FakeCache())
+    monkeypatch.setattr(fc, "_default_bot_avatar_data_uri", lambda: "data:image/jpeg;base64,DEFAULT")
+    nodes = [
+        {"nickname": "KouhaiBot", "content_html": "x"},                       # bot, no url → configured url
+        {"nickname": "Alice", "content_html": "y"},                          # human, no url → circle
+        {"nickname": "KouhaiBot", "content_html": "z", "avatar_url": "https://ok/own.png"},  # own wins
+    ]
+    resolved = await fc._resolve_avatars(
+        nodes, bot_name="KouhaiBot", bot_avatar_url="https://ok/bot.png"
+    )
+    assert resolved[0]["avatar_data"] == "data:image/png;base64,Zm9v"  # configured url beats default
+    assert "avatar_data" not in resolved[1]
+    assert resolved[2]["avatar_data"] == "data:image/png;base64,Zm9v"
+    assert "avatar_data" not in nodes[0]
+
+
+async def test_resolve_avatars_bot_uses_bundled_default(monkeypatch):
+    from kouhai_bot.render import forward_card as fc
+
+    class FakeCache:
+        async def data_uri(self, url):
+            return None
+
+    monkeypatch.setattr(fc, "get_avatar_cache", lambda: FakeCache())
+    monkeypatch.setattr(fc, "_default_bot_avatar_data_uri", lambda: "data:image/jpeg;base64,DEFAULT")
+    nodes = [{"nickname": "KouhaiBot", "content_html": "x"}]
+    resolved = await fc._resolve_avatars(nodes, bot_name="KouhaiBot", bot_avatar_url="")
+    assert resolved[0]["avatar_data"] == "data:image/jpeg;base64,DEFAULT"
+
+
+async def test_resolve_avatars_bot_letter_circle_when_no_asset(monkeypatch):
+    from kouhai_bot.render import forward_card as fc
+
+    class FakeCache:
+        async def data_uri(self, url):
+            return None
+
+    monkeypatch.setattr(fc, "get_avatar_cache", lambda: FakeCache())
+    monkeypatch.setattr(fc, "_default_bot_avatar_data_uri", lambda: None)
+    nodes = [{"nickname": "KouhaiBot", "content_html": "x"}]
+    resolved = await fc._resolve_avatars(nodes, bot_name="KouhaiBot", bot_avatar_url="")
+    assert "avatar_data" not in resolved[0]  # no asset → letter circle
+
+
+def test_default_bot_avatar_asset_loads():
+    from kouhai_bot.render import forward_card as fc
+
+    uri = fc._default_bot_avatar_data_uri()
+    assert uri is not None and uri.startswith("data:image/jpeg;base64,")
+
+
 def test_build_card_html_escapes_nickname():
     html = build_forward_card_html(
         [{"nickname": "<script>", "content_html": "x"}]

@@ -66,11 +66,15 @@ class OfficialSender:
         budget: ReplyBudget,
         *,
         bot_name: str = "",
+        bot_avatar_url: str = "",
         media_cache: MediaCache | None = None,
     ) -> None:
         self._rest = rest
         self._budget = budget
         self.bot_name = bot_name
+        self.bot_avatar_url = bot_avatar_url
+        # Bot's own id from gateway READY (official username is authoritative).
+        self.bot_id = ""
         self._media_cache = media_cache if media_cache is not None else MediaCache()
         # message_id → outbound ext_info.ref_idx (for quoted-card targeting).
         self._ref_by_id: OrderedDict[str, str] = OrderedDict()

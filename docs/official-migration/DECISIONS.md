@@ -258,6 +258,22 @@
 - B#6 feedback 缓存读在锁外：可容忍（cache 语义，损坏读空）。
 - 低危备忘：scheduler 分钟跳变/双触发；`_passive`/`_cooldowns`/media 内存表无界；gateway 干净关闭后 1s backoff 重置；日志无午夜轮转；problem prefetch 无失败 backoff；posts 重发不重置 solved_at；`prefetch_slot` 表死代码（slot 仍 JSON）；链式 /sync 来源 provenance 丢失；/newproblem 非法用法仍发 👀；仅用法提示也消耗冷却。
 
+## 渲染 UX 校准 + bot 身份（2026-11-18，owner 真机对比反馈）
+
+owner 对比真机手机转发卡与我们的 /help 长图，指出三处缺陷，逐一修复并目视验证：
+
+- **底部大片空白**：根因是固定 viewport height=800，`full_page` 截图至少 800×dsf 高，短内容也撑出空白。修复：`set_content` 后量 `document.body.scrollHeight`，把 viewport 高度设为内容实际高度再 `full_page` 截图（`render/browser.py`）。
+- **字体太小/一行字太多**：`_CSS` 整体放大——气泡正文 28px/line-height 1.5、`max-width: min(520px,100%)`（约 17–19 个汉字/行）、昵称 20px、头像 52px、pre 24px、header 28px、页脚 20px、消息间距 28px（`render/html.py`）。
+- **bot 头像+名称未渲染**：见下「bot 身份实证」。
+
+### bot 身份实证（纠正「官方完全拿不到 bot 头像/名称」的笼统结论）
+- **名称**：网关 READY 的 `d.user.username` 是权威 bot 名（实测 "KouhaiBot"），但 **READY user 无 avatar 字段**。worker `_on_ready` 用 username 覆盖 `sender.bot_name`（空 username 不覆盖配置兜底名），并记录 `sender.bot_id`；gateway 加 `on_ready` 回调。
+- **头像**：官方 API 不暴露 bot 头像。`thirdqq.qlogo.cn/g?b=qq&nk=<bot_id>&s=640` 返回的是**默认 QQ 企鹅占位图**（971 字节 PNG），不是控制台设置的头像。人类头像则走每事件下发的签名 `thirdqq.qlogo.cn/bqqthird?key=...` URL（可下载，已接）。
+- **解决方案**：把 owner 提供的 bot 头像（动漫插画）作为**内置资产** `src/kouhai_bot/render/assets/bot_avatar.jpg`（85852 字节 JPEG，hatchling wheel 自动打包包内二进制资产），不依赖会过期的签名 URL。渲染优先级：节点自带 avatar → 配置 `official.bot_avatar_url`（可选远程）→ 内置默认资产 → 字母色块兜底。`_resolve_avatars` 按 `nickname==bot_name` 判定 bot 节点注入。
+- config 新增 `official.bot_avatar_url`（默认空，example 注明官方不暴露 bot 头像、nk=bot_id 得企鹅）；sender 加 `bot_avatar_url`/`bot_id`。
+- 新增/改测试：test_worker `_on_ready` 采用权威 username；test_render 内置资产加载/配置 url 优先/无资产字母兜底；test_config bot_avatar_url 解析+默认。全量 **634 passed**。
+- 真机验证：worker 带新代码重启 READY，owner 实验群 /help（22:23）渲染+发送成功，无 render/send 警告，长图与验证图一致。
+
 ## 变更日志
 - P1 启动：建立决策日志；确定 D1–D7 架构。
 - P1 完成：DB + official 传输 + config 地基；Q1 解决；新增 Q9（昵称来源）；生命周期归入 P3。
@@ -276,3 +292,4 @@
 - Worker 启动冒烟（2026-11-18，自主，bounded 12s 自停）：停 capture 探针释放网关会话后，用 fresh data_dir + 占位 LLM 配置前台跑 `python -m kouhai_bot.worker`。日志确认 `Official worker running` → `Scheduler started` → token 刷新 → `gateway identifying (intents=117440512)` → `gateway READY (session=…)`，**无 traceback**；exit 0，无残留进程。证明新 worker 完整装配（config 校验/DB/set_runtime/网关/调度）可真机启动并连上官方网关。fresh data_dir 无群发现→无 prefetch/LLM/群消息（contest_check 仅 12:01），冒烟零外部副作用。**仍待 owner**：在实验群发指令做端到端 UX 验证（bot 自身出站不触发 dispatch，需 user 发消息），及确认「大体能用」后合并 PR #119。
 - E4 截断验证关闭开放问题（2026-11-18，owner 引用法）：先实测确认 bot 出站零回推（E4 期间 80+ 条出站，capture 仍仅 9 条 user 事件）→ 无法直接读回自身消息。改用引用法：bot 发 5000 码点长消息（每 1000 字嵌【N000】、结尾【5000】，不撤回），owner 长按引用；capture 抓引用事件 `msg_elements[0].content`=**完整 5000 码点**、【1000】…【5000】齐全 → **服务端无静默截断**（至少到 5000）。开放问题关闭。附带坐实引用 bot 消息时客户端自动 @bot（mentions=1）。测试消息发后即撤回，群保持干净；探针/监听已停，网关会话释放。C4/Q1/E4 + AGENTS.md pitfall#6/探针节同步更新为「已验证无截断」。
 - 代码自审修复（2026-11-18，owner「先自己 review 一波再端到端验证」）：三路子 Agent 分审并发/传输/数据格式/安全，逐条核实修确证 bug——DB 单连接事务串行化（连接级锁，关键）、首杀计分 sleep 出锁、clarify/clear/review admission 快照入锁、/sync 只拉已回复记录、message_refs 复合主键、editorial 译文绑源指纹、/newproblem 冷却回退 posted_at、dispatch/echo 剥前导 `<@bot>`（无 !）、review mention 保真、/clear 误 ack 改用法提示、REST 网络异常统一降级、send_forward_card 永不 raise、头像负缓存+并行、Playwright driver 泄漏、picker stderr 全量分类、worker 停机取消 editorial 任务+启动恢复已知群、pidfile 身份核验防误杀、停机等待 10→40s、删死常量 TEXT/MARKDOWN_MAX_CHARS。新增「代码自审修复」章节 + 延后讨论清单。全量 **629 passed**（+4 新测试）。PR #119 仍未合并（待端到端验证 + owner 确认）。
+- 渲染 UX 校准 + bot 身份（2026-11-18，owner 真机对比）：修长图底部空白（viewport 量 `body.scrollHeight` 适配内容）、放大字体收窄气泡（28px/`min(520px,100%)`）、渲染 bot 头像+名称。实证 READY `username` 权威但无 avatar 字段、`nk=bot_id` 得默认企鹅→bot 头像内置资产 `render/assets/bot_avatar.jpg`（优先级 自带→config url→内置→字母兜底）；gateway `on_ready` + worker 采用 username + sender `bot_id`/`bot_avatar_url` + config `official.bot_avatar_url`。新增/改测试，全量 **634 passed**。真机 /help 渲染+发送验证通过。PR #119 仍未合并。

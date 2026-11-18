@@ -28,6 +28,7 @@ def _fake_cfg(data_dir: str, *, validate_error: Exception | None = None):
         official_token_base="https://token.example.test",
         official_api_base="https://api.example.test",
         official_bot_name="助手",
+        official_bot_avatar_url="",
         official_intents=(1 << 25) | (1 << 26),
         data_dir=data_dir,
         validate_official=_validate,
@@ -81,10 +82,11 @@ def env(monkeypatch, tmp_path):
         calls.append(f"editorial_stop:{group_openid}")
 
     class _FakeGateway:
-        def __init__(self, rest, tokens, *, on_event, intents, shard=(0, 1)):
+        def __init__(self, rest, tokens, *, on_event, on_ready=None, intents, shard=(0, 1)):
             self.rest = rest
             self.tokens = tokens
             self.on_event = on_event
+            self.on_ready = on_ready
             self.intents = intents
             gateways.append(self)
 
@@ -311,3 +313,19 @@ async def test_main_async_sets_up_logging_and_runs_runtime(env):
     assert "setup_logging" in env.calls
     constructor.assert_called_once_with()
     fake_runtime.run.assert_awaited_once()
+
+
+async def test_on_ready_adopts_authoritative_bot_username(env):
+    runtime = worker.WorkerRuntime()
+    # Gateway is wired to the runtime's READY hook.
+    assert env.gateways[0].on_ready == runtime._on_ready
+
+    await runtime._on_ready({"id": "755457195663515057", "username": "KouhaiBot", "bot": True})
+    assert env.sender.bot_name == "KouhaiBot"
+    assert env.sender.bot_id == "755457195663515057"
+
+    # An empty username must not clobber the configured fallback name.
+    env.sender.bot_name = "助手"
+    await runtime._on_ready({"id": "999", "username": ""})
+    assert env.sender.bot_name == "助手"
+    assert env.sender.bot_id == "999"

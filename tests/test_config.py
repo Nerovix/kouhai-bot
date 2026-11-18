@@ -269,10 +269,12 @@ def test_official_section_loaded(monkeypatch, tmp_path):
     monkeypatch.delenv("KOUHAI_APP_SECRET", raising=False)
     cfg = _from_yaml(_make_yaml(official={
         "app_id": "1900000000", "app_secret": "secret", "bot_name": "助手",
+        "bot_avatar_url": "https://cdn.example.test/bot.png",
     }), monkeypatch, tmp_path)
     assert cfg.app_id == "1900000000"
     assert cfg.app_secret == "secret"
     assert cfg.official_bot_name == "助手"
+    assert cfg.official_bot_avatar_url == "https://cdn.example.test/bot.png"
     assert cfg.official_api_base == "https://api.bot.qq.com"
     cfg.validate_official()  # no raise
 
@@ -308,6 +310,7 @@ def test_official_defaults(monkeypatch, tmp_path):
     assert cfg.official_token_base == "https://api.bot.qq.com"
     assert cfg.official_sandbox is False
     assert cfg.official_bot_name == ""
+    assert cfg.official_bot_avatar_url == ""
     assert cfg.official_intents == (1 << 25) | (1 << 26) | (1 << 24)
 
 

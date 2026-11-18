@@ -138,6 +138,7 @@ class BotConfig:
     official_token_base: str = "https://api.bot.qq.com"
     official_sandbox: bool = False
     official_bot_name: str = ""
+    official_bot_avatar_url: str = ""
     official_intents: int = (1 << 25) | (1 << 26) | (1 << 24)
 
     # --- Group ---
@@ -273,6 +274,9 @@ class BotConfig:
             official.get("token_base", c.official_token_base) or c.official_token_base
         ).rstrip("/")
         c.official_bot_name = str(official.get("bot_name", c.official_bot_name))
+        c.official_bot_avatar_url = str(
+            official.get("bot_avatar_url", c.official_bot_avatar_url)
+        ).strip()
         if official.get("intents") is not None:
             c.official_intents = int(official["intents"])
 

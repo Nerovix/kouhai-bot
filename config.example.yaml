@@ -9,7 +9,9 @@
 official:
   app_id: "1900000000"           # 机器人 AppID（占位符，替换为你自己的）
   app_secret: "your-app-secret"  # 机器人 AppSecret（占位符）
-  bot_name: "算法助手"            # 卡片署名显示名（官方无登录昵称 API）
+  bot_name: "KouhaiBot"           # 卡片署名兜底名；网关 READY 的 username 为权威，会自动覆盖
+  # bot_avatar_url: ""            # bot 真实头像 URL（官方 API 不下发 bot 头像，需自行填入；
+                                 # 留空则渲染首字母色圆。READY 的 bot id 拼 QQ 头像 URL 只会得到默认企鹅）
   sandbox: false                 # 沙箱环境官方已基本废弃（管理员可直接体验测试），一般保持 false
   # api_base: "https://api.bot.qq.com"      # 默认 REST 域名（2026-08-10 起官方统一为此域名）
   # token_base: "https://api.bot.qq.com"    # 默认 access_token 域名

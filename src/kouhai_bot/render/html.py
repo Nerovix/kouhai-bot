@@ -20,37 +20,37 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 .header {
-  background: #f7f7f7; text-align: center; padding: 14px 12px;
-  font-size: 16px; color: #1a1a1a; font-weight: 500;
+  background: #f7f7f7; text-align: center; padding: 22px 16px;
+  font-size: 28px; color: #1a1a1a; font-weight: 500;
   border-bottom: 1px solid #e0e0e0;
 }
-.body { padding: 14px 12px 20px; }
-.msg { display: flex; align-items: flex-start; margin-bottom: 18px; }
+.body { padding: 24px 20px 28px; }
+.msg { display: flex; align-items: flex-start; margin-bottom: 28px; }
 .avatar {
-  width: 38px; height: 38px; border-radius: 6px; flex: 0 0 38px;
-  color: #fff; font-size: 17px; font-weight: 600;
+  width: 52px; height: 52px; border-radius: 8px; flex: 0 0 52px;
+  color: #fff; font-size: 26px; font-weight: 600;
   display: flex; align-items: center; justify-content: center;
-  margin-right: 10px; user-select: none;
+  margin-right: 14px; user-select: none;
 }
 img.avatar { object-fit: cover; display: block; }
 .col { flex: 1 1 auto; min-width: 0; }
-.nick { font-size: 12px; color: #8a8a8a; margin-bottom: 5px; }
+.nick { font-size: 20px; color: #8a8a8a; margin-bottom: 8px; }
 .bubble {
-  background: #fff; border-radius: 10px; padding: 10px 12px;
-  font-size: 15px; color: #1a1a1a; line-height: 1.55;
+  background: #fff; border-radius: 12px; padding: 16px 18px;
+  font-size: 28px; color: #1a1a1a; line-height: 1.5;
   word-break: break-word; overflow-wrap: anywhere;
-  display: inline-block; max-width: 100%;
+  display: inline-block; max-width: min(520px, 100%);
 }
 .bubble pre {
   font-family: "SF Mono", "Menlo", "Consolas", monospace;
-  font-size: 13px; background: #f5f5f5; border-radius: 6px;
-  padding: 8px 10px; margin: 6px 0; white-space: pre-wrap;
+  font-size: 24px; background: #f5f5f5; border-radius: 8px;
+  padding: 12px 14px; margin: 8px 0; white-space: pre-wrap;
   word-break: break-all; line-height: 1.45;
 }
-.bubble img { max-width: 100%; border-radius: 6px; display: block; margin: 6px 0; }
-.bubble .muted { color: #8a8a8a; font-size: 13px; }
-.bubble h3 { font-size: 15px; margin: 4px 0; }
-.footer { text-align: center; color: #b0b0b0; font-size: 12px; padding: 8px 0 4px; }
+.bubble img { max-width: 100%; border-radius: 8px; display: block; margin: 8px 0; }
+.bubble .muted { color: #8a8a8a; font-size: 24px; }
+.bubble h3 { font-size: 28px; margin: 6px 0; }
+.footer { text-align: center; color: #b0b0b0; font-size: 20px; padding: 12px 0 6px; }
 """
 
 

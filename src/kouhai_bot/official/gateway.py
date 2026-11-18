@@ -39,12 +39,14 @@ class OfficialGateway:
         tokens: AccessTokenManager,
         *,
         on_event: EventHandler,
+        on_ready: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         intents: int = DEFAULT_INTENTS,
         shard: tuple[int, int] = (0, 1),
     ) -> None:
         self._rest = rest
         self._tokens = tokens
         self._on_event = on_event
+        self._on_ready = on_ready
         self._intents = intents
         self._shard = list(shard)
         self._session_id: str | None = None
@@ -120,6 +122,8 @@ class OfficialGateway:
                 if t == "READY":
                     self._session_id = d.get("session_id")
                     logger.info("gateway READY (session=%s)", self._session_id)
+                    if self._on_ready is not None:
+                        await self._on_ready(d.get("user") or {})
                     continue
                 event = normalize_event(t, d)
                 if event is not None:

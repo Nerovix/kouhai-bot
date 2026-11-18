@@ -54,6 +54,15 @@ class RenderBrowser:
                 page = await context.new_page()
                 await page.set_content(html, wait_until="load", timeout=20000)
                 await page.wait_for_timeout(150)
+                # Fit the viewport to the content height so full_page captures
+                # exactly the card — a fixed tall viewport pads short cards
+                # with a blank band below the last bubble.
+                height = await page.evaluate(
+                    "() => Math.ceil(document.body.scrollHeight)"
+                )
+                await page.set_viewport_size(
+                    {"width": width, "height": max(int(height), 1)}
+                )
                 return await page.screenshot(full_page=True, type="png")
             finally:
                 await context.close()

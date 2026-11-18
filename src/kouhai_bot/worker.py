@@ -84,11 +84,13 @@ class WorkerRuntime:
         self._rest = OfficialRestClient(self._tokens, api_base=self.cfg.official_api_base)
         self._sender = OfficialSender(
             self._rest, ReplyBudget(self._db), bot_name=self.cfg.official_bot_name,
+            bot_avatar_url=self.cfg.official_bot_avatar_url,
         )
         self._browser = get_render_browser()
         self._gateway = OfficialGateway(
             self._rest, self._tokens,
-            on_event=self._on_event, intents=self.cfg.official_intents,
+            on_event=self._on_event, on_ready=self._on_ready,
+            intents=self.cfg.official_intents,
         )
 
     async def run(self) -> None:
@@ -135,6 +137,14 @@ class WorkerRuntime:
         if event.get("type") == "message" and event.get("message_type") == "group":
             self._ensure_group(str(event.get("group_openid", "") or ""))
         await process_event(event, spawn_handlers=True)
+
+    async def _on_ready(self, user: dict) -> None:
+        # READY carries the bot's authoritative username (no avatar field; the
+        # real avatar is owner-configured via official.bot_avatar_url).
+        name = str(user.get("username", "") or "")
+        if name:
+            self._sender.bot_name = name
+        self._sender.bot_id = str(user.get("id", "") or "")
 
     async def stop(self) -> None:
         self._shutdown.set()

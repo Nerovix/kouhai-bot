@@ -18,11 +18,11 @@ those features can be implemented against real shapes instead of speculation:
            target group). --recall recalls each OK message so the group stays clean.
            NOTE (2026-11-18 实测): the unified API returned OK with NO 40054007 up to
            60000 text / 8000 markdown codepoints — the error code may never fire, so a
-           clean ladder does NOT prove the content was delivered untruncated. Server-side
-           silent truncation cannot be ruled out (no message read-back API; the bot's own
-           outbound messages are not echoed to the gateway). Verify truncation by eyeballing
-           a delivered long message's tail, or accept the uncertainty. Long-image cards
-           sidestep the question entirely.
+           clean ladder alone does NOT prove untruncated delivery. The bot's own outbound
+           messages are not echoed to the gateway, but a USER quoting a bot message brings
+           its delivered text back in msg_elements[0].content — that is the read-back path.
+           Verified this way: a 5000-codepoint bot message quoted back FULLY intact (no
+           silent truncation). Long-image cards sidestep the question entirely.
 
 Usage:
   KOUHAI_CONFIG=/path/to/config.yaml uv run python tools/official_probe.py capture

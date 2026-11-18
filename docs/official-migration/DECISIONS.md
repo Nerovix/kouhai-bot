@@ -98,7 +98,7 @@
 
 ## 开放问题 / 待 owner 确认（实施中收集，最后统一讨论）
 
-- Q1 — [已解决] markdown 用原生 `msg_type=2, markdown.content`（template_id/custom_template_id 已废弃）；@ 用 `<qqbot-at-user id="member_openid"/>`、@all 用 `<qqbot-at-everyone/>`。一次请求只能携带一种内容（0/2/7 互斥）；传 markdown 时 content/ark 必须为空。出站长度上限：第三方经验值文本约 2000 / markdown 约 3000 码点，但 E4 实测未触发 40054007（text 至 60000 / markdown 至 8000 均 OK，截断与否未验证）——超长→长图（P2）无论如何安全。被动 msg_id 5min 有效，msg_id+msg_seq 重复发送会失败。
+- Q1 — [已解决] markdown 用原生 `msg_type=2, markdown.content`（template_id/custom_template_id 已废弃）；@ 用 `<qqbot-at-user id="member_openid"/>`、@all 用 `<qqbot-at-everyone/>`。一次请求只能携带一种内容（0/2/7 互斥）；传 markdown 时 content/ark 必须为空。出站长度上限：第三方经验值文本约 2000 / markdown 约 3000 码点，但 E4 实测未触发 40054007（text 至 60000 / markdown 至 8000 均 OK），且引用法验证 5000 码点完整下发无截断——超长→长图（P2）无论如何安全。被动 msg_id 5min 有效，msg_id+msg_seq 重复发送会失败。
 - Q2 — [已解决] 长图用 `file_data`（base64）直传 `/v2/groups/{gid}/files`（`srv_send_msg:false` 仅返回 file_info）；MediaCache 按内容 sha256 缓存 file_info，ttl 到期前 30s 失效，跨群复用（群上传文件仅发群）。大文件可走分片上传，当前题卡 PNG ~100KB 直传足够。
 - Q3 — ReplyBudget 主动配额持久化粒度（每群每日计数跨重启）与 20/qpm 节流实现。[P1 已实现：DB 每日计数 + 内存 qpm]
 - Q4 — picker 收敛为纯 fetch 后，选题排除集（used ∪ solved ∪ current）的 DB 查询口径。[P1 已实现 get_excluded_pids]
@@ -143,7 +143,7 @@
 - **C1 域名统一**：changelog 20260810「所有接口域名统一为 `api.bot.qq.com`」。旧 `api.sgroup.qq.com`/`bots.qq.com` 仍别名可用（探针实测 sgroup 能跑通），但已非推荐。**已改** config.py / rest.py 默认 api_base→`https://api.bot.qq.com`，config.example.yaml / AGENTS.md 同步。token_base 本就 api.bot.qq.com。
 - **C2 主动频控是双层**：Bot 维度 **60/qpm**（未认证 30）+ 单群接收侧 **20/qpm**。我们 ReplyBudget 只建模了 per-group 20/qpm（正确），**未建模 bot 全局 60/qpm**——多群总量大时需注意（当前规模无碍）。已在 AGENTS.md 注明。
 - **C3 @所有人支持纯文本**：changelog 20261026 起 `<qqbot-at-everyone/>` 在**文本+markdown**均生效（旧 `<@userid>`/`@everyone` 将弃用）。我们 contest_check 用 markdown @all 仍正确，无需改。已注明。
-- **C4 长度上限非官方数值**：2000/3000 码点仅见第三方实现，官方文档只给错误码 40054007「消息长度超限」无确切数字。**E4 实测（见下）证伪其为硬错误阈值**：text 至 60000 / markdown 至 8000 码点均返回 OK、不触发 40054007；是否静默截断未验证（无读回路径）。超长转长图的保底策略无论如何安全。
+- **C4 长度上限非官方数值**：2000/3000 码点仅见第三方实现，官方文档只给错误码 40054007「消息长度超限」无确切数字。**E4 实测（见下）证伪其为硬错误阈值**：text 至 60000 / markdown 至 8000 码点均返回 OK、不触发 40054007；并用 owner 引用法验证 5000 码点完整下发、**无静默截断**。超长转长图的保底策略无论如何安全。
 - **C5 沙箱基本废弃**：FAQ「管理员可直接体验测试，无需沙箱；旧管理端已不支持添加沙箱群」，改用「内部体验号码」(20 个)。sandbox.api.sgroup.qq.com 仅存旧缓存页。→ sandbox flag 保留但基本无用，config.example 已注明。
 - **C6 GROUP_MEMBER_UPDATE 不存在**：群成员事件仅 ADD/REMOVE（+ 新增 GROUP_JOIN_REQUEST 入群申请）。我们 events.py 只处理 ADD/REMOVE，正确。
 - **C7 富媒体上传细节更新**：file_data 现支持二进制直传（旧「暂未支持」过时）≤5M；file_type=4 文件已开放；支持 url 上传（平台转存，可能失败 850026）+ 分片上传；图片软限 20MB/硬限 200MB。我们 base64 直传 ~100KB PNG 不受影响。ttl=0=永久。已注明。
@@ -173,11 +173,11 @@
     - 远程头像：`render/avatars.py` AvatarCache（aiohttp 预取→base64 data URI，TTL+LRU，失败回退字母色块）；`render_card_png` 预解析节点 `avatar_url`；html 有 data URI 渲染 `<img class=avatar>` 否则色块；history 卡（/sync）用户节点接 `ctx.event.avatar`。真实头像长图目视验证通过（米老鼠头像渲染正确，bot 节点色块）。
     - 引用定位：`events.parse_scene_ext`（k=v 字符串数组）+ 归一化 `ref_msg_idx`/`msg_idx`/`quoted_text`；DB `message_refs` 表 + `posts.record_message_ref`/`pid_for_ref`（群 scoped）；sender `_send` 捕获 `ext_info.ref_idx`（`ref_idx_for(mid)`，不改返回类型）；newproblem//problem 发卡后记录 ref→pid；review `_resolve_review_pid` 引用已解决旧题→定位该题，否则回退最近 solved。
     - review @mention 改结构化 `mentions[]`（滤 bot/is_you/self/重复），修真实 `<@openid>`（无 !）格式偏差。
-- **E4 长度上限实测 [实测完成，含开放问题]**：owner 备两实验群后自主跑 `length --send --recall`（每条发后即撤回，群保持干净；text/markdown 各 ladder）。**结果推翻原经验值假设**：
+- **E4 长度上限实测 [实测完成，截断已验证]**：owner 备两实验群后自主跑 `length --send --recall`（每条发后即撤回，群保持干净；text/markdown 各 ladder）。**结果推翻原经验值假设**：
   - **text**：1500→60000 码点（纯「测」填充）全部 `OK`（返回 id+ref_idx），**未触发 40054007**。
   - **markdown**：1000→8000 码点全部 `OK`，**未触发 40054007**。
   - 即统一 API（2026-08-10）的 `content`/`markdown.content` 在测试范围内**不以 40054007 拒绝超长**；探针「递增定位 40054007 阈值」的前提被证伪——错误码根本不出现。原 C4/Q1 的「文本约 2000 / markdown 约 3000 码点」第三方经验值**不是硬错误阈值**。
-  - **开放问题（需 owner 定夺，不臆想）**：返回 OK 不等于内容完整下发——服务端可能**静默截断**。官方无消息读回 API，bot 自身出站消息也不回推网关，capture 探针抓不到自己发的消息，故**无法自主验证是否截断**。需 owner 在群里目视一条超长消息的尾部是否完整（或接受该不确定性）。
+  - **截断已验证（owner 引用法，2026-11-18）**：bot 发一条 **5000 码点**长消息（每 1000 字嵌 `【N000】` 标记，结尾 `【5000】`，不撤回），owner 长按引用它。capture 抓到引用事件 `msg_elements[0].content` = **完整 5000 码点**，`【1000】…【5000】` 全部在、结尾正是 `【5000】`。→ **服务端未静默截断**（至少到 5000，2.5× 原经验值），消息完整存储且可被引用读回。原「OK 不代表完整下发」的开放问题**就此关闭**。方法学：bot 收不到自身出站（实测 80+ 条出站零回推），但**用户引用 bot 消息时入站 `msg_elements[0].content` 携带该消息实际下发的完整正文**——这是无读回 API 下验证出站内容的可行路径。附带坐实：引用 bot 消息时 QQ 客户端自动插入 @bot（`mentions=1`，bot 的 member_openid），dispatch 需把这种「引用+@bot」当普通入站处理。
   - **设计含义**：长图卡片（P2 已实现）仍是主路径——它把内容渲染成图片，**完全规避任何文本截断风险**，无论上限真假都安全。纯文本降级（`nodes_to_text`）与 markdown @ 消息保持保守尺寸即可；不必为「~2000/3000 硬上限」做激进分片（该上限未被实测证实为错误阈值）。
   - 探针 `length` 新增 `--recall`（每条 OK 后撤回，保持群干净）；docstring 注明错误码可能不出现、需结合目视判断截断。
 
@@ -232,3 +232,4 @@
 - E3 实现完成（2026-11-18）：远程头像（AvatarCache 预取 data URI + html img + history 卡接 ctx.event.avatar，真实头像长图目视验证）；引用旧题卡定位（events scene.ext 解析 + message_refs 表 + sender ref_idx 捕获 + newproblem//problem 记录 + review _resolve_review_pid）；review @mention 改结构化 mentions[] 修 `<@openid>` 格式。新增 10 测试，全量 625 passed。
 - E4 长度真机校准（2026-11-18，自主跑实验群，length --send --recall 每条发后即撤回）：**证伪原经验值硬上限**——text 1500→60000 码点、markdown 1000→8000 码点全部返回 OK（id+ref_idx），**均未触发 40054007**。统一 API 不以该错误码拒绝测试范围内的超长 content/markdown.content；C4/Q1 的 2000/3000 第三方经验值非硬错误阈值。**开放问题**：返回 OK 不代表完整下发，服务端可能静默截断；无消息读回 API、bot 出站不回推网关，无法自主验证截断，需 owner 目视一条超长消息尾部或接受不确定性。设计含义：长图卡片（P2）完全规避文本截断风险仍为主路径，纯文本降级/markdown @ 保持保守尺寸即可，不必为未证实的硬上限激进分片。探针 length 加 --recall + docstring 注明错误码可能不出现。
 - Worker 启动冒烟（2026-11-18，自主，bounded 12s 自停）：停 capture 探针释放网关会话后，用 fresh data_dir + 占位 LLM 配置前台跑 `python -m kouhai_bot.worker`。日志确认 `Official worker running` → `Scheduler started` → token 刷新 → `gateway identifying (intents=117440512)` → `gateway READY (session=…)`，**无 traceback**；exit 0，无残留进程。证明新 worker 完整装配（config 校验/DB/set_runtime/网关/调度）可真机启动并连上官方网关。fresh data_dir 无群发现→无 prefetch/LLM/群消息（contest_check 仅 12:01），冒烟零外部副作用。**仍待 owner**：在实验群发指令做端到端 UX 验证（bot 自身出站不触发 dispatch，需 user 发消息），及确认「大体能用」后合并 PR #119。
+- E4 截断验证关闭开放问题（2026-11-18，owner 引用法）：先实测确认 bot 出站零回推（E4 期间 80+ 条出站，capture 仍仅 9 条 user 事件）→ 无法直接读回自身消息。改用引用法：bot 发 5000 码点长消息（每 1000 字嵌【N000】、结尾【5000】，不撤回），owner 长按引用；capture 抓引用事件 `msg_elements[0].content`=**完整 5000 码点**、【1000】…【5000】齐全 → **服务端无静默截断**（至少到 5000）。开放问题关闭。附带坐实引用 bot 消息时客户端自动 @bot（mentions=1）。测试消息发后即撤回，群保持干净；探针/监听已停，网关会话释放。C4/Q1/E4 + AGENTS.md pitfall#6/探针节同步更新为「已验证无截断」。

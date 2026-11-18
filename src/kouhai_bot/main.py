@@ -22,7 +22,9 @@ from .config import get_config
 from .worker import main_async as worker_main_async
 
 _START_WAIT_TIMEOUT_SEC = 10.0
-_STOP_WAIT_TIMEOUT_SEC = 10.0
+# Worker shutdown drains background tasks for up to 30s before closing handles;
+# give it room to finish gracefully before escalating to SIGKILL.
+_STOP_WAIT_TIMEOUT_SEC = 40.0
 
 
 def _repo_root() -> Path:
@@ -73,9 +75,24 @@ def _pid_cwd(pid: int) -> Path | None:
         return None
 
 
+def _pid_is_worker(pid: int) -> bool:
+    """Confirm the PID is our worker, not a recycled innocent process.
+
+    A stale pidfile can point at a PID the OS reassigned to an unrelated
+    process; without this check stop/restart would signal that process and
+    start would refuse to launch. cmdline is readable only for same-uid
+    processes, so an unreadable cmdline is treated as not-ours (fail-safe).
+    """
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return False
+    return b"kouhai_bot.worker" in cmdline
+
+
 def _running_pid(app_id: str, data_dir: str) -> int | None:
     pid = _read_pidfile(_pidfile_path(app_id, data_dir))
-    if pid is not None and _pid_alive(pid):
+    if pid is not None and _pid_alive(pid) and _pid_is_worker(pid):
         return pid
     return None
 

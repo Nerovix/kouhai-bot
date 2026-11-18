@@ -24,10 +24,6 @@ MSG_TEXT = 0
 MSG_MARKDOWN = 2
 MSG_MEDIA = 7
 
-# Official outbound limits (Unicode code points).
-TEXT_MAX_CHARS = 2000
-MARKDOWN_MAX_CHARS = 3000
-
 
 def build_text_payload(text: str) -> dict[str, Any]:
     return {"content": text, "msg_type": MSG_TEXT}

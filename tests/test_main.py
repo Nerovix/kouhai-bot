@@ -97,6 +97,7 @@ def test_running_pid_requires_live_pidfile_process(tmp_path, monkeypatch):
     pidfile.write_text("4321")
 
     monkeypatch.setattr(main, "_pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr(main, "_pid_is_worker", lambda pid: pid == 4321)
     assert main._running_pid(APP_ID, str(tmp_path)) == 4321
 
     monkeypatch.setattr(main, "_pid_alive", lambda pid: False)
@@ -104,6 +105,31 @@ def test_running_pid_requires_live_pidfile_process(tmp_path, monkeypatch):
 
     pidfile.unlink()
     assert main._running_pid(APP_ID, str(tmp_path)) is None
+
+
+def test_running_pid_rejects_recycled_non_worker_process(tmp_path, monkeypatch):
+    pidfile = main._pidfile_path(APP_ID, str(tmp_path))
+    pidfile.parent.mkdir(parents=True)
+    pidfile.write_text("4321")
+
+    # PID is alive but its cmdline is not our worker (OS recycled the PID).
+    monkeypatch.setattr(main, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(main, "_pid_is_worker", lambda pid: False)
+    assert main._running_pid(APP_ID, str(tmp_path)) is None
+
+
+def test_pid_is_worker_reads_cmdline(monkeypatch):
+    def _read_bytes(self):
+        if str(self) == "/proc/4321/cmdline":
+            return b"python\x00-m\x00kouhai_bot.worker\x00"
+        if str(self) == "/proc/9999/cmdline":
+            return b"nginx\x00-g\x00daemon off;\x00"
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(main.Path, "read_bytes", _read_bytes)
+    assert main._pid_is_worker(4321) is True
+    assert main._pid_is_worker(9999) is False  # recycled innocent process
+    assert main._pid_is_worker(1234) is False  # unreadable cmdline → fail-safe
 
 
 def test_current_worktree_state_variants(monkeypatch):
@@ -145,6 +171,7 @@ def test_stop_existing_sigterm_graceful(tmp_path):
     signals: list[int] = []
 
     with patch("kouhai_bot.main._pid_alive", return_value=True), \
+            patch("kouhai_bot.main._pid_is_worker", return_value=True), \
             patch("kouhai_bot.main.os.kill", side_effect=lambda pid, sig: signals.append(sig)), \
             patch("kouhai_bot.main._wait_for_exit", return_value=True) as wait:
         assert main._stop_existing(APP_ID, str(tmp_path)) is True
@@ -161,6 +188,7 @@ def test_stop_existing_escalates_to_sigkill(tmp_path):
     signals: list[int] = []
 
     with patch("kouhai_bot.main._pid_alive", return_value=True), \
+            patch("kouhai_bot.main._pid_is_worker", return_value=True), \
             patch("kouhai_bot.main.os.kill", side_effect=lambda pid, sig: signals.append(sig)), \
             patch("kouhai_bot.main._wait_for_exit", side_effect=[False, True]):
         assert main._stop_existing(APP_ID, str(tmp_path)) is True
@@ -175,6 +203,7 @@ def test_stop_existing_raises_when_process_never_dies(tmp_path):
     pidfile.write_text("4321")
 
     with patch("kouhai_bot.main._pid_alive", return_value=True), \
+            patch("kouhai_bot.main._pid_is_worker", return_value=True), \
             patch("kouhai_bot.main.os.kill"), \
             patch("kouhai_bot.main._wait_for_exit", return_value=False):
         with pytest.raises(RuntimeError, match="Could not stop bot pid 4321"):

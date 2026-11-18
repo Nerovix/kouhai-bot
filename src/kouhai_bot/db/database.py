@@ -9,6 +9,7 @@ prefetch slot claim).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -36,6 +37,13 @@ class Database:
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self._path = Path(path)
         self._conn: aiosqlite.Connection | None = None
+        # One shared connection → serialize ALL access. Without this, two
+        # coroutines holding different higher-level locks (coordinator, budget,
+        # newproblem) can interleave BEGIN IMMEDIATE on the same connection
+        # ("cannot start a transaction within a transaction"), and a plain
+        # execute from a third coroutine gets absorbed into an open transaction
+        # and lost on its rollback.
+        self._lock = asyncio.Lock()
 
     @property
     def path(self) -> Path:
@@ -78,45 +86,56 @@ class Database:
     async def execute(
         self, sql: str, params: Sequence[Any] = ()
     ) -> aiosqlite.Cursor:
-        return await self.conn.execute(sql, params)
+        async with self._lock:
+            return await self.conn.execute(sql, params)
 
     async def executemany(
         self, sql: str, seq: Sequence[Sequence[Any]]
     ) -> aiosqlite.Cursor:
-        return await self.conn.executemany(sql, seq)
+        async with self._lock:
+            return await self.conn.executemany(sql, seq)
 
     async def fetch_one(
         self, sql: str, params: Sequence[Any] = ()
     ) -> aiosqlite.Row | None:
-        async with self.conn.execute(sql, params) as cur:
-            return await cur.fetchone()
+        async with self._lock:
+            async with self.conn.execute(sql, params) as cur:
+                return await cur.fetchone()
 
     async def fetch_all(
         self, sql: str, params: Sequence[Any] = ()
     ) -> list[aiosqlite.Row]:
-        async with self.conn.execute(sql, params) as cur:
-            return await cur.fetchall()
+        async with self._lock:
+            async with self.conn.execute(sql, params) as cur:
+                return await cur.fetchall()
 
     async def fetch_val(
         self, sql: str, params: Sequence[Any] = (), default: Any = None
     ) -> Any:
-        row = await self.fetch_one(sql, params)
-        if row is None:
-            return default
-        return row[0]
+        async with self._lock:
+            async with self.conn.execute(sql, params) as cur:
+                row = await cur.fetchone()
+            return default if row is None else row[0]
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
-        """Serialize a read-modify-write section (BEGIN IMMEDIATE)."""
-        conn = self.conn
-        await conn.execute("BEGIN IMMEDIATE")
-        try:
-            yield conn
-        except BaseException:
-            await conn.execute("ROLLBACK")
-            raise
-        else:
-            await conn.execute("COMMIT")
+        """Serialize a read-modify-write section (BEGIN IMMEDIATE).
+
+        Holds the connection lock for the whole transaction so no other
+        coroutine can interleave writes. Callers must use the yielded raw
+        ``conn`` (or ``conn_fetchone``) inside — never ``db.execute``/``fetch_*``,
+        which would re-acquire the non-reentrant lock and deadlock.
+        """
+        async with self._lock:
+            conn = self.conn
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn
+            except BaseException:
+                await conn.execute("ROLLBACK")
+                raise
+            else:
+                await conn.execute("COMMIT")
 
 
 _database: Database | None = None

@@ -757,9 +757,11 @@ async def test_clear_only_touches_current_problem_and_caller(env, monkeypatch):
     assert len(await submissions.get_user_problem_submissions(env.db, G, U2, PID)) == 1
 
 
-async def test_clear_with_args_just_acks(env):
+async def test_clear_with_args_shows_usage_not_false_ack(env):
     await clear_cmd.handle(make_ctx("/clear 全部"))
-    assert sent_texts(env.rest) == ["👌"]
+    assert sent_texts(env.rest) == [
+        f"{at_tag()} 用法：/clear（清空自己在当前题目的上下文，后面不用加东西哦）"
+    ]
 
 
 async def test_clear_watermark_blocks_late_finalize_write(env, monkeypatch):

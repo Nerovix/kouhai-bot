@@ -28,8 +28,13 @@ class RenderBrowser:
             return
         if async_playwright is None:
             raise RuntimeError("playwright is not installed; cannot render cards")
-        self._pw = await async_playwright().start()
-        self._browser = await self._pw.chromium.launch(headless=True)
+        pw = await async_playwright().start()
+        try:
+            self._browser = await pw.chromium.launch(headless=True)
+        except BaseException:
+            await pw.stop()
+            raise
+        self._pw = pw
         logger.info("render browser launched (chromium %s)", self._browser.version)
 
     async def screenshot_html(
@@ -54,12 +59,16 @@ class RenderBrowser:
                 await context.close()
 
     async def close(self) -> None:
-        if self._browser is not None:
-            await self._browser.close()
+        try:
+            if self._browser is not None:
+                await self._browser.close()
+        finally:
             self._browser = None
-        if self._pw is not None:
-            await self._pw.stop()
-            self._pw = None
+            if self._pw is not None:
+                try:
+                    await self._pw.stop()
+                finally:
+                    self._pw = None
 
 
 _browser: RenderBrowser | None = None

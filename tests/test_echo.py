@@ -233,11 +233,13 @@ def test_canonical_echo_key_nfc_and_strip():
 
 
 def test_canonical_echo_key_strips_leading_official_mentions():
+    # Official inbound @ renders <@openid> (no '!'); legacy '!' form tolerated.
+    assert canonical_echo_key("<@ABC123> 复读") == "复读"
     assert canonical_echo_key("<@!ABC123> 复读") == "复读"
-    assert canonical_echo_key("<@!ABC123><@!DEF456> hi") == "hi"
+    assert canonical_echo_key("<@ABC123><@DEF456> hi") == "hi"
     # Only leading hex-openid mentions are stripped; mid-text stays.
-    assert canonical_echo_key("hi <@!ABC123>") == "hi <@!ABC123>"
-    assert canonical_echo_key("<@!nothex> x") == "<@!nothex> x"
+    assert canonical_echo_key("hi <@ABC123>") == "hi <@ABC123>"
+    assert canonical_echo_key("<@nothex> x") == "<@nothex> x"
 
 
 async def test_nfc_variants_join_one_streak(rest):
@@ -249,14 +251,15 @@ async def test_nfc_variants_join_one_streak(rest):
     assert _sent_texts(rest) == [(GROUP, "\u00e9")]
 
 
-async def test_mention_variant_joins_streak_and_echoes_original_content(rest):
+async def test_mention_variant_joins_streak_and_echoes_stripped_content(rest):
     echo_obj = GroupEcho(rng=lambda: 0.0)
 
     results = await _feed(echo_obj, ["复读", "<@!AB12> 复读"])
 
     assert results == [False, True]
-    # The bot repeats the triggering message's original content, not the key.
-    assert _sent_texts(rest) == [(GROUP, "<@!AB12> 复读")]
+    # The repeat key strips the leading @bot, and the echoed text strips it too
+    # so the bot does not re-mention itself in the repeat.
+    assert _sent_texts(rest) == [(GROUP, "复读")]
     assert [e.echo_key for e in echo_obj.buffer_snapshot()] == ["复读"] * 3
 
 

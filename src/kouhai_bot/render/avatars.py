@@ -21,12 +21,14 @@ logger = logging.getLogger("kouhai-bot.render.avatars")
 _FETCH_TIMEOUT_SEC = 5.0
 _MAX_BYTES = 2 * 1024 * 1024
 _CACHE_TTL_SEC = 6 * 3600
+_FAILURE_TTL_SEC = 60.0
 _CACHE_MAX = 512
 
 
 class AvatarCache:
     def __init__(self) -> None:
         self._cache: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        self._failures: dict[str, float] = {}
         self._session: aiohttp.ClientSession | None = None
         self._lock = asyncio.Lock()
 
@@ -37,6 +39,15 @@ class AvatarCache:
             )
         return self._session
 
+    async def _note_failure(self, url: str) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            self._failures[url] = now + _FAILURE_TTL_SEC
+            if len(self._failures) > _CACHE_MAX:
+                for key in list(self._failures):
+                    if self._failures[key] <= now:
+                        del self._failures[key]
+
     async def data_uri(self, url: str) -> str | None:
         if not url or not url.startswith(("http://", "https://")):
             return None
@@ -45,29 +56,36 @@ class AvatarCache:
         if cached and cached[1] > now:
             self._cache.move_to_end(url)
             return cached[0]
-        async with self._lock:
-            cached = self._cache.get(url)
-            if cached and cached[1] > time.monotonic():
-                return cached[0]
-            try:
+        # Negative cache: a dead/slow URL fails once, then returns instantly for
+        # a short TTL instead of stalling every render for the full timeout.
+        if self._failures.get(url, 0.0) > now:
+            return None
+        # Fetch outside the lock so distinct avatars download concurrently.
+        try:
+            async with self._lock:
                 session = await self._get_session()
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        return None
-                    data = await resp.read()
-                    if not data or len(data) > _MAX_BYTES:
-                        return None
-                    ctype = (resp.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
-                    if not ctype.startswith("image/"):
-                        ctype = "image/jpeg"
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
-                logger.debug("avatar fetch failed for %s: %s", url[:48], exc)
-                return None
-            uri = f"data:{ctype};base64,{base64.b64encode(data).decode('ascii')}"
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    await self._note_failure(url)
+                    return None
+                data = await resp.read()
+                if not data or len(data) > _MAX_BYTES:
+                    await self._note_failure(url)
+                    return None
+                ctype = (resp.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
+                if not ctype.startswith("image/"):
+                    ctype = "image/jpeg"
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            logger.debug("avatar fetch failed for %s: %s", url[:48], exc)
+            await self._note_failure(url)
+            return None
+        uri = f"data:{ctype};base64,{base64.b64encode(data).decode('ascii')}"
+        async with self._lock:
             self._cache[url] = (uri, time.monotonic() + _CACHE_TTL_SEC)
+            self._failures.pop(url, None)
             while len(self._cache) > _CACHE_MAX:
                 self._cache.popitem(last=False)
-            return uri
+        return uri
 
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:

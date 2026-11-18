@@ -23,16 +23,20 @@ logger = logging.getLogger("kouhai-bot.cmd.review")
 
 def _mentioned_user_ids(ctx: Ctx) -> list[str]:
     """Structured mentions[] (实测: inbound @ renders as <@openid>, no '!').
-    Skip the bot (is_you/bot), the requester, and duplicates."""
+    Skip the bot (is_you/bot), @all (scope=all), the requester, and duplicates.
+    Preserve the raw openid string — submission rows are keyed by the exact
+    author.member_openid, so case-folding here could silently load no context."""
     seen: set[str] = set()
     result: list[str] = []
-    self_id = ctx.user_openid.upper()
+    self_id = ctx.user_openid
     for mention in ctx.event.get("mentions") or []:
         if not isinstance(mention, dict):
             continue
         if mention.get("is_you") or mention.get("bot"):
             continue
-        openid = str(mention.get("member_openid", "") or "").upper()
+        if str(mention.get("scope", "") or "") == "all":
+            continue
+        openid = str(mention.get("member_openid", "") or "")
         if not openid or openid == self_id or openid in seen:
             continue
         seen.add(openid)
@@ -69,17 +73,10 @@ async def handle(ctx: Ctx) -> None:
         )
         return
 
-    review_pid = await _resolve_review_pid(ctx)
-    if not review_pid:
-        await ctx.sender.send_group_at(
-            ctx.group_openid, ctx.user_openid,
-            "还没有已通过的题目可以 review 哦～先做出一道再来聊吧！",
-            msg_id=ctx.message_id,
-        )
-        return
-
     await enqueue_review_request(
-        ctx, question, review_pid, mentioned_user_ids=_mentioned_user_ids(ctx),
+        ctx, question,
+        pid_resolver=lambda: _resolve_review_pid(ctx),
+        mentioned_user_ids=_mentioned_user_ids(ctx),
     )
 
 

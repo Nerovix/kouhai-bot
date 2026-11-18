@@ -129,10 +129,17 @@ async def enqueue_new_problem(
     await lock.acquire()
     try:
         now = time.monotonic()
-        last = _cooldowns.get(group_openid, 0)
-        if now - last < cfg.newproblem_cooldown:
+        last = _cooldowns.get(group_openid)
+        if last is not None:
+            elapsed = now - last
+        else:
+            # No in-memory cooldown (e.g. after restart): fall back to the
+            # persisted post time so a restart cannot bypass the cooldown.
+            posted_at = await state.current_posted_at(get_runtime().db, group_openid)
+            elapsed = (time.time() - float(posted_at)) if posted_at else float("inf")
+        if elapsed < cfg.newproblem_cooldown:
             if not quiet:
-                remaining = int(cfg.newproblem_cooldown - (now - last))
+                remaining = int(cfg.newproblem_cooldown - elapsed)
                 await _notify(
                     group_openid, user_openid, message_id,
                     f"刷新太频繁啦，等 {remaining} 秒再试哦～",

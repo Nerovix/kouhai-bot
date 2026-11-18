@@ -216,6 +216,48 @@
     - annotations 导出当时仍是 JSON 离线工具（Q6）——**后于 2026-11-18 按 owner 决定整体删除**（见 Q6），相关边界测试一并移除。
     - cards.py `_bot_reply_text` 对「reply 内嵌 tag 但无 model_tag 字段」的 legacy 记录会渲染 0 次 tag（AGENTS.md 旧文档说渲染 1 次）。全新建库（D1）下所有记录都带 model_tag 字段，该 legacy 情形不可达，故不改源码。
 
+## 代码自审修复（2026-11-18，端到端验证前）
+
+> owner 指示「先自己 review 一波再端到端验证」。三路子 Agent 分审并发/传输/数据格式/安全，
+> 主进程逐条核实后修复**确证 bug**；设计取舍/被证伪前提/低危项延后到统一讨论（见下）。
+> 全量 **629 passed**（+4 新测试）。以下均已落地并补测。
+
+### 并发 / 协调器
+- **DB 单连接事务串行化（关键）**：单条共享 aiosqlite 连接上 `BEGIN IMMEDIATE` 事务此前可被其它协程的语句插入而错乱。`Database` 新增连接级 `asyncio.Lock`，`execute/executemany/fetch_one/fetch_all/fetch_val/transaction` 全部串行化；`fetch_val` 内联 `conn.execute`（不再调 `fetch_one`，避免非重入锁自死锁）。核实仅 4 处 transaction（posts×2 / runtime×2）内部均用裸 conn，无重入。
+- **首杀计分自旋不再持锁 sleep**：`_resolve_submit_scores` 的 `asyncio.sleep(0.1)` 移出 `coord.lock`（原在锁内 sleep 会阻塞同群所有状态临界区）。
+- **admission 快照入锁**：clarify/clear/review 的目标 pid 快照改在 `coord.lock` 内读取后再 `_enqueue_locked`（原在锁外读，存在被新 AC/新题重定向的竞态）；review 的 pid_resolver 在锁内调用。
+
+### 数据完整性
+- **/sync 跨群导入只拉已回复记录**：`get_cross_group_submissions` 过滤 `REPLIED_RESULTS`（排除 pending/superseded），避免把对方未决/被取代的占位记录重复物化进本群。
+- **message_refs 跨群主键碰撞**：ref_idx 是每群索引，PK 改复合 `(group_openid, ref_idx)`；`record_message_ref` 用 `ON CONFLICT(group_openid, ref_idx)` upsert；`pid_for_ref` 群 scoped。fresh-start schema 无迁移。
+- **editorial 译文绑定源指纹**：`set_editorial_translation` 增 `source_sha256` 守卫（UPDATE 加 `AND source_sha256=?`），`_commit_prepared_editorial` 一次算源指纹同时绑源+译文，防重爬源后旧译文误标 verified。
+- **/newproblem 冷却重启绕过**：内存冷却表缺失时回退持久化 `posted_at`（`state.current_posted_at`），重启不再绕过冷却。
+
+### 传输 / dispatch
+- **dispatch 剥离前导 `<@bot>`**：官方引用 bot 卡片会自动插入 @bot（入站 `<@openid>` 无 `!`，且走 GROUP_MESSAGE_CREATE）。dispatch 先剥前导 mention 再归一化指令，任何 `/` 指令均响应（无需 @bot，与「服务 every group」一致）。新增 dispatch 测试锁定。
+- **echo 兼容无 `!` @ 格式**：`_LEADING_AT_RE` 容忍 `<@openid>`/`<@!openid>`；复读输出剥前导 mention（避免复读时再 @bot）。
+- **review @mention 保真**：保留原始 openid（不再 `.upper()`），跳过 `scope=="all"`，self 用原始 `ctx.user_openid`。
+- **/clear 误成功 ack**：正则不匹配（带多余参数）发改用提示而非假 👌。
+- **REST 网络异常统一降级**：`aiohttp.ClientError`/`asyncio.TimeoutError` 包成 `OfficialApiError(0,…)`，sender 各路径一致降级；session 加 `total=60s` 超时。
+- **send_forward_card 永不 raise**：渲染/发图/文本降级三段各自 try/except，任一失败返回 None 而非抛断命令。
+- **头像负缓存 + 并行**：AvatarCache 失败 URL 60s 负缓存（防反复重试拖慢渲染），`asyncio.gather` 并行预取，网络请求在锁外。
+- **Playwright driver 泄漏**：launch 失败 `pw.stop()`；close 用 try/finally 确保 `_pw.stop()`。
+- **picker stderr 全量分类**：题库耗尽标记打在 stderr 末尾，原 head 截断会漏判→耗尽放宽永不触发；改对完整 stderr 分类。
+
+### 生命周期
+- **C#6 worker 停机取消 editorial 后台任务**：`stop()` 在关闭 browser/DB/REST 前 `await cancel_background_tasks()`，长爬取+翻译不会_outlive 其写入资源。
+- **C#9 worker 启动恢复已知群服务**：`_seed_groups()` 从 `SELECT DISTINCT group_openid FROM group_posts` 恢复每群 prefetch+editorial 维护（原重启后须等下一条入站消息才启动，READY slot/当前题解永不刷新）。
+- **C#7 pidfile 身份核验**：`_pid_is_worker` 读 `/proc/<pid>/cmdline` 含 `kouhai_bot.worker` 才视为本 bot（cmdline 不可读→fail-safe 非本 bot），防陈旧 pidfile 指向被 OS 复用的无辜进程时 stop/restart 误杀、start 误拒。
+- **C#8 停机等待 10→40s**：worker 优雅 drain 预算 30s，原 main 等 10s 即 SIGKILL 会打断 drain；放宽到 40s。
+- **删除死常量**：sender `TEXT_MAX_CHARS=2000`/`MARKDOWN_MAX_CHARS=3000` 无任何引用，且 E4 已证伪其为硬上限——移除（含误导注释）。
+
+### 延后到统一讨论（非确证 bug / 被证伪前提 / 低危）
+- A#3 /sync 去重键 `(content,result)`：属已封「精确去重」设计决定，非 bug。
+- C#2 文本降级长度前提：E4 证伪硬上限，非硬失败，保守尺寸即可。
+- B#7 `send_group_at` 仅 markdown 无纯文本降级：依赖部署（markdown 已全量开放），暂可接受。
+- B#6 feedback 缓存读在锁外：可容忍（cache 语义，损坏读空）。
+- 低危备忘：scheduler 分钟跳变/双触发；`_passive`/`_cooldowns`/media 内存表无界；gateway 干净关闭后 1s backoff 重置；日志无午夜轮转；problem prefetch 无失败 backoff；posts 重发不重置 solved_at；`prefetch_slot` 表死代码（slot 仍 JSON）；链式 /sync 来源 provenance 丢失；/newproblem 非法用法仍发 👀；仅用法提示也消耗冷却。
+
 ## 变更日志
 - P1 启动：建立决策日志；确定 D1–D7 架构。
 - P1 完成：DB + official 传输 + config 地基；Q1 解决；新增 Q9（昵称来源）；生命周期归入 P3。
@@ -233,3 +275,4 @@
 - E4 长度真机校准（2026-11-18，自主跑实验群，length --send --recall 每条发后即撤回）：**证伪原经验值硬上限**——text 1500→60000 码点、markdown 1000→8000 码点全部返回 OK（id+ref_idx），**均未触发 40054007**。统一 API 不以该错误码拒绝测试范围内的超长 content/markdown.content；C4/Q1 的 2000/3000 第三方经验值非硬错误阈值。**开放问题**：返回 OK 不代表完整下发，服务端可能静默截断；无消息读回 API、bot 出站不回推网关，无法自主验证截断，需 owner 目视一条超长消息尾部或接受不确定性。设计含义：长图卡片（P2）完全规避文本截断风险仍为主路径，纯文本降级/markdown @ 保持保守尺寸即可，不必为未证实的硬上限激进分片。探针 length 加 --recall + docstring 注明错误码可能不出现。
 - Worker 启动冒烟（2026-11-18，自主，bounded 12s 自停）：停 capture 探针释放网关会话后，用 fresh data_dir + 占位 LLM 配置前台跑 `python -m kouhai_bot.worker`。日志确认 `Official worker running` → `Scheduler started` → token 刷新 → `gateway identifying (intents=117440512)` → `gateway READY (session=…)`，**无 traceback**；exit 0，无残留进程。证明新 worker 完整装配（config 校验/DB/set_runtime/网关/调度）可真机启动并连上官方网关。fresh data_dir 无群发现→无 prefetch/LLM/群消息（contest_check 仅 12:01），冒烟零外部副作用。**仍待 owner**：在实验群发指令做端到端 UX 验证（bot 自身出站不触发 dispatch，需 user 发消息），及确认「大体能用」后合并 PR #119。
 - E4 截断验证关闭开放问题（2026-11-18，owner 引用法）：先实测确认 bot 出站零回推（E4 期间 80+ 条出站，capture 仍仅 9 条 user 事件）→ 无法直接读回自身消息。改用引用法：bot 发 5000 码点长消息（每 1000 字嵌【N000】、结尾【5000】，不撤回），owner 长按引用；capture 抓引用事件 `msg_elements[0].content`=**完整 5000 码点**、【1000】…【5000】齐全 → **服务端无静默截断**（至少到 5000）。开放问题关闭。附带坐实引用 bot 消息时客户端自动 @bot（mentions=1）。测试消息发后即撤回，群保持干净；探针/监听已停，网关会话释放。C4/Q1/E4 + AGENTS.md pitfall#6/探针节同步更新为「已验证无截断」。
+- 代码自审修复（2026-11-18，owner「先自己 review 一波再端到端验证」）：三路子 Agent 分审并发/传输/数据格式/安全，逐条核实修确证 bug——DB 单连接事务串行化（连接级锁，关键）、首杀计分 sleep 出锁、clarify/clear/review admission 快照入锁、/sync 只拉已回复记录、message_refs 复合主键、editorial 译文绑源指纹、/newproblem 冷却回退 posted_at、dispatch/echo 剥前导 `<@bot>`（无 !）、review mention 保真、/clear 误 ack 改用法提示、REST 网络异常统一降级、send_forward_card 永不 raise、头像负缓存+并行、Playwright driver 泄漏、picker stderr 全量分类、worker 停机取消 editorial 任务+启动恢复已知群、pidfile 身份核验防误杀、停机等待 10→40s、删死常量 TEXT/MARKDOWN_MAX_CHARS。新增「代码自审修复」章节 + 延后讨论清单。全量 **629 passed**（+4 新测试）。PR #119 仍未合并（待端到端验证 + owner 确认）。

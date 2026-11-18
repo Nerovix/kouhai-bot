@@ -11,6 +11,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
 from .db.database import get_database
 from .db.repos import posts
@@ -65,6 +66,22 @@ def _mark_prefetch_succeeded(pid: str) -> None:
 def _track_task(task: asyncio.Task) -> None:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+
+
+async def cancel_background_tasks() -> None:
+    """Cancel and drain all tracked editorial prefetch/delivery tasks.
+
+    Called during worker shutdown before closing the browser/DB/REST handles,
+    so a long crawl+translation cannot outlive the resources it writes through.
+    """
+    tasks = list(_background_tasks)
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+    _background_tasks.clear()
+    _prefetch_tasks.clear()
 
 
 def _chunk_text(text: str, chunk_size: int) -> list[str]:

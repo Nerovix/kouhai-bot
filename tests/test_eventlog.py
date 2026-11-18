@@ -197,6 +197,33 @@ async def test_leading_junk_normalizer_only_touches_slash_commands():
     assert _normalize_leading_command_junk("\ufe0f") == "\ufe0f"
 
 
+async def test_leading_bot_mention_stripped_before_command():
+    seen: list[tuple[str, str]] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append((ctx.raw_text, ctx.args))
+
+    _register("dispatchat", _handler, aliases=["dat"])
+    # Quoting a bot card auto-inserts @bot (official form has no '!'); the
+    # command must still dispatch. Placeholder openid only — never real ids.
+    await process_event(
+        _event("<@ABCDEF0123456789> /dispatchat hello"), spawn_handlers=False
+    )
+    await process_event(
+        _event("<@ABCDEF0123456789> /dat hi", user="USER_2"), spawn_handlers=False
+    )
+    # Legacy '!' form is tolerated too.
+    await process_event(
+        _event("<@!ABCDEF0123456789> /dispatchat x", user="USER_3"),
+        spawn_handlers=False,
+    )
+    assert seen == [
+        ("/dispatchat hello", "hello"),
+        ("/dispatchat hi", "hi"),
+        ("/dispatchat x", "x"),
+    ]
+
+
 async def test_ctx_carries_event_identity():
     captured: list[Ctx] = []
 

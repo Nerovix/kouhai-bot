@@ -6,6 +6,7 @@ API has no merged-forward primitive; the long image is the replica).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from html import unescape
@@ -51,17 +52,19 @@ async def render_card_png(
 
 async def _resolve_avatars(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Pre-fetch each node's avatar_url into an embedded data URI (best-effort;
-    failures leave the letter-circle fallback)."""
+    failures leave the letter-circle fallback). Fetches run concurrently so one
+    slow avatar host does not head-of-line-block the whole card."""
     cache = get_avatar_cache()
-    resolved: list[dict[str, Any]] = []
-    for node in nodes:
+
+    async def resolve(node: dict[str, Any]) -> dict[str, Any]:
         url = str(node.get("avatar_url", "") or "")
         if url and not node.get("avatar_data"):
             data = await cache.data_uri(url)
             if data:
-                node = {**node, "avatar_data": data}
-        resolved.append(node)
-    return resolved
+                return {**node, "avatar_data": data}
+        return node
+
+    return list(await asyncio.gather(*(resolve(node) for node in nodes)))
 
 
 async def send_forward_card(
@@ -75,20 +78,33 @@ async def send_forward_card(
     text_fallback: str | None = None,
     browser: RenderBrowser | None = None,
 ) -> str | None:
-    """Render → upload → send long image; degrade to text on any failure."""
+    """Render → upload → send long image; degrade to text on any failure.
+
+    Never raises: a render/upload/send error (including transport failures)
+    falls back to plain text, and a failed text fallback returns None so the
+    caller can report delivery failure instead of crashing mid-command.
+    """
+    png = None
     try:
         png = await render_card_png(
             nodes, title=title, footer=footer, browser=browser
         )
     except Exception as e:
         logger.warning("card render failed; using text fallback: %s", e)
-        png = None
     if png:
-        mid = await sender.send_group_image_bytes(
-            group_openid, png, msg_id=msg_id, content=title
-        )
+        try:
+            mid = await sender.send_group_image_bytes(
+                group_openid, png, msg_id=msg_id, content=title
+            )
+        except Exception as e:
+            logger.warning("card media send errored; using text fallback: %s", e)
+            mid = None
         if mid:
             return mid
         logger.warning("card media send failed; using text fallback")
     fallback = text_fallback if text_fallback is not None else nodes_to_text(nodes)
-    return await sender.send_group_text(group_openid, fallback, msg_id=msg_id)
+    try:
+        return await sender.send_group_text(group_openid, fallback, msg_id=msg_id)
+    except Exception as e:
+        logger.error("card text fallback failed: %s", e)
+        return None

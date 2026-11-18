@@ -266,12 +266,16 @@ async def _run_picker(
                 await _stop_process(process)
                 raise
             if process.returncode != 0:
-                err_text = stderr.decode(errors="replace")[:200]
+                err_full = stderr.decode(errors="replace")
                 logger.error(
                     "Pick failed (group %s, attempt %s/%s): %s",
-                    group_openid, attempt, PICK_ATTEMPTS, err_text,
+                    group_openid, attempt, PICK_ATTEMPTS, err_full[:200],
                 )
-                pick_error_msg = classify_pick_error(err_text)
+                # Classify on the FULL stderr: the picker prints its terminal
+                # "No unsolved problems found" marker last, after per-fetch
+                # warnings and retry lines, so a head truncation misses it and
+                # the pool-exhaustion relaxation would never fire.
+                pick_error_msg = classify_pick_error(err_full)
                 if pick_error_msg == "EXHAUSTED":
                     raise ProblemPoolExhausted()
             else:

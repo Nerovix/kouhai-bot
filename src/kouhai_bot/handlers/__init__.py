@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import unicodedata
 from collections import OrderedDict
@@ -31,6 +32,11 @@ _cooldowns: dict[tuple[str, str, str], float] = {}
 # together so a few thousand entries cover the replay window comfortably.
 _seen_message_ids: OrderedDict[str, None] = OrderedDict()
 _SEEN_MESSAGE_IDS_MAX = 8192
+
+# Inbound @ renders as ``<@openid>`` (实测: no ``!``). Quoting a bot message
+# auto-inserts @bot, so a quoted-card command arrives as ``<@bot> /review …``.
+# Strip leading mention markup before the slash check so it is not dropped.
+_LEADING_MENTION_RE = re.compile(r"^(?:<@!?[0-9A-Fa-f]+>\s*)+")
 
 
 def _is_duplicate_message(message_id: str) -> bool:
@@ -112,7 +118,9 @@ async def process_event(
         return None
 
     content = str(event.get("content", "") or "")
-    raw_text = _normalize_leading_command_junk(content.strip())
+    raw_text = _normalize_leading_command_junk(
+        _LEADING_MENTION_RE.sub("", content.strip())
+    )
     if not raw_text:
         return None
 

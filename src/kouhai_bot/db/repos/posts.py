@@ -223,12 +223,11 @@ async def record_message_ref(
     if not ref_idx or not pid:
         return
     await db.execute(
-        "INSERT INTO message_refs (ref_idx, group_openid, pid, message_id, created_at) "
+        "INSERT INTO message_refs (group_openid, ref_idx, pid, message_id, created_at) "
         "VALUES (?, ?, ?, ?, ?) "
-        "ON CONFLICT(ref_idx) DO UPDATE SET "
-        "group_openid=excluded.group_openid, pid=excluded.pid, "
-        "message_id=excluded.message_id",
-        (ref_idx, group_openid, pid, message_id, now_iso()),
+        "ON CONFLICT(group_openid, ref_idx) DO UPDATE SET "
+        "pid=excluded.pid, message_id=excluded.message_id",
+        (group_openid, ref_idx, pid, message_id, now_iso()),
     )
 
 

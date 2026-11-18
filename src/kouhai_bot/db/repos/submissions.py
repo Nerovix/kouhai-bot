@@ -106,11 +106,19 @@ async def clear_user_problem(
 async def get_cross_group_submissions(
     db: Database, user_openid: str, pid: str, exclude_group_openid: str
 ) -> list[dict[str, Any]]:
-    """All other groups' records for this user×problem (for /sync pull)."""
+    """Other groups' FINALIZED records for this user×problem (for /sync pull).
+
+    Only ``REPLIED_RESULTS`` are pulled: ``pending``/``superseded`` records are
+    unfinalized and their synced copies (request_id=None) could never be
+    upserted when the source group later finalizes, leaving stale duplicates
+    that re-sync would import again under a different (content, result) key.
+    """
+    placeholders = ", ".join("?" for _ in REPLIED_RESULTS)
     rows = await db.fetch_all(
         "SELECT * FROM submissions "
-        "WHERE user_openid=? AND pid=? AND group_openid!=? ORDER BY timestamp, id",
-        (user_openid, pid, exclude_group_openid),
+        "WHERE user_openid=? AND pid=? AND group_openid!=? "
+        f"AND result IN ({placeholders}) ORDER BY timestamp, id",
+        (user_openid, pid, exclude_group_openid, *sorted(REPLIED_RESULTS)),
     )
     return [_row_to_record(r) for r in rows]
 

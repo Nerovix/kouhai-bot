@@ -108,13 +108,24 @@ async def upsert_editorial_source(
 
 
 async def set_editorial_translation(
-    db: Database, pid: str, translation_zh: str, status: str
+    db: Database, pid: str, translation_zh: str, status: str,
+    *, source_sha256: str = "",
 ) -> None:
-    await db.execute(
-        "UPDATE editorials SET translation_zh=?, translation_status=?, updated_at=? "
-        "WHERE pid=?",
-        (translation_zh, status, now_iso(), pid),
-    )
+    """Write the translation. When ``source_sha256`` is given, the update only
+    lands if the stored source still matches — so a translation prepared for
+    source A cannot be verified against a concurrently re-scraped source B."""
+    if source_sha256:
+        await db.execute(
+            "UPDATE editorials SET translation_zh=?, translation_status=?, updated_at=? "
+            "WHERE pid=? AND source_sha256=?",
+            (translation_zh, status, now_iso(), pid, source_sha256),
+        )
+    else:
+        await db.execute(
+            "UPDATE editorials SET translation_zh=?, translation_status=?, updated_at=? "
+            "WHERE pid=?",
+            (translation_zh, status, now_iso(), pid),
+        )
 
 
 async def set_no_editorial(

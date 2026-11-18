@@ -23,7 +23,8 @@ from .handlers.runtime import get_runtime
 logger = logging.getLogger("kouhai-bot.echo")
 
 _BOT_OPENID = "__bot__"
-_LEADING_AT_RE = re.compile(r"^(?:<@![0-9A-Fa-f]+>\s*)+")
+# Inbound @ renders as <@openid> (实测: no '!'); tolerate the legacy '!' form too.
+_LEADING_AT_RE = re.compile(r"^(?:<@!?[0-9A-Fa-f]+>\s*)+")
 
 
 @dataclass(frozen=True)
@@ -96,11 +97,11 @@ class GroupEcho:
 
             has_bot = _BOT_OPENID in streak_users
             if not has_bot and self._rng() < self.echo_probability:
-                echo_content = content
+                echo_content = _LEADING_AT_RE.sub("", content).strip()
                 buf.append(EchoEntry(
                     user_openid=_BOT_OPENID,
                     echo_key=streak_key,
-                    content=content,
+                    content=echo_content,
                     message_id=f"echo:{message_id}",
                 ))
 

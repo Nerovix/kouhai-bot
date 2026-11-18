@@ -17,6 +17,7 @@ from contextlib import suppress
 from .config import get_config
 from .db.database import get_database, set_database
 from .editorial_followup import (
+    cancel_background_tasks,
     editorial_prefetch_maintenance_loop,
     ensure_editorial_prefetch,
 )
@@ -95,6 +96,7 @@ class WorkerRuntime:
         await self._db.open()
         set_database(self._db)
         set_runtime(Runtime(db=self._db, sender=self._sender, browser=self._browser))
+        await self._seed_groups()
         self._gateway_task = asyncio.create_task(
             self._gateway.run(self._gateway_stop), name="worker_gateway",
         )
@@ -117,6 +119,18 @@ class WorkerRuntime:
             logger.info("[group_%s] discovered; starting group services", group_openid)
             self._groups[group_openid] = GroupServices(group_openid)
 
+    async def _seed_groups(self) -> None:
+        """Resume prefetch + editorial maintenance for groups that already posted.
+
+        Without this, a restart leaves every known group idle until its next
+        inbound message, so the READY slot and current editorial never refresh.
+        """
+        rows = await self._db.fetch_all(
+            "SELECT DISTINCT group_openid FROM group_posts"
+        )
+        for row in rows:
+            self._ensure_group(str(row["group_openid"] or ""))
+
     async def _on_event(self, event: dict) -> None:
         if event.get("type") == "message" and event.get("message_type") == "group":
             self._ensure_group(str(event.get("group_openid", "") or ""))
@@ -135,6 +149,7 @@ class WorkerRuntime:
         if self._scheduler_task is not None:
             with suppress(asyncio.CancelledError, Exception):
                 await self._scheduler_task
+        await cancel_background_tasks()
         await self._wait_for_background_tasks()
         await self._browser.close()
         await get_avatar_cache().close()

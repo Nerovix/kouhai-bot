@@ -119,6 +119,7 @@ async def _commit_prepared_editorial(pid: str, prepared: PreparedEditorial) -> b
         )
         return False
     editorial = prepared.editorial
+    source_sha = _editorial_fingerprint(editorial)
     await problems.upsert_editorial_source(
         db,
         pid,
@@ -127,10 +128,12 @@ async def _commit_prepared_editorial(pid: str, prepared: PreparedEditorial) -> b
         sections_json=json.dumps(
             prepared.bundle.get("sections") or [], ensure_ascii=False
         ),
-        source_sha256=_editorial_fingerprint(editorial),
+        source_sha256=source_sha,
         statement_sha256=prepared.statement_sha256,
     )
-    await problems.set_editorial_translation(db, pid, text, "verified")
+    await problems.set_editorial_translation(
+        db, pid, text, "verified", source_sha256=source_sha,
+    )
     return True
 
 

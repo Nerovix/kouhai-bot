@@ -709,27 +709,29 @@ class GroupCoordinator:
             score_req: PendingRequest | None = None
             post_solve: list[PendingRequest] = []
             async with self.lock:
-                if pid in self.scoring_pids:
-                    await asyncio.sleep(0.1)
-                    continue
-                candidates = sorted(self.submit_candidates.get(pid, []), key=lambda item: item.seq)
-                solved = await state.is_problem_solved(db, self.group_openid, pid)
-                for candidate in candidates:
-                    if candidate.submit_score_resolved:
-                        continue
-                    if not candidate.submit_judge_done:
+                busy = pid in self.scoring_pids
+                if not busy:
+                    candidates = sorted(self.submit_candidates.get(pid, []), key=lambda item: item.seq)
+                    solved = await state.is_problem_solved(db, self.group_openid, pid)
+                    for candidate in candidates:
+                        if candidate.submit_score_resolved:
+                            continue
+                        if not candidate.submit_judge_done:
+                            break
+                        if not candidate.submit_correct:
+                            candidate.submit_score_resolved = True
+                            continue
+                        if solved:
+                            candidate.submit_score_resolved = True
+                            post_solve.append(candidate)
+                            continue
+                        candidate.submit_score_resolved = True
+                        self.scoring_pids.add(pid)
+                        score_req = candidate
                         break
-                    if not candidate.submit_correct:
-                        candidate.submit_score_resolved = True
-                        continue
-                    if solved:
-                        candidate.submit_score_resolved = True
-                        post_solve.append(candidate)
-                        continue
-                    candidate.submit_score_resolved = True
-                    self.scoring_pids.add(pid)
-                    score_req = candidate
-                    break
+            if busy:
+                await asyncio.sleep(0.1)
+                continue
 
             for candidate in post_solve:
                 model_tag = (candidate.compute_result or {}).get("model_tag", "")
@@ -987,17 +989,24 @@ async def enqueue_submit_request(ctx: Ctx, submission: str) -> None:
 
 async def enqueue_clarify_request(ctx: Ctx, question: str) -> None:
     coord = _get_coordinator(ctx.group_openid)
-    problem = await state.current_problem(ctx.db, ctx.group_openid)
-    pid = problem.get("today", "") if problem else ""
-    req = PendingRequest(
-        kind="clarify", group_openid=ctx.group_openid, user_openid=ctx.user_openid,
-        message_id=ctx.message_id, command="clarify", nickname=ctx.name,
-        payload=question, target_pid=pid,
-    )
-    await coord.enqueue(req)
+    async with coord.lock:
+        problem = await state.current_problem(ctx.db, ctx.group_openid)
+        pid = problem.get("today", "") if problem else ""
+        req = PendingRequest(
+            kind="clarify", group_openid=ctx.group_openid, user_openid=ctx.user_openid,
+            message_id=ctx.message_id, command="clarify", nickname=ctx.name,
+            payload=question, target_pid=pid,
+        )
+        coord._enqueue_locked(req)
+    await req.done_event.wait()
 
 
-async def enqueue_review_request(ctx: Ctx, question: str, review_pid: str, mentioned_user_ids: list[str] | None = None) -> None:
+async def enqueue_review_request(
+    ctx: Ctx,
+    question: str,
+    pid_resolver: Callable[[], Awaitable[str]],
+    mentioned_user_ids: list[str] | None = None,
+) -> None:
     coord = _get_coordinator(ctx.group_openid)
     seen: set[str] = set()
     mentions = []
@@ -1005,24 +1014,38 @@ async def enqueue_review_request(ctx: Ctx, question: str, review_pid: str, menti
         if uid and uid not in seen and uid != ctx.user_openid:
             seen.add(uid)
             mentions.append(uid)
-    req = PendingRequest(
-        kind="review", group_openid=ctx.group_openid, user_openid=ctx.user_openid,
-        message_id=ctx.message_id, command="review", nickname=ctx.name,
-        payload=question, review_pid=review_pid, review_mentioned_user_ids=mentions,
-        target_pid=review_pid,
-    )
-    await coord.enqueue(req)
+    async with coord.lock:
+        review_pid = await pid_resolver()
+        req = None
+        if review_pid:
+            req = PendingRequest(
+                kind="review", group_openid=ctx.group_openid, user_openid=ctx.user_openid,
+                message_id=ctx.message_id, command="review", nickname=ctx.name,
+                payload=question, review_pid=review_pid, review_mentioned_user_ids=mentions,
+                target_pid=review_pid,
+            )
+            coord._enqueue_locked(req)
+    if req is None:
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid,
+            "还没有已通过的题目可以 review 哦～先做出一道再来聊吧！",
+            msg_id=ctx.message_id,
+        )
+        return
+    await req.done_event.wait()
 
 
 async def enqueue_clear_request(ctx: Ctx) -> None:
     coord = _get_coordinator(ctx.group_openid)
-    problem = await state.current_problem(ctx.db, ctx.group_openid)
-    pid = problem.get("today", "") if problem else ""
-    req = PendingRequest(
-        kind="clear", group_openid=ctx.group_openid, user_openid=ctx.user_openid,
-        message_id=ctx.message_id, command="clear", nickname=ctx.name, target_pid=pid,
-    )
-    await coord.enqueue(req)
+    async with coord.lock:
+        problem = await state.current_problem(ctx.db, ctx.group_openid)
+        pid = problem.get("today", "") if problem else ""
+        req = PendingRequest(
+            kind="clear", group_openid=ctx.group_openid, user_openid=ctx.user_openid,
+            message_id=ctx.message_id, command="clear", nickname=ctx.name, target_pid=pid,
+        )
+        coord._enqueue_locked(req)
+    await req.done_event.wait()
 
 
 async def handle(ctx: Ctx) -> None:

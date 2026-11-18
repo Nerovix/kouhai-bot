@@ -100,7 +100,9 @@ def env(monkeypatch, tmp_path):
         await stop_event.wait()
         calls.append("scheduler_stop")
 
-    fake_db = SimpleNamespace(open=AsyncMock(), close=AsyncMock())
+    fake_db = SimpleNamespace(
+        open=AsyncMock(), close=AsyncMock(), fetch_all=AsyncMock(return_value=[]),
+    )
     tokens = SimpleNamespace(close=AsyncMock())
     rest = SimpleNamespace(close=AsyncMock())
     browser = SimpleNamespace(close=AsyncMock())
@@ -268,6 +270,24 @@ async def test_worker_runtime_run_lifecycle(env):
     env.tokens.close.assert_awaited_once()
     env.fake_db.close.assert_awaited_once()
     env.set_runtime.assert_called_with(None)
+
+
+async def test_seed_groups_resumes_posted_groups(env):
+    runtime = worker.WorkerRuntime()
+    env.fake_db.fetch_all = AsyncMock(
+        return_value=[{"group_openid": "G1"}, {"group_openid": "G2"}]
+    )
+
+    await runtime._seed_groups()
+
+    assert set(runtime._groups) == {"G1", "G2"}
+    env.fake_db.fetch_all.assert_awaited_once_with(
+        "SELECT DISTINCT group_openid FROM group_posts"
+    )
+    await asyncio.wait_for(env.prefetch_started["G1"].wait(), timeout=1)
+    await asyncio.wait_for(env.prefetch_started["G2"].wait(), timeout=1)
+    for services in runtime._groups.values():
+        await services.stop()
 
 
 async def test_worker_runtime_requires_official_credentials(env, monkeypatch):

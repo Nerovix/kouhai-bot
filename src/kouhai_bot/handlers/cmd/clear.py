@@ -16,7 +16,11 @@ logger = logging.getLogger("kouhai-bot.cmd.clear")
 async def handle(ctx: Ctx) -> None:
     stripped = ctx.raw_text.strip()
     if not re.fullmatch(r"/clear(?:\s+)?", stripped):
-        await ctx.sender.react(ctx.group_openid, "👌", msg_id=ctx.message_id)
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid,
+            "用法：/clear（清空自己在当前题目的上下文，后面不用加东西哦）",
+            msg_id=ctx.message_id,
+        )
         return
     await enqueue_clear_request(ctx)
 

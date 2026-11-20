@@ -1,617 +1,480 @@
-"""Tests for /feedback — record dissatisfaction with the AI's latest delivered reply.
+"""/feedback on the official-API + SQLite architecture.
 
-Targeting goes through the per-user last-interaction cache only (survives
-problem switches and /clear; stored history is never scanned as a fallback).
-Reports snapshot the target record verbatim into
-bad_reports.json (group: groups/<gid>/, private: private_judge/bad_reports/)
-and never touch the frozen user_submissions stores.
+Targeting reads the per-user last_interaction cache ONLY (written by the
+coordinator whenever a replied record is persisted): it crosses problem
+switches, survives /clear, and never falls back to scanning stored history.
+Reports are append-only rows in bad_reports with a verbatim record snapshot.
+The 👌 ack is a tiny emoji text message (no official reaction API).
+
+Private-judge feedback coverage is dropped (private judge removed).
 """
 
-import sys, os, json, asyncio
-from contextlib import ExitStack
+from __future__ import annotations
+
+import asyncio
+import json
 from types import SimpleNamespace
-from unittest.mock import patch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+import pytest
 
+from kouhai_bot.config import BotConfig
+from kouhai_bot.db import set_database
+from kouhai_bot.db.repos import feedback, posts, problems, submissions
+from kouhai_bot.handlers import process_event
+from kouhai_bot.handlers.cmd import clear as clear_cmd
 from kouhai_bot.handlers.cmd import feedback as feedback_cmd
-from kouhai_bot.handlers.cmd.submit import PendingRequest, _get_coordinator
-from kouhai_bot.handlers.shared import (
-    append_bad_report,
-    load_bad_reports,
-    load_group_last_interaction,
-    remember_group_last_interaction,
-)
-from kouhai_bot.private_judge import (
-    append_private_bad_report,
-    load_private_bad_reports,
-    load_private_last_interaction,
-    remember_private_last_interaction,
-)
+from kouhai_bot.handlers.cmd import submit as submit_cmd
+from kouhai_bot.handlers.context import Ctx
+from kouhai_bot.handlers.runtime import Runtime, set_runtime
+from kouhai_bot.llm import ChatCompletionResult
+from kouhai_bot.official import OfficialSender, ReplyBudget
+from kouhai_bot.problem_content import statement_fingerprint
 
-GID = 999999
-UID = 42
+G = "GROUP1"
+U = "USER1"
 PID = "542D"
-OTHER_PID = "100A"
+PID2 = "543E"
+TAG = "🐳"
 
-_sent: list[dict] = []
-_reacted: list[tuple] = []
-_private_sent: list[dict] = []
-
-
-async def _mock_send_group(group_id, message):
-    _sent.append({"group_id": group_id, "message": message})
-    return True
+EMPTY_CACHE_MSG = (
+    "这边还没有可以标注的 AI 回复哦～先 /sbm、/clrf 或 /rv 一次，"
+    "收到回复后再来 /fb 吧。"
+)
 
 
-async def _mock_react(message_id, emoji_id):
-    _reacted.append((message_id, emoji_id))
+# ── infrastructure ──────────────────────────────────────────────────────
 
 
-async def _mock_send_private(user_id, message):
-    _private_sent.append({"user_id": user_id, "message": message})
-    return 1000 + len(_private_sent)
+class FakeRest:
+    def __init__(self):
+        self.sent: list[tuple[str, dict]] = []
+
+    async def send_group_message(self, group_openid, payload):
+        self.sent.append((group_openid, payload))
+        return {"id": f"M{len(self.sent)}"}
+
+    async def upload_group_media(self, group_openid, payload):
+        raise AssertionError("feedback tests must not upload media")
 
 
-def _reset_captures():
-    _sent.clear()
-    _reacted.clear()
-    _private_sent.clear()
+@pytest.fixture
+async def env(db, tmp_path, monkeypatch):
+    cfg = BotConfig(data_dir=str(tmp_path))
+    monkeypatch.setattr("kouhai_bot.config._config", cfg)
+    rest = FakeRest()
+    sender = OfficialSender(rest, ReplyBudget(db), bot_name="算法助手")
+    set_runtime(Runtime(db=db, sender=sender, browser=None))
+    set_database(db)
+
+    async def _no_render(*args, **kwargs):
+        raise RuntimeError("render disabled in tests")
+
+    monkeypatch.setattr(
+        "kouhai_bot.render.forward_card.render_card_png", _no_render
+    )
+    monkeypatch.setattr(
+        "kouhai_bot.handlers.cmd.submit.schedule_post_solve_editorial_followup",
+        lambda group, pid: None,
+    )
+    return SimpleNamespace(db=db, rest=rest, sender=sender, cfg=cfg)
 
 
-def _patches(tmp_path):
-    """Patch config paths + the send/react bindings feedback.py resolves at import."""
-    cfg = SimpleNamespace(data_dir=str(tmp_path))
-    return [
-        patch("kouhai_bot.handlers.shared.get_config", return_value=cfg),
-        patch("kouhai_bot.private_judge.get_config", return_value=cfg),
-        patch.object(feedback_cmd, "send_group_msg", _mock_send_group),
-        patch.object(feedback_cmd, "send_private_msg", _mock_send_private),
-        patch.object(feedback_cmd, "react_emoji", _mock_react),
-    ]
+_msg_counter = 0
 
 
-def _group_event(text="/feedback", message_id="msg_001"):
-    return {
-        "type": "message",
-        "message_type": "group",
-        "group_id": GID,
-        "user_id": UID,
-        "sender": {"nickname": "Alice", "card": ""},
-        "message_id": message_id,
-        "raw_message": text,
-        "message": [{"type": "text", "data": {"text": text}}],
-    }
+def make_ctx(raw_text: str, *, user: str = U, group: str = G) -> Ctx:
+    global _msg_counter
+    _msg_counter += 1
+    return Ctx(
+        group_openid=group,
+        user_openid=user,
+        message_id=f"msg-{_msg_counter}",
+        raw_text=raw_text,
+    )
 
 
-def _private_event(text="/feedback", message_id="priv_001"):
-    return {
-        "type": "message",
-        "message_type": "private",
-        "group_id": GID,
-        "user_id": UID,
-        "sender": {"nickname": "Alice", "card": ""},
-        "message_id": message_id,
-        "raw_message": text,
-        "message": [{"type": "text", "data": {"text": text}}],
-    }
+def sent_texts(rest: FakeRest) -> list[str]:
+    out = []
+    for _g, payload in rest.sent:
+        if payload["msg_type"] == 0:
+            out.append(payload["content"])
+        elif payload["msg_type"] == 2:
+            out.append(payload["markdown"]["content"])
+        else:
+            out.append(f"<media:{payload['media']['file_info']}>")
+    return out
 
 
-def _kwargs(event):
-    return {
-        "group_id": event["group_id"],
-        "user_id": event["user_id"],
-        "sender": event["sender"],
-        "message_id": event["message_id"],
-        "raw_text": event["raw_message"],
-        "segments": event["message"],
-        "event": event,
-    }
+def at_tag(user: str = U) -> str:
+    return f'<qqbot-at-user id="{user}"/>'
 
 
-def _last_group_text() -> str:
-    if not _sent:
-        return ""
-    msg = _sent[-1]["message"]
-    if isinstance(msg, list):
-        return " ".join(
-            seg.get("data", {}).get("text", "")
-            for seg in msg if isinstance(seg, dict) and seg.get("type") == "text"
+def verdict(correct: bool, *, reason: str = "", reply: str = "", reaction: str = "") -> dict:
+    return {"correct": correct, "reason": reason, "reply": reply, "reaction": reaction}
+
+
+def mock_judge(monkeypatch, verdict_dict: dict, *, tag: str = TAG, failure_kind=None):
+    async def _judge(problem_text, submission, history=None, problem_rating=None):
+        return ChatCompletionResult(
+            text=json.dumps(verdict_dict, ensure_ascii=False),
+            model_tag=tag,
+            failure_kind=failure_kind,
         )
-    return str(msg)
+
+    monkeypatch.setattr(
+        "kouhai_bot.handlers.cmd.submit.judge_submission_result", _judge
+    )
 
 
-def _last_private_text() -> str:
-    if not _private_sent:
-        return ""
-    msg = _private_sent[-1]["message"]
-    if isinstance(msg, list):
-        return " ".join(
-            seg.get("data", {}).get("text", "")
-            for seg in msg if isinstance(seg, dict) and seg.get("type") == "text"
-        )
-    return str(msg)
+def mock_chat(monkeypatch, text: str, *, tag: str = TAG):
+    async def _chat(messages, **kwargs):
+        return ChatCompletionResult(text=text, model_tag=tag)
+
+    monkeypatch.setattr(
+        "kouhai_bot.handlers.cmd.submit.call_chat_completion_result", _chat
+    )
 
 
-def _record(ts, *, type_="submit", result="", reply="", reason="", pid=PID,
-            request_id="", model_tag="", content="用户内容"):
-    record = {
-        "timestamp": ts,
-        "type": type_,
-        "content": content,
-        "result": result,
-        "reason": reason,
-        "reply": reply,
-        "problem": pid,
+async def seed_problem(db, pid: str = PID, *, group: str = G) -> None:
+    stmt = {
+        "name": "Test Problem",
+        "description": "Given n, compute the answer.",
+        "input": "One integer n.",
+        "output": "The answer.",
+        "samples": [{"input": "1\n", "output": "2\n"}],
+        "time_limit": "2 seconds",
+        "memory_limit": "256 megabytes",
     }
-    if request_id:
-        record["request_id"] = request_id
-    if model_tag:
-        record["model_tag"] = model_tag
-    return record
-
-
-def _seed_group_cache(tmp_path, record, user_id=UID):
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        remember_group_last_interaction(GID, user_id, record)
-
-
-def _seed_private_cache(tmp_path, record):
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        remember_private_last_interaction(UID, record)
-
-
-def _write_group_state(tmp_path, pid=PID):
-    d = tmp_path / "groups" / str(GID)
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "state.json").write_text(json.dumps({"today": pid}), encoding="utf-8")
-
-
-def _write_scoreboard(tmp_path, records, user_id=UID):
-    d = tmp_path / "groups" / str(GID)
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "scoreboard.json").write_text(
-        json.dumps({"solves": [], "user_submissions": {str(user_id): records}},
-                   ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    await problems.upsert_problem(
+        db, pid,
+        contest_id=542, idx="D", name="Test Problem", rating=2300,
+        tags=["dp"],
+        statement_sha256=statement_fingerprint(stmt),
+        statement_json=json.dumps(stmt, ensure_ascii=False),
+    )
+    await posts.post_problem(
+        db, group, pid, posted_at=1700000000,
+        card_json=json.dumps({"post_msg": "新题", "sample_messages": []}),
     )
 
 
-def _group_reports_path(tmp_path):
-    return tmp_path / "groups" / str(GID) / "bad_reports.json"
+async def wait_for(predicate, timeout: float = 5.0):
+    async def _loop():
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_loop(), timeout)
 
 
-def _group_cache_path(tmp_path):
-    return tmp_path / "groups" / str(GID) / "last_interaction.json"
+async def do_incorrect_submit(env, monkeypatch, *, content: str = "我的做法", pid: str = PID):
+    await seed_problem(env.db, pid)
+    mock_judge(monkeypatch, verdict(False, reason="复杂度不对"))
+    await submit_cmd.handle(make_ctx(f"/submit {content}"))
 
 
-def _private_reports_path(tmp_path):
-    return tmp_path / "private_judge" / "bad_reports" / f"{UID}.json"
+# ── targeting: empty cache / syntax ─────────────────────────────────────
 
 
-def _private_cache_path(tmp_path):
-    return tmp_path / "private_judge" / "last_interaction" / f"{UID}.json"
+async def test_feedback_empty_cache_friendly_message(env):
+    ctx = make_ctx("/feedback 不太行")
+    await feedback_cmd.handle(ctx)
+    assert sent_texts(env.rest) == [f"{at_tag()} {EMPTY_CACHE_MSG}"]
+    assert await feedback.load_bad_reports(env.db, G) == []
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# bad_reports storage
-# ═══════════════════════════════════════════════════════════════════════
-
-def test_append_bad_report_assigns_incrementing_ids_and_shape(tmp_path):
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        first = append_bad_report(GID, {"scope": "group", "note": ""})
-        second = append_bad_report(GID, {"scope": "group", "note": "第二条"})
-    assert (first, second) == (1, 2)
-    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
-    assert data["version"] == 1
-    assert [r["id"] for r in data["reports"]] == [1, 2]
-    assert data["reports"][1]["note"] == "第二条"
+async def test_feedback_bad_syntax_shows_usage(env):
+    await feedback_cmd.handle(make_ctx("/feedbackx 备注"))
+    assert sent_texts(env.rest) == [f"{at_tag()} 用法：/fb [简短备注]～"]
+    assert await feedback.load_bad_reports(env.db, G) == []
 
 
-def test_append_bad_report_does_not_touch_scoreboard(tmp_path):
-    _write_scoreboard(tmp_path, [_record("2026-09-11T20:00:00+08:00", result="correct")])
-    before = (tmp_path / "groups" / str(GID) / "scoreboard.json").read_text(encoding="utf-8")
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        append_bad_report(GID, {"scope": "group", "note": ""})
-    after = (tmp_path / "groups" / str(GID) / "scoreboard.json").read_text(encoding="utf-8")
-    assert before == after
+async def test_feedback_without_note_is_allowed(env, monkeypatch):
+    await do_incorrect_submit(env, monkeypatch)
+    await feedback_cmd.handle(make_ctx("/feedback"))
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} 👌"
+    reports = await feedback.load_bad_reports(env.db, G)
+    assert len(reports) == 1 and reports[0]["note"] == ""
 
 
-def test_append_private_bad_report_shape_and_state_untouched(tmp_path):
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        from kouhai_bot.private_judge import save_private_submission
-        save_private_submission(UID, {"request_id": "a", "result": "correct", "problem": PID})
-        state_before = (tmp_path / "private_judge" / "users" / f"{UID}.json").read_text(encoding="utf-8")
-        report_id = append_private_bad_report(UID, {"scope": "private", "note": "判错了"})
-        loaded = load_private_bad_reports(UID)
-    assert report_id == 1
-    assert loaded["reports"][0]["note"] == "判错了"
-    state_after = (tmp_path / "private_judge" / "users" / f"{UID}.json").read_text(encoding="utf-8")
-    assert state_after == state_before
+async def test_feedback_cache_only_never_scans_history(env):
+    # A replied record exists in storage but the cache was never written:
+    # /feedback must NOT fall back to scanning history.
+    await submissions.save_submission(env.db, {
+        "group_openid": G, "user_openid": U, "pid": PID,
+        "type": "submit", "content": "旧做法", "result": "incorrect",
+        "reason": "旧判定", "reply": "", "request_id": "manual-1",
+    })
+    await feedback_cmd.handle(make_ctx("/feedback"))
+    assert sent_texts(env.rest) == [f"{at_tag()} {EMPTY_CACHE_MSG}"]
+    assert await feedback.load_bad_reports(env.db, G) == []
 
 
-def test_load_bad_reports_missing_file_returns_empty(tmp_path):
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        data = load_bad_reports(GID)
-    assert data == {"version": 1, "reports": []}
+# ── report content ──────────────────────────────────────────────────────
 
 
-def test_bad_reports_without_reports_key_are_repaired_by_append(tmp_path):
-    """An operator-created {} file must not permanently brick /feedback."""
-    path = tmp_path / "groups" / str(GID) / "bad_reports.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"version": 1}), encoding="utf-8")
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        report_id = append_bad_report(GID, {"scope": "group", "note": "修复形状"})
-        data = load_bad_reports(GID)
-    assert report_id == 1
-    assert [r["note"] for r in data["reports"]] == ["修复形状"]
+async def test_feedback_after_submit_snapshots_verbatim(env, monkeypatch):
+    await do_incorrect_submit(env, monkeypatch)
+    cached = await feedback.get_last_interaction(env.db, G, U)
+    assert cached["result"] == "incorrect"
 
+    ctx = make_ctx("/feedback 复杂度分析说错了")
+    await feedback_cmd.handle(ctx)
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} 👌"
 
-def test_corrupt_bad_reports_raise_and_are_not_overwritten(tmp_path):
-    _write_group_state(tmp_path)
-    corrupt = tmp_path / "groups" / str(GID) / "bad_reports.json"
-    corrupt.write_text("{not json", encoding="utf-8")
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        for fn in (load_bad_reports, append_bad_report):
-            try:
-                fn(GID) if fn is load_bad_reports else fn(GID, {"scope": "group", "note": ""})
-                raised = False
-            except ValueError:
-                raised = True
-            assert raised
-    assert corrupt.read_text(encoding="utf-8") == "{not json"
-
-
-def test_atomic_write_leaves_no_tmp_files(tmp_path):
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        append_bad_report(GID, {"scope": "group", "note": ""})
-        append_private_bad_report(UID, {"scope": "private", "note": ""})
-    leftovers = list(tmp_path.rglob("*.tmp*"))
-    assert not leftovers, leftovers
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# last-interaction cache helpers
-# ═══════════════════════════════════════════════════════════════════════
-
-def test_group_last_interaction_is_per_user(tmp_path):
-    record_a = _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="A")
-    record_b = _record("2026-09-11T20:01:03+08:00", type_="submit", result="correct", reply="B")
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        remember_group_last_interaction(GID, 1, record_a)
-        remember_group_last_interaction(GID, 2, record_b)
-        entry_1 = load_group_last_interaction(GID, 1)
-        entry_2 = load_group_last_interaction(GID, 2)
-    assert entry_1["record"]["reply"] == "A"
-    assert entry_2["record"]["reply"] == "B"
-
-
-def test_corrupt_last_interaction_cache_reads_as_missing(tmp_path):
-    _group_cache_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
-    _group_cache_path(tmp_path).write_text("{not json", encoding="utf-8")
-    _private_cache_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
-    _private_cache_path(tmp_path).write_text("[1,2]", encoding="utf-8")
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        assert load_group_last_interaction(GID, UID) is None
-        assert load_private_last_interaction(UID) is None
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# _save_context_record hook
-# ═══════════════════════════════════════════════════════════════════════
-
-def _pending_req(*, scope="group", seq=1, command="clarify"):
-    return PendingRequest(
-        kind=command, group_id=GID, user_id=UID,
-        sender={"nickname": "Alice"}, message_id="msg_001", command=command,
-        nickname="Alice", scope=scope, payload="问题", target_pid=PID, seq=seq,
-    )
-
-
-def test_save_context_record_updates_cache_for_replied_results(tmp_path):
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-
-        async def _scenario():
-            coord = _get_coordinator(GID)
-            replied = _record("2026-09-11T20:00:03+08:00", type_="clarify",
-                              result="clarify", reply="J(x) 是…", request_id="local-1")
-            await coord._save_context_record(_pending_req(), replied)
-            pending = _record("2026-09-11T20:00:04+08:00", type_="submit",
-                              result="pending", request_id="local-2")
-            await coord._save_context_record(_pending_req(seq=2, command="submit"), pending)
-            private_rec = _record("2026-09-11T20:00:05+08:00", type_="review",
-                                  result="review", reply="复盘…", request_id="local-3")
-            await coord._save_context_record(_pending_req(scope="private"), private_rec)
-
-        asyncio.run(_scenario())
-        group_cached = load_group_last_interaction(GID, UID)
-        private_cached = load_private_last_interaction(UID)
-    assert group_cached["record"]["request_id"] == "local-1"  # pending write did not replace it
-    assert private_cached["record"]["request_id"] == "local-3"
-
-
-def test_save_context_record_cache_respects_clear_watermark(tmp_path):
-    """A request finalized after /clear must not resurrect a cache entry."""
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-
-        async def _scenario():
-            coord = _get_coordinator(GID)
-            coord.clear_watermarks[("group", GID, UID, PID)] = 5
-            replied = _record("2026-09-11T20:00:03+08:00", type_="clarify",
-                              result="clarify", reply="…", request_id="local-1")
-            return await coord._save_context_record(_pending_req(seq=1), replied)
-
-        ok = asyncio.run(_scenario())
-        cached = load_group_last_interaction(GID, UID)
-    assert ok is False
-    assert cached is None
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Handler — group scope
-# ═══════════════════════════════════════════════════════════════════════
-
-def test_feedback_group_marks_cached_record_verbatim(tmp_path):
-    _reset_captures()
-    _write_group_state(tmp_path)
-    record = _record(
-        "2026-09-11T20:00:04+08:00", type_="submit", result="incorrect",
-        reply="", reason="复杂度分析说 O(2^n)", request_id="local-4",
-        model_tag="deepseek-v4-pro", content="我 submission 的内容",
-    )
-    _seed_group_cache(tmp_path, record)
-    _write_scoreboard(tmp_path, [
-        _record("2026-09-11T20:00:01+08:00", type_="submit", result="pending", request_id="local-1"),
-    ])
-    scoreboard_before = (tmp_path / "groups" / str(GID) / "scoreboard.json").read_text(encoding="utf-8")
-
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback 判错了吧"))))
-
-    assert _reacted == [("msg_001", "128076")], _reacted
-    assert not _sent, _sent  # success ack in group is react-only
-    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
-    assert len(data["reports"]) == 1
-    report = data["reports"][0]
+    reports = await feedback.load_bad_reports(env.db, G)
+    assert len(reports) == 1
+    report = reports[0]
+    assert report["id"] == 1
     assert report["scope"] == "group"
-    assert report["note"] == "判错了吧"
-    assert report["cmd_message_id"] == "msg_001"
+    assert report["group_openid"] == G
+    assert report["user_openid"] == U
+    assert report["note"] == "复杂度分析说错了"
+    assert report["cmd_message_id"] == ctx.message_id
+    assert report["reported_at"]
+    assert report["target"] == {"problem": PID, "record": cached}
+    # verbatim snapshot keeps the dedicated model_tag + request_id fields
+    assert report["target"]["record"]["model_tag"] == TAG
+    assert report["target"]["record"]["request_id"] == cached["request_id"]
+    assert report["target"]["record"]["reason"] == "复杂度不对"
+
+
+async def test_feedback_repeat_appends_new_entry(env, monkeypatch):
+    await do_incorrect_submit(env, monkeypatch)
+    await feedback_cmd.handle(make_ctx("/feedback 第一次"))
+    await feedback_cmd.handle(make_ctx("/feedback 第二次"))
+    reports = await feedback.load_bad_reports(env.db, G)
+    assert [r["id"] for r in reports] == [1, 2]
+    assert [r["note"] for r in reports] == ["第一次", "第二次"]
+    assert reports[0]["target"] == reports[1]["target"]
+
+
+async def test_feedback_note_stripped_and_capped(env, monkeypatch):
+    await do_incorrect_submit(env, monkeypatch)
+    await feedback_cmd.handle(make_ctx("/feedback  " + "备" * 600 + "  "))
+    report = (await feedback.load_bad_reports(env.db, G))[0]
+    assert report["note"] == "备" * 500
+
+
+async def test_feedback_correct_reply_markable(env, monkeypatch):
+    await seed_problem(env.db)
+    mock_judge(monkeypatch, verdict(True, reason="做法正确"))
+    await submit_cmd.handle(make_ctx("/submit 贪心即可"))
+    await feedback_cmd.handle(make_ctx("/feedback 判得太松"))
+    report = (await feedback.load_bad_reports(env.db, G))[0]
+    assert report["target"]["record"]["result"] == "correct"
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} 👌"
+
+
+async def test_feedback_failure_notice_markable(env, monkeypatch):
+    await seed_problem(env.db)
+
+    async def _judge(problem_text, submission, history=None, problem_rating=None):
+        # failure_kind only applies when the provider returned no text
+        return ChatCompletionResult(text="", failure_kind="timeout")
+
+    monkeypatch.setattr("kouhai_bot.handlers.cmd.submit.judge_submission_result", _judge)
+    await submit_cmd.handle(make_ctx("/submit 做法"))
+    assert "模型服务出故障了" in sent_texts(env.rest)[-1]
+    await feedback_cmd.handle(make_ctx("/feedback 一直超时"))
+    report = (await feedback.load_bad_reports(env.db, G))[0]
+    assert report["target"]["record"]["result"] == "timeout"
+
+
+async def test_feedback_clarify_reply_markable(env, monkeypatch):
+    await seed_problem(env.db)
+    mock_chat(monkeypatch, json.dumps({"reply": "可以这样理解题意", "reaction": ""}))
+    from kouhai_bot.handlers.cmd import clarify as clarify_cmd
+
+    await clarify_cmd.handle(make_ctx("/clarify 这句话什么意思"))
+    await feedback_cmd.handle(make_ctx("/feedback 没讲清楚"))
+    report = (await feedback.load_bad_reports(env.db, G))[0]
+    assert report["target"]["record"]["result"] == "clarify"
+    assert report["target"]["record"]["reply"] == "可以这样理解题意"
+
+
+# ── targeting across problem switches and /clear ────────────────────────
+
+
+async def test_feedback_targets_latest_reply_across_problem_switch(env, monkeypatch):
+    await do_incorrect_submit(env, monkeypatch, pid=PID)
+    # a new problem is posted and answered; the cache must follow it
+    await seed_problem(env.db, PID2)
+    mock_chat(monkeypatch, json.dumps({"reply": "新题的解释", "reaction": ""}))
+    from kouhai_bot.handlers.cmd import clarify as clarify_cmd
+
+    await clarify_cmd.handle(make_ctx("/clarify 新题疑问"))
+    await feedback_cmd.handle(make_ctx("/feedback"))
+    report = (await feedback.load_bad_reports(env.db, G))[0]
+    assert report["target"]["problem"] == PID2
+    assert report["target"]["record"]["result"] == "clarify"
+
+
+async def test_feedback_survives_clear(env, monkeypatch):
+    await do_incorrect_submit(env, monkeypatch)
+    await clear_cmd.handle(make_ctx("/clear"))
+    assert await submissions.get_user_problem_submissions(env.db, G, U, PID) == []
+    # the cache is deliberately untouched by /clear
+    await feedback_cmd.handle(make_ctx("/feedback 清空了也要标"))
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} 👌"
+    report = (await feedback.load_bad_reports(env.db, G))[0]
     assert report["target"]["problem"] == PID
-    assert report["target"]["record"] == record  # verbatim snapshot
-    assert (tmp_path / "groups" / str(GID) / "scoreboard.json").read_text(encoding="utf-8") == scoreboard_before
+    assert report["target"]["record"]["result"] == "incorrect"
 
 
-def test_feedback_group_crosses_problem_switch(tmp_path):
-    """刷新题后仍可标注上一题的回复。"""
-    _reset_captures()
-    _write_group_state(tmp_path, pid=OTHER_PID)  # problem already refreshed
-    record = _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify",
-                     reply="旧题的回复", pid=PID, request_id="local-1")
-    _seed_group_cache(tmp_path, record)
-
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback 刷题前的回复"))))
-
-    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
-    assert data["reports"][0]["target"]["problem"] == PID
-    assert data["reports"][0]["target"]["record"]["reply"] == "旧题的回复"
+# ── pending / superseded / offtopic are unmarkable ──────────────────────
 
 
-def test_feedback_group_survives_clear(tmp_path):
-    """/clear 只清 history，不清 last-interaction 缓存。"""
-    _reset_captures()
-    _write_group_state(tmp_path)
-    record = _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify",
-                     reply="clear 前的回复", request_id="local-1")
-    _seed_group_cache(tmp_path, record)
-    # /clear wiped the history: scoreboard has nothing for this user anymore.
-    _write_scoreboard(tmp_path, [])
+async def test_feedback_pending_submit_unmarkable(env, monkeypatch):
+    await seed_problem(env.db)
+    started = asyncio.Event()
+    release = asyncio.Event()
 
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback"))))
+    async def _judge(problem_text, submission, history=None, problem_rating=None):
+        started.set()
+        await release.wait()
+        return ChatCompletionResult(text=json.dumps(verdict(False, reason="不对")))
 
-    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
-    assert data["reports"][0]["target"]["record"]["reply"] == "clear 前的回复"
+    monkeypatch.setattr("kouhai_bot.handlers.cmd.submit.judge_submission_result", _judge)
+    task = asyncio.create_task(submit_cmd.handle(make_ctx("/submit 慢慢想")))
+    await asyncio.wait_for(started.wait(), 5)
 
+    async def _pending_saved():
+        while True:
+            records = await submissions.get_user_problem_submissions(env.db, G, U, PID)
+            if records:
+                return records
+            await asyncio.sleep(0.01)
 
-def test_feedback_group_marks_delivered_failure_notice(tmp_path):
-    """A timeout that delivered '模型服务出故障了' is a markable latest reply."""
-    _reset_captures()
-    _write_group_state(tmp_path)
-    _seed_group_cache(tmp_path, _record(
-        "2026-09-11T20:00:02+08:00", type_="submit", result="timeout", request_id="local-2",
-    ))
+    # pending record archived, nothing delivered yet → nothing markable
+    records = await asyncio.wait_for(_pending_saved(), 5)
+    assert records[0]["result"] == "pending"
+    await feedback_cmd.handle(make_ctx("/feedback"))
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} {EMPTY_CACHE_MSG}"
+    assert await feedback.load_bad_reports(env.db, G) == []
 
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback 超时了"))))
-
-    assert _reacted == [("msg_001", "128076")], _reacted
-    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
-    assert data["reports"][0]["note"] == "超时了"
-    assert data["reports"][0]["target"]["record"]["result"] == "timeout"
-
-
-def test_feedback_group_no_target_without_cache(tmp_path):
-    """Cache-only targeting: stored history alone (e.g. replies that predate
-    the cache) is deliberately NOT consulted — no cache entry, nothing to mark."""
-    _reset_captures()
-    _write_group_state(tmp_path)
-    _write_scoreboard(tmp_path, [
-        _record("2026-09-11T20:00:01+08:00", type_="submit", result="pending", request_id="local-1"),
-        _record("2026-09-11T20:00:02+08:00", type_="submit", result="superseded", request_id="local-2"),
-        _record("2026-09-11T20:00:03+08:00", type_="clarify", result="clarify",
-                reply="历史里的回复", request_id="local-3"),
-    ])
-
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback"))))
-
-    assert "还没有可以标注的 AI 回复" in _last_group_text(), _sent
-    assert not _group_reports_path(tmp_path).exists()
-    assert not _reacted
+    release.set()
+    await asyncio.wait_for(task, 5)
+    # once the reply is delivered the same record becomes markable
+    await feedback_cmd.handle(make_ctx("/feedback 现在可以了"))
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} 👌"
+    report = (await feedback.load_bad_reports(env.db, G))[0]
+    assert report["target"]["record"]["result"] == "incorrect"
 
 
-def test_feedback_group_repeat_appends_new_report(tmp_path):
-    _reset_captures()
-    _seed_group_cache(tmp_path, _record(
-        "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…",
-    ))
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback"))))
-        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback 补充：说错了", message_id="msg_002"))))
-    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
-    assert [r["id"] for r in data["reports"]] == [1, 2]
-    assert data["reports"][0]["note"] == ""
-    assert data["reports"][1]["note"] == "补充：说错了"
-    assert data["reports"][1]["cmd_message_id"] == "msg_002"
+async def test_feedback_superseded_submit_unmarkable(env, monkeypatch):
+    await seed_problem(env.db)
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    second_release = asyncio.Event()
+
+    async def _judge(problem_text, submission, history=None, problem_rating=None):
+        if submission == "第一版":
+            first_started.set()
+            await asyncio.Event().wait()  # cancelled by supersede
+        second_started.set()
+        await second_release.wait()
+        return ChatCompletionResult(text=json.dumps(verdict(False, reason="第二版判定")))
+
+    monkeypatch.setattr("kouhai_bot.handlers.cmd.submit.judge_submission_result", _judge)
+    task1 = asyncio.create_task(submit_cmd.handle(make_ctx("/submit 第一版")))
+    await asyncio.wait_for(first_started.wait(), 5)
+    task2 = asyncio.create_task(submit_cmd.handle(make_ctx("/submit 第二版")))
+    await asyncio.wait_for(second_started.wait(), 5)
+    await asyncio.wait_for(task1, 5)
+
+    records = await submissions.get_user_problem_submissions(env.db, G, U, PID)
+    by_content = {r["content"]: r for r in records}
+    assert by_content["第一版"]["result"] == "superseded"
+    assert by_content["第二版"]["result"] == "pending"
+    # neither record has delivered a reply → cache still empty
+    await feedback_cmd.handle(make_ctx("/feedback"))
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} {EMPTY_CACHE_MSG}"
+
+    second_release.set()
+    await asyncio.wait_for(task2, 5)
+    await feedback_cmd.handle(make_ctx("/feedback"))
+    report = (await feedback.load_bad_reports(env.db, G))[0]
+    assert report["target"]["record"]["content"] == "第二版"
+    assert report["target"]["record"]["request_id"] == by_content["第二版"]["request_id"]
 
 
-def test_feedback_group_concurrent_reports_get_sequential_ids(tmp_path):
-    """Two in-flight /feedback must not interleave the read-modify-write of bad_reports.json."""
-    _reset_captures()
-    _seed_group_cache(tmp_path, _record(
-        "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…",
-    ))
-
-    async def _run_two():
-        await asyncio.gather(
-            feedback_cmd.handle(**_kwargs(_group_event("/feedback 第一条"))),
-            feedback_cmd.handle(**_kwargs(_group_event("/feedback 第二条", message_id="msg_002"))),
-        )
-
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(_run_two())
-
-    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
-    assert sorted(r["id"] for r in data["reports"]) == [1, 2]
-    assert {r["note"] for r in data["reports"]} == {"第一条", "第二条"}
-    assert len(_reacted) == 2
+async def test_feedback_offtopic_leaves_nothing_markable(env, monkeypatch):
+    await seed_problem(env.db)
+    mock_judge(monkeypatch, verdict(False, reaction="123"))
+    await submit_cmd.handle(make_ctx("/submit 无关内容"))
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} 🙅"
+    assert await submissions.get_user_problem_submissions(env.db, G, U, PID) == []
+    assert await feedback.get_last_interaction(env.db, G, U) is None
+    await feedback_cmd.handle(make_ctx("/feedback"))
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} {EMPTY_CACHE_MSG}"
 
 
-def test_feedback_group_corrupt_store_shows_failure(tmp_path):
-    _reset_captures()
-    _seed_group_cache(tmp_path, _record(
-        "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…",
-    ))
-    _group_reports_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
-    _group_reports_path(tmp_path).write_text("{not json", encoding="utf-8")
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback"))))
-    assert "记录反馈失败了" in _last_group_text(), _sent
-    assert not _reacted
-    assert _group_reports_path(tmp_path).read_text(encoding="utf-8") == "{not json"
+# ── corruption semantics ────────────────────────────────────────────────
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Handler — private scope
-# ═══════════════════════════════════════════════════════════════════════
-
-def test_feedback_private_marks_cached_record(tmp_path):
-    _reset_captures()
-    _seed_private_cache(tmp_path, _record(
-        "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify",
-        reply="J(x) 是特殊因子和…", request_id="local-3", model_tag="deepseek-v4-flash",
-    ))
-
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(feedback_cmd.handle(**_kwargs(_private_event("/feedback 不对"))))
-
-    assert "收到～" in _last_private_text(), _private_sent  # clear-style private reaction fallback
-    data = json.loads(_private_reports_path(tmp_path).read_text(encoding="utf-8"))
-    assert len(data["reports"]) == 1
-    report = data["reports"][0]
-    assert report["scope"] == "private"
-    assert report["group_id"] == GID  # dispatcher rewrites private group_id to current_group
-    assert report["note"] == "不对"
-    assert report["target"]["record"]["request_id"] == "local-3"
+async def test_feedback_corrupt_cache_reads_as_empty(env, monkeypatch):
+    await do_incorrect_submit(env, monkeypatch)
+    await env.db.execute(
+        "UPDATE last_interaction SET record_json='{bad json' "
+        "WHERE scope='group' AND group_openid=? AND user_openid=?",
+        (G, U),
+    )
+    assert await feedback.get_last_interaction(env.db, G, U) is None
+    await feedback_cmd.handle(make_ctx("/feedback"))
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} {EMPTY_CACHE_MSG}"
 
 
-def test_feedback_private_no_target(tmp_path):
-    _reset_captures()
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(feedback_cmd.handle(**_kwargs(_private_event("/feedback"))))
-    assert "还没有可以标注的 AI 回复" in _last_private_text(), _private_sent
-    assert not _private_reports_path(tmp_path).exists()
+async def test_corrupt_report_store_raises_but_append_still_works(env):
+    rid = await feedback.append_bad_report(
+        env.db, group_openid=G, user_openid=U, note="好报告",
+        cmd_message_id="m1", target_pid=PID, target_record={"result": "incorrect"},
+    )
+    assert rid == 1
+    await env.db.execute(
+        "UPDATE bad_reports SET target_record_json='{bad json' WHERE id=1"
+    )
+    with pytest.raises(json.JSONDecodeError):
+        await feedback.load_bad_reports(env.db, G)
+    # append-only writes never read the store, so a new report still lands
+    rid2 = await feedback.append_bad_report(
+        env.db, group_openid=G, user_openid=U, note="再来",
+        cmd_message_id="m2", target_pid=PID, target_record={"result": "clarify"},
+    )
+    assert rid2 == 2
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Note parsing
-# ═══════════════════════════════════════════════════════════════════════
+async def test_feedback_append_failure_sends_admin_message(env, monkeypatch):
+    await do_incorrect_submit(env, monkeypatch)
 
-def test_feedback_note_parsing_and_truncation(tmp_path):
-    _reset_captures()
-    long_note = "长" * 600
-    _seed_group_cache(tmp_path, _record(
-        "2026-09-11T20:00:03+08:00", type_="clarify", result="clarify", reply="…",
-    ))
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback"))))
-        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/feedback   多余空白  ", message_id="msg_002"))))
-        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event(f"/feedback {long_note}", message_id="msg_003"))))
-    data = json.loads(_group_reports_path(tmp_path).read_text(encoding="utf-8"))
-    notes = [r["note"] for r in data["reports"]]
-    assert notes[0] == ""
-    assert notes[1] == "多余空白"
-    assert notes[2] == "长" * 500
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(
+        "kouhai_bot.db.repos.feedback.append_bad_report", _boom
+    )
+    await feedback_cmd.handle(make_ctx("/feedback"))
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} 记录反馈失败了，联系一下管理员帮帮忙吧～"
 
 
-def test_feedback_usage_error_both_scopes(tmp_path):
-    _reset_captures()
-    with ExitStack() as stack:
-        for p in _patches(tmp_path):
-            stack.enter_context(p)
-        asyncio.run(feedback_cmd.handle(**_kwargs(_group_event("/BAD 大写"))))
-        asyncio.run(feedback_cmd.handle(**_kwargs(_private_event("/feedback!"))))
-    assert "用法：/feedback" in _last_group_text(), _sent
-    assert not _group_reports_path(tmp_path).exists()
-    assert "用法：/feedback" in _last_private_text(), _private_sent
-    assert not _private_reports_path(tmp_path).exists()
+# ── dispatch alias ──────────────────────────────────────────────────────
+
+
+async def test_fb_alias_dispatches_to_feedback(env, monkeypatch):
+    from kouhai_bot.handlers import registry
+
+    registry.discover_commands()
+    await do_incorrect_submit(env, monkeypatch)
+    await process_event(
+        {
+            "type": "message", "message_type": "group",
+            "group_openid": G, "user_openid": U,
+            "message_id": "EV-FB", "content": "/fb 别名反馈",
+            "author": {"member_openid": U},
+            "mentions": [{"member_openid": "BOT_PLACEHOLDER", "bot": True, "is_you": True}],
+        },
+        spawn_handlers=False,
+    )
+    reports = await feedback.load_bad_reports(env.db, G)
+    assert len(reports) == 1
+    assert reports[0]["note"] == "别名反馈"
+    assert reports[0]["cmd_message_id"] == "EV-FB"

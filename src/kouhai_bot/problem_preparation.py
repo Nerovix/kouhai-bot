@@ -1,9 +1,15 @@
 """Prepare the complete user-visible content for the next group problem.
 
 The picker remains a subprocess boundary on purpose: it contains synchronous
-Codeforces/Playwright work and process-global path/rating configuration.  This
+Codeforces/Playwright work and process-global path/rating configuration. This
 module gives callers a typed async interface without leaking those CLI details
 into command handlers or the prefetch coordinator.
+
+Identity is openid-native and multi-group. Selection exclusion is DB-driven
+(used ∪ posted ∪ solved in this group) and passed to the picker via an exclude
+file; the picker still writes a mirrored disk statement cache (also consumed by
+the editorial crawler). Preparation upserts the DB problem catalog and marks
+the pick used; publication owns group_posts + the verified summary.
 """
 
 from __future__ import annotations
@@ -18,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from .config import get_config
+from .db.database import get_database
+from .db.repos import posts, problems, users
 from .handlers.shared import (
     summarize_problem,
     translate_sample_notes,
@@ -33,7 +41,6 @@ from .problem_summary import (
     SummaryPreparationStatus,
     prepare_problem_summary,
 )
-from .problems.picker import format_reveal as format_previous_problem_reveal
 
 logger = logging.getLogger("kouhai-bot.problem_preparation")
 
@@ -118,58 +125,65 @@ class ProblemPreparationError(RuntimeError):
         self.user_message = user_message
 
 
-def effective_rating_range(group_id: int) -> tuple[int, int]:
-    """Return config ratings with the existing scheduler override semantics."""
+class ProblemPoolExhausted(ProblemPreparationError):
+    """Every candidate in range is excluded; caller may relax the used cycle."""
+
+    def __init__(self) -> None:
+        super().__init__("题库里暂时没有合适的未解题了，过段时间再来试试吧😢")
+
+
+async def effective_rating_range(group_openid: str) -> tuple[int, int]:
+    """Global default range with an optional per-group /range override."""
     cfg = get_config()
     min_rating = int(cfg.min_rating)
     max_rating = int(cfg.max_rating)
     try:
-        from .scheduler.engine import load_group_configs
-
-        group_cfg = load_group_configs().get(group_id)
-        if group_cfg:
-            if group_cfg.min_rating is not None:
-                min_rating = int(group_cfg.min_rating)
-            if group_cfg.max_rating is not None:
-                max_rating = int(group_cfg.max_rating)
+        override_min, override_max = await users.get_group_rating(get_database(), group_openid)
+        if override_min is not None:
+            min_rating = int(override_min)
+        if override_max is not None:
+            max_rating = int(override_max)
     except Exception:
         logger.warning(
-            "[group_%s] Failed to load scheduler rating overrides; using config range",
-            group_id,
-            exc_info=True,
+            "[group_%s] Failed to load group rating override; using config range",
+            group_openid, exc_info=True,
         )
     return min_rating, max_rating
 
 
 def picker_args(
     command: str,
-    group_id: int,
+    group_openid: str,
     *extra: str,
     rating_range: tuple[int, int] | None = None,
+    exclude_file: str | Path | None = None,
 ) -> list[str]:
-    min_rating, max_rating = (
-        rating_range
-        if rating_range is not None
-        else effective_rating_range(group_id)
+    min_rating, max_rating = rating_range if rating_range is not None else (
+        int(get_config().min_rating), int(get_config().max_rating)
     )
-    return [
+    args = [
         str(PICKER_PATH),
         command,
         "--group",
-        str(group_id),
+        str(group_openid),
         "--data-dir",
         str(get_config().data_dir),
         "--min-rating",
         str(min_rating),
         "--max-rating",
         str(max_rating),
-        *extra,
     ]
+    if exclude_file is not None:
+        args += ["--exclude-file", str(exclude_file)]
+    args += list(extra)
+    return args
 
 
 def classify_pick_error(stderr_text: str) -> str:
     """Classify picker stderr into the existing user-facing error message."""
     lower = stderr_text.lower()
+    if "no unsolved problems found" in lower:
+        return "EXHAUSTED"
     if any(kw in stderr_text for kw in (
         "codeforces.com", "SSL", "SSLEOFError", "SSLError",
         "ConnectionError", "Max retries exceeded", "RemoteDisconnected",
@@ -208,11 +222,25 @@ async def _stop_process(process: asyncio.subprocess.Process) -> None:
         pass
 
 
+def _exclude_file_path(group_openid: str) -> Path:
+    return Path(get_config().data_dir) / "groups" / str(group_openid) / "pick_exclude.json"
+
+
+def _write_exclude_file(group_openid: str, excluded: set[str]) -> Path:
+    path = _exclude_file_path(group_openid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(sorted(excluded), f)
+    return path
+
+
 async def _run_picker(
-    group_id: int,
+    group_openid: str,
     *,
-    rating_range: tuple[int, int] | None = None,
+    rating_range: tuple[int, int],
+    excluded: set[str],
 ) -> dict[str, Any]:
+    exclude_file = _write_exclude_file(group_openid, excluded)
     pick_error_msg = ""
     for attempt in range(1, PICK_ATTEMPTS + 1):
         process: asyncio.subprocess.Process | None = None
@@ -221,9 +249,10 @@ async def _run_picker(
                 sys.executable,
                 *picker_args(
                     "pick-json",
-                    group_id,
+                    group_openid,
                     "--with-statement",
                     rating_range=rating_range,
+                    exclude_file=exclude_file,
                 ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -237,15 +266,18 @@ async def _run_picker(
                 await _stop_process(process)
                 raise
             if process.returncode != 0:
-                err_text = stderr.decode(errors="replace")[:200]
+                err_full = stderr.decode(errors="replace")
                 logger.error(
                     "Pick failed (group %s, attempt %s/%s): %s",
-                    group_id,
-                    attempt,
-                    PICK_ATTEMPTS,
-                    err_text,
+                    group_openid, attempt, PICK_ATTEMPTS, err_full[:200],
                 )
-                pick_error_msg = classify_pick_error(err_text)
+                # Classify on the FULL stderr: the picker prints its terminal
+                # "No unsolved problems found" marker last, after per-fetch
+                # warnings and retry lines, so a head truncation misses it and
+                # the pool-exhaustion relaxation would never fire.
+                pick_error_msg = classify_pick_error(err_full)
+                if pick_error_msg == "EXHAUSTED":
+                    raise ProblemPoolExhausted()
             else:
                 picked_state = json.loads(stdout.decode())
                 if (
@@ -255,20 +287,17 @@ async def _run_picker(
                     return picked_state
                 logger.error(
                     "Pick failed (group %s, attempt %s/%s): invalid picker payload",
-                    group_id,
-                    attempt,
-                    PICK_ATTEMPTS,
+                    group_openid, attempt, PICK_ATTEMPTS,
                 )
                 pick_error_msg = "题目选取结果异常"
         except asyncio.CancelledError:
             raise
+        except ProblemPoolExhausted:
+            raise
         except Exception as exc:
             logger.error(
                 "Pick error (group %s, attempt %s/%s): %s",
-                group_id,
-                attempt,
-                PICK_ATTEMPTS,
-                exc,
+                group_openid, attempt, PICK_ATTEMPTS, exc,
             )
             pick_error_msg = "Codeforces 连接失败"
 
@@ -280,21 +309,50 @@ async def _run_picker(
     raise ProblemPreparationError(pick_error_msg or "题目选取失败，稍后再试")
 
 
-async def prepare_problem(group_id: int) -> PreparedProblem:
-    """Run the old blocking /newproblem preparation pipeline ahead of time."""
-    min_rating, max_rating = effective_rating_range(group_id)
-    picked_state = await _run_picker(
-        group_id,
-        rating_range=(min_rating, max_rating),
+async def _posted_or_solved_pids(group_openid: str) -> set[str]:
+    rows = await get_database().fetch_all(
+        "SELECT pid FROM group_posts WHERE group_openid=? "
+        "UNION SELECT pid FROM group_solves WHERE group_openid=?",
+        (group_openid, group_openid),
     )
-    pid = str(picked_state.get("today", "") or "")
+    return {r["pid"] for r in rows}
 
+
+def _rating_value(value: object) -> int | None:
+    if value in (None, "", "?"):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+async def prepare_problem(group_openid: str) -> PreparedProblem:
+    """Run the blocking group-card preparation pipeline ahead of time."""
+    db = get_database()
+    min_rating, max_rating = await effective_rating_range(group_openid)
+    rating_range = (min_rating, max_rating)
+
+    excluded = await posts.get_excluded_pids(db, group_openid)
+    try:
+        picked_state = await _run_picker(
+            group_openid, rating_range=rating_range, excluded=excluded,
+        )
+    except ProblemPoolExhausted:
+        # Relax the used cycle (keep posted/solved excluded), mirroring the
+        # legacy picker reset when every in-range problem has been used.
+        reduced = await _posted_or_solved_pids(group_openid)
+        picked_state = await _run_picker(
+            group_openid, rating_range=rating_range, excluded=reduced,
+        )
+
+    pid = str(picked_state.get("today", "") or "")
     statement = (
         load_statement_json(
             pid,
             data_dir=get_config().data_dir,
             include_legacy_fallback=True,
-            log_context=f"group_{group_id}",
+            log_context=f"group_{group_openid}",
         )
         if pid
         else {}
@@ -303,15 +361,22 @@ async def prepare_problem(group_id: int) -> PreparedProblem:
     if not source_sha256:
         raise ProblemPreparationError("题面缓存读取失败")
 
-    sample_messages = build_sample_messages(
-        statement,
-        include_explicit_empty=True,
+    await problems.upsert_problem(
+        db, pid,
+        contest_id=int(picked_state["contestId"]) if picked_state.get("contestId") else None,
+        idx=str(picked_state.get("index", "") or ""),
+        name=str(picked_state.get("name", "") or ""),
+        rating=_rating_value(picked_state.get("rating")),
+        tags=list(picked_state.get("tags", []) or []),
+        statement_sha256=source_sha256,
+        statement_json=json.dumps(statement, ensure_ascii=False),
     )
+    await posts.mark_used(db, group_openid, pid)
+
+    sample_messages = build_sample_messages(statement, include_explicit_empty=True)
     notes_message = await build_notes_message(statement)
     summary_result = await prepare_problem_summary(
-        statement,
-        generate=summarize_problem,
-        attempts=2,
+        statement, generate=summarize_problem, attempts=2,
     )
     if (
         summary_result.status is SummaryPreparationStatus.READY
@@ -320,15 +385,11 @@ async def prepare_problem(group_id: int) -> PreparedProblem:
         summary = summary_result.prepared.text
         model_tag = summary_result.prepared.model_tag
     else:
-        # Preserve the established availability policy: a fully fetched
-        # statement can still be posted without an LLM summary.  The explicit
-        # status prevents this degraded card from masquerading as a summary hit.
         summary = ""
         model_tag = ""
         logger.warning(
             "[group_%s] Summary unavailable after retries: %s",
-            group_id,
-            summary_result.reason,
+            group_openid, summary_result.reason,
         )
 
     return PreparedProblem(

@@ -1,4 +1,10 @@
-"""/review — discuss the latest solved problem with AI."""
+"""/review — discuss a solved problem with AI.
+
+Group-only. Defaults to the group's most recently solved problem (snapshotted
+at admission). Quoting an earlier problem card targets that problem instead
+(official ref_idx→pid map, 实测-verified); @mentioned group members' same-problem
+context is folded in.
+"""
 
 from __future__ import annotations
 
@@ -7,128 +13,70 @@ import re
 
 from .. import registry
 from ..registry import CommandDef
-from ..shared import (
-    get_latest_solved_problem_id,
-    get_problem_card_ref_pid,
-    get_today_problem,
-    is_already_solved,
-)
-from ...napcat.client import build_plain_message, send_group_msg, send_private_msg
-from ...context import get_display_name
-from ...private_judge import (
-    GROUP_SCOPE,
-    PRIVATE_SCOPE,
-    get_private_review_pid,
-    is_group_problem_solved,
-    is_private_solved,
-)
+from ..context import Ctx
+from .. import state
 from .submit import enqueue_review_request
+from ...db.repos import posts
 
 logger = logging.getLogger("kouhai-bot.cmd.review")
-_UNKNOWN_CARD_REPLY = (
-    "这条引用我认不出对应哪道题哦，可能不是题目卡片，"
-    "也可能卡片太久了～你直接发 /review 的话，我就默认复盘最近一道已通过题目。"
-)
-_UNSOLVED_CARD_REPLY = (
-    "这道题还没有通过记录，暂时不能复盘哦～"
-    "你直接发 /review 的话，我就默认复盘最近一道已通过题目。"
-)
 
 
-def _mentioned_user_ids(segments: list, *, requester_id: int) -> list[int]:
-    from ...config import get_config
-
-    cfg = get_config()
-    ignored = {str(cfg.bot_qq), str(requester_id), "all"}
+def _mentioned_user_ids(ctx: Ctx) -> list[str]:
+    """Structured mentions[] (实测: inbound @ renders as <@openid>, no '!').
+    Skip the bot (is_you/bot), @all (scope=all), the requester, and duplicates.
+    Preserve the raw openid string — submission rows are keyed by the exact
+    author.member_openid, so case-folding here could silently load no context."""
     seen: set[str] = set()
-    result: list[int] = []
-    for seg in segments:
-        if seg.get("type") != "at":
+    result: list[str] = []
+    self_id = ctx.user_openid
+    for mention in ctx.event.get("mentions") or []:
+        if not isinstance(mention, dict):
             continue
-        qq = str(seg.get("data", {}).get("qq", "") or "").strip()
-        if not qq or qq in ignored or not qq.isdigit():
+        if mention.get("is_you") or mention.get("bot"):
             continue
-        normalized = str(int(qq))
-        if normalized in ignored or normalized in seen:
+        if str(mention.get("scope", "") or "") == "all":
             continue
-        seen.add(normalized)
-        result.append(int(normalized))
+        openid = str(mention.get("member_openid", "") or "")
+        if not openid or openid == self_id or openid in seen:
+            continue
+        seen.add(openid)
+        result.append(openid)
     return result
 
 
-async def handle(group_id: int, user_id: int, sender: dict,
-                 message_id: str, raw_text: str, segments: list,
-                 event: dict) -> None:
-    nickname = get_display_name(sender)
-    scope = PRIVATE_SCOPE if event.get("message_type") == "private" else GROUP_SCOPE
+async def _resolve_review_pid(ctx: Ctx) -> str:
+    """A quoted problem card targets its pid when that problem is solved here;
+    otherwise fall back to the latest solved problem."""
+    ref_idx = str(ctx.event.get("ref_msg_idx", "") or "")
+    if ref_idx:
+        quoted_pid = await posts.pid_for_ref(ctx.db, ctx.group_openid, ref_idx)
+        if quoted_pid and await state.is_problem_solved(ctx.db, ctx.group_openid, quoted_pid):
+            return quoted_pid
+    return await state.latest_solved_pid(ctx.db, ctx.group_openid) or ""
 
-    stripped = raw_text.lstrip()
+
+async def handle(ctx: Ctx) -> None:
+    stripped = ctx.raw_text.lstrip()
     match = re.match(r'/review\s+', stripped)
     if not match:
-        if scope == PRIVATE_SCOPE:
-            await send_private_msg(user_id, build_plain_message("用法：/review 你的问题～"))
-        else:
-            await send_group_msg(group_id, build_plain_message(
-                f"@{nickname} 用法：/review 你的问题～"
-            ))
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid, "用法：/rv 你的问题～",
+            msg_id=ctx.message_id,
+        )
         return
-
     question = stripped[match.end():].strip()
     if not question:
-        if scope == PRIVATE_SCOPE:
-            await send_private_msg(user_id, build_plain_message("/review 后面要写你的问题呀，想聊什么直接说～"))
-        else:
-            await send_group_msg(group_id, build_plain_message(
-                f"@{nickname} /review 后面要写你的问题呀，想聊什么直接说～"
-            ))
+        await ctx.sender.send_group_at(
+            ctx.group_openid, ctx.user_openid,
+            "/rv 后面要写你的问题呀，想聊什么直接说～",
+            msg_id=ctx.message_id,
+        )
         return
 
-    reply_to = ""
-    for seg in segments:
-        if seg.get("type") == "reply":
-            reply_to = str(seg.get("data", {}).get("id", "") or "")
-            break
-
-    review_pid = ""
-    if scope == PRIVATE_SCOPE:
-        if reply_to:
-            review_pid = get_problem_card_ref_pid(group_id, reply_to)
-            if not review_pid:
-                await send_private_msg(user_id, build_plain_message(_UNKNOWN_CARD_REPLY))
-                return
-            if not (
-                is_private_solved(user_id, review_pid)
-                or is_group_problem_solved(group_id, review_pid)
-            ):
-                await send_private_msg(user_id, build_plain_message(_UNSOLVED_CARD_REPLY))
-                return
-        else:
-            review_pid = get_private_review_pid(user_id, group_id)
-    elif reply_to:
-        review_pid = get_problem_card_ref_pid(group_id, reply_to)
-        if not review_pid:
-            await send_group_msg(group_id, build_plain_message(
-                f"@{nickname} {_UNKNOWN_CARD_REPLY}"
-            ))
-            return
-        current = get_today_problem(group_id)
-        if current and review_pid == str(current.get("today", "") or "") and not is_already_solved(group_id):
-            await send_group_msg(group_id, build_plain_message(
-                f"@{nickname} 这道是当前题，大家还在想呢～先自己多想想，解出来后再 /review 吧！"
-            ))
-            return
-    else:
-        review_pid = get_latest_solved_problem_id(group_id) or ""
-
     await enqueue_review_request(
-        group_id,
-        user_id,
-        sender,
-        message_id,
-        question,
-        review_pid=review_pid,
-        mentioned_user_ids=_mentioned_user_ids(segments, requester_id=user_id),
-        scope=scope,
+        ctx, question,
+        pid_resolver=lambda: _resolve_review_pid(ctx),
+        mentioned_user_ids=_mentioned_user_ids(ctx),
     )
 
 
@@ -136,7 +84,7 @@ def register() -> None:
     registry.register(CommandDef(
         name="review",
         aliases=["rv"],
-        description="默认复盘上一道已通过题；引用题目卡片可复盘旧题；@群友可带入其上下文",
+        description="复盘最近一道已通过题；@群友可带入其上下文",
         usage="你的问题",
         handler=handle,
         cooldown=5,

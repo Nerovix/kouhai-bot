@@ -787,7 +787,7 @@ async def chat_completion(
                     else temperature
                 ),
             }
-            if response_format:
+            if response_format and provider.send_response_format:
                 payload["response_format"] = response_format
             if thinking and provider.send_thinking:
                 payload["thinking"] = thinking

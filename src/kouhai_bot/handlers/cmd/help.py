@@ -1,112 +1,71 @@
-"""/help command — dynamically generated from command registry."""
+"""/help — dynamically generated from the command registry, delivered as a card.
+
+Commands are grouped into themed sections, each rendered as its own bubble in
+the long-image chat record. Only the public short trigger is shown; aliased
+commands carry a muted "short for <full name>" note. Markdown-style headings,
+bullets and bold keep the list readable instead of one cramped text block.
+"""
+
+from __future__ import annotations
 
 from .. import registry
 from ..registry import CommandDef, all_commands
+from ..context import Ctx
+from ..runtime import get_runtime
+from ...render.forward_card import send_forward_card
+from ...render.html import escape
 
-_PRIVATE_HELP_COMMANDS = {
-    "setproblem",
-    "problem",
-    "tag",
-    "submit",
-    "sbmjev",
-    "clarify",
-    "review",
-    "feedback",
-    "clear",
-    "sync",
-    "testcd",
-    "status",
-    "help",
-}
-_GROUP_HELP_HIDDEN_COMMANDS = {"setproblem", "sync", "testcd"}
+# Themed grouping (canonical name → section). Order here is display order.
+_SECTIONS: list[tuple[str, list[str]]] = [
+    ("📚 刷题", ["newproblem", "problem", "tag", "range", "scoreboard"]),
+    ("✍️ 判题 · 讨论", ["submit", "clarify", "review", "clear"]),
+    ("🔧 其他", ["feedback", "sync", "status", "help"]),
+]
 
 
-def _format_command_name(cmd: CommandDef) -> str:
-    if not cmd.aliases:
-        return f"/{cmd.name}"
-    aliases = ", ".join(f"/{alias}" for alias in cmd.aliases)
-    return f"/{cmd.name}({aliases})"
+def _command_parts(cmd: CommandDef) -> tuple[str, str, str]:
+    """Return (trigger_with_args, description, short_for_note)."""
+    args = f" {cmd.usage}" if cmd.usage else ""
+    trigger = f"/{cmd.trigger}{args}"
+    short = f"short for {cmd.name}" if cmd.aliases else ""
+    return trigger, cmd.description, short
 
 
-def _format_duration(seconds: int) -> str:
-    seconds = max(0, int(seconds))
-    if seconds == 0:
-        return "无冷却"
-    if seconds % 60 == 0:
-        minutes = seconds // 60
-        return f"{minutes}分钟"
-    return f"{seconds}秒"
+def _section_nodes() -> tuple[list[dict], str]:
+    by_name = {cmd.name: cmd for cmd in all_commands()}
+    nodes: list[dict] = []
+    text_sections: list[str] = []
+    bot_name = get_runtime().sender.bot_name or "算法助手"
+    for title, names in _SECTIONS:
+        cmds = [by_name[n] for n in names if n in by_name]
+        if not cmds:
+            continue
+        li_html: list[str] = []
+        li_text: list[str] = []
+        for cmd in cmds:
+            trigger, desc, short = _command_parts(cmd)
+            short_html = f' <span class="short">{escape(short)}</span>' if short else ""
+            li_html.append(
+                f"<li><strong>{escape(trigger)}</strong> — {escape(desc)}{short_html}</li>"
+            )
+            short_text = f"（{short}）" if short else ""
+            li_text.append(f"• {trigger} — {desc}{short_text}")
+        nodes.append({
+            "nickname": bot_name,
+            "content_html": f"<h3>{escape(title)}</h3><ul>{''.join(li_html)}</ul>",
+            "content_text": f"{title}\n" + "\n".join(li_text),
+        })
+        text_sections.append(f"{title}\n" + "\n".join(li_text))
+    return nodes, "\n\n".join(text_sections)
 
 
-def _description_for_help(cmd: CommandDef, newproblem_cooldown: int) -> str:
-    if cmd.name == "newproblem":
-        cooldown = _format_duration(newproblem_cooldown)
-        return f"刷一道新题（未解须 --force；{cooldown}冷却）"
-    return cmd.description
-
-
-def _command_lines(cmds: list[CommandDef], newproblem_cooldown: int) -> list[str]:
-    lines: list[str] = []
-    for cmd in cmds:
-        args = f" {cmd.usage}" if cmd.usage else ""
-        description = _description_for_help(cmd, newproblem_cooldown)
-        lines.append(f"{_format_command_name(cmd)}{args} — {description}")
-    return lines
-
-
-async def handle(group_id: int, user_id: int, sender: dict,
-                 message_id: str, raw_text: str, segments: list,
-                 event: dict) -> None:
-    """Generate help text from registry, deliver as merged-forward card."""
-    from ...config import get_config
-    from ...napcat.client import (
-        build_node,
-        build_plain_message,
-        resolve_bot_display_name,
-        send_group_msg,
-        send_private_msg,
-        send_forward_card_with_legacy_fallback,
+async def handle(ctx: Ctx) -> None:
+    nodes, fallback = _section_nodes()
+    rt = get_runtime()
+    await send_forward_card(
+        rt.sender, ctx.group_openid, nodes, title="帮助",
+        msg_id=ctx.message_id, text_fallback=fallback, browser=rt.browser,
     )
-    cfg = get_config()
-    cmds = all_commands()
-    is_private = event.get("message_type") == "private"
-    if is_private:
-        visible = [cmd for cmd in cmds if cmd.name in _PRIVATE_HELP_COMMANDS]
-        lines = ["private judge 可用指令："]
-        lines.extend(_command_lines(visible, cfg.newproblem_cooldown))
-        lines.append("")
-        lines.append(
-            "🔒 private judge：私聊可用 /setproblem(/sp) 选当前群题、CF题号/链接、random 或引用题目卡片；"
-            "private 通过不自动加分，只有当前群题可在群里 /sync 同步。"
-            "/sync 会用另一侧记录覆盖当前侧，可能丢掉当前侧这题交流历史；打星用户提交 CD 内只同步 clarify，CD 后可正常同步。"
-        )
-    else:
-        visible = [cmd for cmd in cmds if cmd.name not in _GROUP_HELP_HIDDEN_COMMANDS]
-        lines = ["可用指令："]
-        lines.extend(_command_lines(visible, cfg.newproblem_cooldown))
-        lines.append("")
-        lines.append(
-            "🔒 private judge：可以私聊我单独选题、提交和复盘；当前群题可同步回来，详细用法请私聊发 /help。"
-        )
-    text = "\n".join(lines)
-    msg = build_plain_message(text)
-
-    bot_name = await resolve_bot_display_name(None if is_private else group_id)
-    nodes = [build_node(user_id=cfg.bot_qq, nickname=bot_name, content=msg)]
-
-    if is_private:
-        if await send_forward_card_with_legacy_fallback(
-            destination="private", user_id=user_id, nodes=nodes, self_send_messages=[msg]
-        ):
-            return
-        await send_private_msg(user_id, msg)
-        return
-
-    if await send_forward_card_with_legacy_fallback(
-        destination="group", group_id=group_id, nodes=nodes, self_send_messages=[msg]
-    ):
-        return
-    await send_group_msg(group_id, msg)
 
 
 def register() -> None:

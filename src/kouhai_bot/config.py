@@ -131,6 +131,16 @@ class BotConfig:
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     qwen_model: str = ""
 
+    # --- Official QQ bot API ---
+    app_id: str = ""
+    app_secret: str = ""
+    official_api_base: str = "https://api.bot.qq.com"
+    official_token_base: str = "https://api.bot.qq.com"
+    official_sandbox: bool = False
+    official_bot_name: str = ""
+    official_bot_avatar_url: str = ""
+    official_intents: int = (1 << 25) | (1 << 26) | (1 << 24)
+
     # --- Group ---
     current_group: int = 0
 
@@ -147,6 +157,11 @@ class BotConfig:
     curfew_start_hour: int = 0
     curfew_duration_hours: int = 0
 
+    # --- Legacy hot-migration (old service group only) ---
+    legacy_migration_enabled: bool = False
+    legacy_migration_group_openid: str = ""
+    legacy_migration_source_db: str = ""
+
     # --- Paths ---
     data_dir: str = str(Path.home() / ".kouhai-bot")
     sessions_dir: str = ""
@@ -154,6 +169,17 @@ class BotConfig:
     def __post_init__(self) -> None:
         if not self.sessions_dir:
             self.sessions_dir = os.path.join(self.data_dir, "sessions")
+
+    def validate_official(self) -> None:
+        """Fail fast when official-API credentials are missing (runtime gate)."""
+        if not self.app_id:
+            raise RuntimeError(
+                "official.app_id is required (or set KOUHAI_APP_ID)"
+            )
+        if not self.app_secret:
+            raise RuntimeError(
+                "official.app_secret is required (or set KOUHAI_APP_SECRET)"
+            )
 
     @classmethod
     def from_yaml(cls) -> BotConfig:
@@ -167,10 +193,8 @@ class BotConfig:
 
         c = cls()
 
-        # --- QQ ---
-        c.bot_qq = int(data.get("bot_qq", c.bot_qq))
-        if c.bot_qq <= 0:
-            raise RuntimeError("config.yaml: bot_qq is required")
+        # --- QQ (legacy NapCat fields; optional under the official API) ---
+        c.bot_qq = int(data.get("bot_qq", c.bot_qq) or 0)
         c.napcat_ws_host = str(data.get("napcat_ws_host", c.napcat_ws_host))
         c.napcat_ws_port = int(data.get("napcat_ws_port", c.napcat_ws_port))
         c.napcat_http_host = str(data.get("napcat_http_host", c.napcat_http_host))
@@ -232,10 +256,37 @@ class BotConfig:
         c.qwen_base_url = str(qwen.get("base_url", c.qwen_base_url))
         c.qwen_model = str(qwen.get("model", ""))
 
-        # --- Group ---
-        if "current_group" not in data:
-            raise RuntimeError("config.yaml: current_group is required")
-        c.current_group = int(data["current_group"])
+        # --- Official QQ bot API ---
+        official = data.get("official", {})
+        if not isinstance(official, dict):
+            official = {}
+        c.app_id = str(
+            official.get("app_id", "") or os.environ.get("KOUHAI_APP_ID", "")
+        ).strip()
+        c.app_secret = str(
+            official.get("app_secret", "") or os.environ.get("KOUHAI_APP_SECRET", "")
+        ).strip()
+        c.official_sandbox = bool(official.get("sandbox", c.official_sandbox))
+        default_base = (
+            "https://sandbox.api.sgroup.qq.com"
+            if c.official_sandbox
+            else "https://api.bot.qq.com"
+        )
+        c.official_api_base = str(
+            official.get("api_base", default_base) or default_base
+        ).rstrip("/")
+        c.official_token_base = str(
+            official.get("token_base", c.official_token_base) or c.official_token_base
+        ).rstrip("/")
+        c.official_bot_name = str(official.get("bot_name", c.official_bot_name))
+        c.official_bot_avatar_url = str(
+            official.get("bot_avatar_url", c.official_bot_avatar_url)
+        ).strip()
+        if official.get("intents") is not None:
+            c.official_intents = int(official["intents"])
+
+        # --- Group (legacy single-group key; optional under multi-group official) ---
+        c.current_group = int(data.get("current_group", c.current_group) or 0)
 
         # --- Problems ---
         problem = data.get("problem", {})
@@ -264,6 +315,17 @@ class BotConfig:
             )
             c.curfew_duration_hours = int(
                 curfew.get("duration_hours", c.curfew_duration_hours)
+            )
+
+        # --- Legacy hot-migration (old service group only) ---
+        lm = data.get("legacy_migration", {})
+        if isinstance(lm, dict):
+            c.legacy_migration_enabled = bool(lm.get("enabled", False))
+            c.legacy_migration_group_openid = str(
+                lm.get("group_openid", "") or ""
+            ).strip()
+            c.legacy_migration_source_db = os.path.expanduser(
+                str(lm.get("source_db", "") or "")
             )
 
         # --- Paths ---

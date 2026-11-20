@@ -1,1269 +1,439 @@
 # Kouhai Bot — Development Guide
 
-Instructions for AI coding assistants working on this codebase.
-
+Instructions for AI coding assistants. The bot runs on the **official QQ bot API**
+(`api.bot.qq.com`; `api.sgroup.qq.com` aliases it), not NapCat/OneBot. It is a **pure group
+bot** serving **many groups** from one worker; each group is an independent view over a
+shared SQLite DB. Private judge, 打星/user_groups, curfew, jev, echo are removed. Full
+rationale (D1–D17, open questions, API audit, self-review) is in
+`docs/official-migration/DECISIONS.md` — read it before changing architecture. This file is
+the operative quick reference.
 
 ## Operational Constraints
 
-- All changes (code, config, docs) must be prepared in a **new git worktree** on
-  a branch and merged by PR. Never edit the live `master` checkout directly.
-  Use the `gh` CLI to create the PR; merge only after the owner confirms the PR
-  is correct.
-- The live service checkout must remain on `master`. Do not use `uv run restart`
-  or otherwise change live service state unless explicitly asked. Running tests is
-  allowed.
-- Never commit private information into git-maintained content: QQ numbers, group
-  chat numbers, and API keys must not appear in commits, branches, PRs, or any
-  tracked file. Use placeholders in examples and docs.
-- `AGENTS.md` is the single agent-instruction file for this repo. Keep it up to
-  date whenever architecture or workflow rules change; do not create `CLAUDE.md`
-  or other parallel instruction files.
-- Judge and review tasks must use the configured highest reasoning capability. Do
-  not lower `reasoning_effort`, disable thinking, or switch to a weaker effort to
-  work around latency/cost.
-- Do not set client-side output token caps, `max_tokens`, or
-  `max_completion_tokens` for judge/review requests. For DashScope/百炼 thinking
-  models only, set `thinking_budget=100000` so reasoning cannot consume the
-  entire upstream output window before `content` starts.
-- GLM-5.3 (Zhipu/火山方舟) exposes no thinking-budget parameter — its only depth
-  control is `reasoning_effort` (`low`/`high`/`max`) and thinking cannot be
-  disabled — so never send it budget-style fields. A very long reasoning run
-  can still return empty `content`; `glm53` therefore runs with `stream: true`
-  (Ark streams support `stream_options.include_usage`) so that case is
-  classified as `empty_content_after_reasoning`/`length` and fails over instead
-  of being blindly retried. Both completion paths log `finish_reason`,
-  `reasoning_chars`, and `usage` for diagnosis.
+- All changes go in a **new git worktree** on a branch, merged by PR (`gh`). Never edit the
+  live `master` checkout directly; merge only after the owner confirms the PR is correct.
+- Live service stays on `master`. Do not `uv run restart` or change live service state
+  unless explicitly asked. Running tests is allowed.
+- **Never commit private information**: QQ numbers, group chat numbers, group/user openids,
+  AppID/AppSecret, API keys must not appear in commits, branches, PRs, or any tracked file.
+  Use placeholders in examples/docs.
+- `AGENTS.md` is the single agent-instruction file; keep it current. No `CLAUDE.md` or
+  parallel instruction files.
+- Judge/review use the configured **highest** reasoning capability; never lower
+  `reasoning_effort`, disable thinking, or weaken effort for latency/cost. No client-side
+  `max_tokens`/`max_completion_tokens` for judge/review. DashScope/百炼 thinking models
+  only: set `thinking_budget=100000`.
+- GLM-5.3 (Zhipu/火山方舟): no thinking-budget field — depth is `reasoning_effort`
+  (`low`/`high`/`max`) only, thinking cannot be disabled; never send budget-style fields.
+  Long reasoning may return empty `content`, so `glm53` runs `stream: true` to classify that
+  as `empty_content_after_reasoning`/`length` and fail over. Both paths log `finish_reason`,
+  `reasoning_chars`, `usage`.
 
 ## Architecture
 
 ```
-NapCat (QQ) ──WS──> worker.py
-                         │
-                         ├── process_event(..., spawn_handlers=True)
-                         ├── cmd/*.py  auto-discovered by registry
-                         ├── scheduler/ background loop (60s tick)
-                         └── next-problem prefetch loop (one READY slot)
+Official QQ Gateway ──outbound WS──> worker.py (OfficialGateway)
+   ├── normalize_event → handlers.process_event(spawn_handlers=True)
+   ├── handlers/cmd/*.py  auto-discovered by registry (Ctx)
+   ├── per-group GroupServices (lazy on first event; seeded from group_posts at boot):
+   │     ├── NextProblemPrefetcher (one READY slot)
+   │     └── editorial_prefetch_maintenance_loop
+   └── scheduler_loop (60s tick, iterates discovered groups)
+State: SQLite {data_dir}/kouhai.db (db/)   Render: Playwright long-image (render/)
+Transport: official/ (tokens/rest/gateway/sender/budget/media/keyboard)
 ```
 
-## Key Design Decisions
+## Core Design
 
-- **Command auto-discovery**: Each command in `handlers/cmd/*.py` calls `register()` at module load. The `registry.discover_commands()` scans with `pkgutil.iter_modules`. Adding a new command = create a `.py` file with a `register()` function.
-- **Limited aliases**: Only seven short aliases are supported: `/newproblem`→`/np`, `/problem`→`/pb`, `/submit`→`/sbm`, `/review`→`/rv`, `/clarify`→`/clrf`, `/setproblem`→`/sp`, `/feedback`→`/fb`. Old aliases such as `/sb`, `/排名`, and Chinese aliases remain unsupported. New commands default to `aliases=[]` unless explicitly approved.
-- **Command rename**: `/bad` → `/feedback` (2026-09) — QQ clients convert a bare `/bad` into an emoji before sending, so the old name could never reach the bot; it is removed rather than kept as an alias, and the report stores keep their `bad_reports` file names.
-- **Poke (拍一拍) routing**: `handlers/notice.py` always pokes back, then branches on solve state — if the current problem is **unsolved**, the poke resends the current problem card (same effect as `/pb`, via `stubs.resend_current_problem_group`, no cooldown); if **solved** (or no current problem), it quietly refreshes via `enqueue_new_problem(command="poke", force=False, quiet=True)`.
-- **Help auto-generation**: `handlers/cmd/help.py` reads `registry.all_commands()` and builds the help text dynamically. Descriptions must match old bridge.py wording.
-  `usage` field = args suffix in /help display (e.g. `usage="你的做法"` → `/submit 你的做法`). Group help hides private-only details for `/setproblem`, `/sync`, and `/testcd` and only briefly mentions private judge; private help lists the private-judge command set.
-  Group and private help are both delivered as merged-forward cards, with direct text
-  only as fallback.
-- **Scheduler current-group config**: `~/.kouhai-bot/scheduler_config.json` stores job list + time overrides for `CURRENT_GROUP`. Jobs are defined in `scheduler/jobs.py`.
-- **Multimodal statements**: `problems/fetcher.py` collects CF `tex-formula` and `tex-graphics` image metadata with statement text. Formula images and diagrams are attached to new-problem summary and `/clarify` requests, which route through `llm.general_model` like every other non-judge task; those providers must therefore accept image inputs. (A legacy `llm.multimodal_model` config section is deduplicated by name and appended to the general queue with a warning.)
-- **Unified CF HTML transport**: `problems/cf_fetcher.py` is the single transport for
-  Codeforces problem statement and blog HTML. It tries `cloudscraper` first and falls
-  back to headless Playwright Chromium after HTTP 403, timeout/connection failure,
-  Cloudflare challenge HTML, or a lazy `Tutorial is loading...` response. Its
-  `content_valid()` helper is the shared usability gate. Normal Codeforces pages may
-  contain an injected `challenge-platform` asset, so that marker is only treated as a
-  challenge when no problem/blog content container is present; strong challenge-page
-  markers remain invalid. The `browser is being checked` interstitial (a Cloudflare
-  JS-challenge variant that returns HTTP 200 with no content container) is treated as
-  a strong challenge marker too. In `tools/cf_tutorial_agent.py`, a problem page with
-  no blog links is only a terminal no-editorial verdict when `content_valid()` passes;
-  an unusable page (challenge/placeholder) raises `AgentIncomplete` so prefetch stays
-  retryable instead of writing a permanent `no_editorial` marker. The Playwright path uses the async API, derives its user agent
-  from the bundled Chromium major version, and keeps synchronous compatibility callers
-  safe when an asyncio loop is already running. `picker.fetch_statement()`
-  fetches each uncached statement once (with one retry when the page is usable
-  but the sample container yields nothing — CF serves template variants where
-  sample `<pre>` tags may carry an `id` and multi-line inputs render as
-  `test-example-line` divs — and one retry when the statement block cannot be
-  parsed at all, e.g. a challenge/redirect page slipped through) and passes that
-  HTML into
-  `fetcher.process_problem()` for image/text extraction as well as metadata
-  parsing. Samples are extracted from the page-unique `.sample-test` container
-  by `.input`/`.output` class pairs (not bare `<pre>` scanning), and the
-  `problem-statement` block itself is located by div-depth counting since the
-  `</div><script` terminator is not present in every template variant.
-- **MathJax formula deduplication**: `problems/fetcher.py:normalize_mathjax()` is the
-  single shared implementation that removes MathJax-rendered duplicate formulas from
-  CF HTML. Rendered CF pages carry each formula multiple times (visible `<nobr>`
-  rendering, `MJX_Assistive_MathML` accessibility copy, and the original
-  `<script type="math/tex">` source). The normalizer keeps only the TeX source
-  wrapped in `$$$...$$$`, discarding the rendered copies. It is called from
-  `html_to_text()` (problem statements) and from `html_to_markdownish()` in
-  `tools/scrape_cf_tutorial.py` (tutorial blog pages). Without this, LLM judge
-  and tutorial extraction see duplicated numbers (e.g. "111" instead of "1") and
-  may misinterpret problem constraints.
-- **Stale cache detection**: `picker.py:fetch_statement()` detects caches created before image metadata via `_images_collected`. Stale caches with images are re-fetched so image metadata is available for multimodal tasks.
-- **Editorial extraction matches Div1/Div2 mirror codes by title**: CF
-  mirrors of the same problem carry different codes but the same name (e.g.
-  `1098B` and `1099E` are both "Nice table"). `tools/cf_tutorial_agent.py`
-  queries `codeforces.com/api/problemset.problems` on demand (direct, no
-  proxy; 7-day cached under the data dir as `cf_problemset_cache.json`) and
-  injects same-title sibling codes into the extractor prompt
-  (`problem_sibling_codes`). Matching requires same title AND matching
-  statement/IO format; anything uncertain must be `match=false` — never risk
-  attaching the wrong editorial (judge correctness depends on it). Any API
-  failure degrades to an empty sibling list (prompt-only title matching).
-- **Editorial extraction distinguishes easy/hard versions**: Problems with
-  similar names but different difficulty levels (e.g. `95B` "Lucky Numbers"
-  vs `96B` "Lucky Numbers (easy)") are treated as different problems. The
-  extractor prompt explicitly warns the LLM to check constraint ranges and
-  solution complexity — easy/hard versions have different constraints and
-  require different algorithms. If a blog discusses the easy version but the
-  target problem is the hard version (or vice versa), the match must be
-  `match=false`. This prevents attaching the wrong editorial when problem
-  names are similar but not identical.
-- **No hermes cron involvement**: The bot runs its own scheduler loop (`scheduler/engine.py`), not hermes cron jobs.
-- **Single worker runtime**: `worker.py` keeps the NapCat reverse-WS connection,
-  dispatches commands, and owns the scheduler, next-problem prefetch loop, and
-  current/next editorial maintenance loop in one process. There is no SQLite event
-  queue, ingress supervisor, worker hot-swap, or auto-update loop.
-- **Next-problem prefetch**: `problem_preparation.py` contains the complete blocking
-  group-problem preparation pipeline (pick/fetch, samples, translated notes, audited
-  summary), while `problem_prefetch.py` maintains one durable READY slot per group in
-  `next_problem.json`. `/newproblem` claims that slot under its existing post lock and
-  normally only builds/sends the QQ card; if startup preparation is still cold it awaits
-  the same single-flight task. A claim prevents refill until publication finishes, then
-  release wakes the worker loop. READY-slot validation covers rating-range changes,
-  current/solved problems, statement presence and fingerprint. Summary generation is a side-effect-free complete action: only a
-  semantically audited result is stored; after the existing two failed attempts the
-  availability fallback is explicitly stored as `summary_status=incomplete` and the
-  problem can still be posted without a summary. Background preparation is not reported
-  by `/status`; only an admitted post is. A newly READY slot notifies the worker's
-  orchestration hook immediately, and the worker also idempotently maintains full
-  official-editorial prefetch for both current and READY problems:
-  persisted slots resume crawler + translation work after restart, in-flight work is
-  deduplicated by pid, and verified/no-editorial terminal states stop retries. Cancellation,
-  deadline exhaustion, scraper/LLM errors, and other incomplete attempts do not write a
-  terminal marker, so startup or the next maintenance pass retries them. Only a completed,
-  exhaustive search of all non-rejected candidates may write the versioned
-  `no_editorial` marker with a reason. READY and no-editorial markers are both bound to
-  the statement fingerprint; the READY marker is also bound to the persisted editorial
-  fingerprint. Legacy markers are untrusted and retried.
-  This editorial maintenance never blocks a `/newproblem` claim. `/setproblem` and
-  `/setproblem random` intentionally keep their live-fetch behavior and never use this
-  slot.
-- **Friend request auto-approval**: Normal OneBot `post_type="request"` / `request_type="friend"` events are parsed by `napcat/client.py`, routed by `handlers.process_event()`, and approved via `set_friend_add_request`. QQ/NapCat "doubtful" friend requests are not reliably pushed as request events, so `worker.py` also runs `friend_requests.doubt_friend_request_loop()`, which polls `get_doubt_friends_add_request` every 60 seconds and approves with `set_doubt_friends_add_request`. Both paths approve only after the requester is confirmed to be a member of `CURRENT_GROUP`; lookup failure, malformed events, non-friend requests, and non-members are ignored without approving. Requests that were already consumed by another QQ client may not appear in the doubtful-request poll.
-- **User groups**: `user_groups.py` — all users default to `default`; `USER_GROUPS` configures
-  non-default groups such as `starred`/`打星`, their members, submit delay, and rejection
-  message. `submit_delay_sec > 0` enables dynamic per-user submit waits for that group:
-  the configured value is the floor, the first solver's next wait doubles, and other
-  configured users' waits halve down to the floor. Runtime wait state lives in
-  `scoreboard.json.user_group_waits`; real QQ IDs belong only in local config/runtime data.
-  `/newproblem` writes `state.json` `posted_at`; if missing, cooldown falls back
-  to matching `daily_msg.json` mtime. Dynamic-wait users who submit before their group
-  wait expires are redirected to private judge instead of being judged in the group.
-- **Curfew (宵禁)**: `curfew.py` — `/submit` is blocked during a daily quiet window defined
-  by `CURFEW_START_HOUR` and `CURFEW_DURATION_HOURS`. Other commands (clarify, review,
-  scoreboard, etc.) are unaffected. Curfew wraps past midnight correctly (e.g. start=22,
-  duration=6 → 22:00–04:00).
-- **LLM fallback**: `llm.py` — providers are tried in list order from independent
-  queues in `config.yaml`: `llm.smart_model` for judge/review and
-  `llm.general_model` for everything else (clarify, summaries, editorial
-  translation, JSON repair, and other tasks). `multimodal_*` task names only mark
-  that the request carries image parts; they route to `llm.general_model` too, so
-  those providers must accept image inputs. Each
-  provider is retried internally (`llm.max_retries`) before moving to the next.
-  All providers use the OpenAI-compatible `/chat/completions` format.
-  DashScope/阿里云百炼 providers are called with HTTP+SSE streaming to avoid the
-  10-minute synchronous HTTP limit; providers with `stream: true` do the same;
-  other providers use the normal JSON response path.
-  `reasoning_effort`, `thinking`, temperature override, and provider-specific
-  extra body fields are controlled per provider; unsupported fields may be ignored
-  or rejected by upstream APIs.
-- **Summary semantic double-check**: every generated problem summary is audited against
-  the original statement/input/limits by a second structured request through
-  `llm.general_model`. The checker treats symbol scope, index arithmetic, object counts,
-  loop endpoints, operations, and constraints as semantic facts. Before that request, a
-  deterministic source-aware gate also rejects unambiguous outside-addition → nested-index
-  transcription errors such as `p_i+1` → `pᵢ₊₁`, and preserves explicit source conventions
-  whose omission would make a definition ambiguous (for example, an isolated vertex also
-  counting as having only incoming edges). A failed gate or audit triggers one targeted
-  repair followed by another audit; indeterminate or repeatedly failing audits reject the
-  summary so the caller can retry instead of posting it. `problem_summary.py` owns the
-  side-effect-free preparation result; `problem_summaries.json` accepts only a verified
-  result bound to the current statement fingerprint, so stale/legacy cache entries are
-  not used as trusted summaries.
-- **Official CF tutorials**: Scraped editorials live under `{data_dir}/tutorials/{pid}.json`
-  (see `tools/cf_tutorial_agent.py`; low-level CF HTML helpers live in
-  `tools/scrape_cf_tutorial.py`). `editorial_content.py` contains only normalized
-  editorial models and extraction rules, so the scraper and runtime action share parsing
-  without importing each other. `editorial_preparation.py` owns the complete
-  side-effect-free runtime action: discover candidates, validate them against the
-  statement, and translate the first verified match. Candidate bundles are never
-  persisted. `tutorials.py` is the persistence/read boundary and commits source,
-  translation, then the source-bound verified marker last. Editorial completion does
-  not gate the next-problem READY slot. The worker starts editorial work from the READY
-  notification and continuously retries incomplete current/next work; publication
-  reasserts the same trigger. On **first AC**,
-  congrats is sent in `_finalize_submit`, then
-  `schedule_post_solve_editorial_followup()` only **delivers** (awaits in-flight prefetch if
-  needed). Neither path uses the state scheduler. Tutorial scraping depends on Playwright
-  with Chromium installed for browser fallback when HTTP fetches hit Codeforces blocking.
-  `/review` uses English editorial in LLM context only. Tutorial-specific parsing and
-  dynamic-fragment handling remain in `tools/scrape_cf_tutorial.py`; its page-fetching
-  entry points delegate to `problems/cf_fetcher.py`.
+- **Identity (D1)**: PKs are official openids (str). User = `user_openid` (group events
+  carry `author.member_openid`, cross-group stable == C2C user_openid). Group =
+  `group_openid`. Message id = str (`ROBOT1.0_…`). No int QQ/group numbers, no /bind. Legacy
+  group data hot-migrates by nickname (see `legacy_migration`).
+- **Group = view (D3/D9)**: one global `submissions` table (user×problem) +
+  `group_posts`/`group_solves`. A group's scoreboard aggregates submissions joined to its
+  posts. Solving P in group A records globally; group B learns only when the user `/sync`s.
+- **Database (D3)**: SQLite + aiosqlite, `{data_dir}/kouhai.db`, WAL, FK on, explicit
+  `BEGIN IMMEDIATE`. One shared connection guarded by a connection-wide `asyncio.Lock` —
+  every `execute/fetch_*/transaction` serialized. Repos `db/repos/*.py`; `Database`
+  `db/database.py` (`get_database()`/`set_database()`). Tables: meta/users/groups/problems/
+  editorials/group_posts/submissions/group_solves/bad_reports/last_interaction/reply_budget/
+  prefetch_slot/group_used/message_refs/legacy_migration_map/group_order_floor.
+- **Transport (D4)**: `official/OfficialSender` (send_group_text/markdown/at/media/
+  image_bytes/image_url, react, recall). No OneBot segments. Content mapping:
+  - incorrect / clarify / congrats / short review → **markdown** (`msg_type=2`; @ =
+    `<qqbot-at-user id="member_openid"/>`; @all = `<qqbot-at-everyone/>`, text+markdown since
+    2026-10-26, admin + 1/group/day).
+  - card-level (help/scoreboard/long review/editorial/history) → **long image** (`render/`
+    Playwright screenshot of a mobile-QQ forward-card HTML replica) as base64 media
+    (`msg_type=7`). `msg_type=8` 图文卡片 exists but unused. **Problem card** (`/np`+`/pb`)
+    is the exception: ONE markdown message, fixed-height thumbnail + buttons same bubble.
+  - confirmations (👀 ack / 👌 clear+feedback+sync / 🙅 offtopic / 🧐 second-judge) → tiny
+    emoji that **@s the triggering user** (`sender.react(..., user_openid=…)`; no user →
+    plain emoji). 🧐 has no other text. Button-callback `/clear`
+    (`PendingRequest.from_callback`) sends no 👌 (QQ shows "操作成功" toast); typed keeps 👌.
+  - `ReplyBudget`: passive first (group 5min/5 per msg_id), active fallback (1000/group/day
+    persisted; per-group 20/qpm + bot-wide 60/qpm, 30 unverified). Graceful degradation.
+  - No group reaction (表情表态 channel-only) or poke → tiny emoji. Recall = DELETE
+    messages/{id} (own ≤2min; admin may recall member messages).
+- **Media (Q2)**: `official/media.py` MediaCache keys sha256 → file_info (ttl−30s; ttl=0
+  permanent). Upload POST /v2/groups/{gid}/files `file_data` base64 + `srv_send_msg:false`
+  → file_info; send `msg_type=7 media:{file_info}`. **Media library (素材管理)** for
+  markdown images: `rest.upload_media_image` prepare→PUT presigned→complete
+  (`/v2/media-images/*`) → `qqbot-media://image/v1/<token>` url + image_id (10MB,
+  png/jpeg/gif/webp, **100/bot**, 90-day sliding expiry). PUT → COS presigned (own query
+  auth, no QQBot header, Content-Type == prepare value). `sender.upload_markdown_image` →
+  `(url,image_id)|None`; `delete_markdown_image` frees source after delivery (platform keeps
+  a 转存 copy for the sent message; a deleted url cannot be re-referenced in a NEW send →
+  re-upload each time; PNG stays prerender-cached).
+- **Buttons (inline keyboard)**: `official/keyboard.py` builds
+  `keyboard.content.rows[].buttons[]`. **Markdown-only** (media/image can't carry buttons).
+  Problem card = ONE markdown message: inline thumbnail `![题目 #Wpx #Hpx](qqbot-media://…)`
+  + button row same bubble. Thumbnail **fixed display height 132**
+  (`_PROBLEM_CARD_THUMB_HEIGHT`; `_thumb_hint(w,h)` → `hw=round(132*w/h)`, taller statements
+  shrink width not height). `#Wpx #Hpx` hint required for `qqbot-media://` (else alt text)
+  and IS respected. Alt = generic title only, **no CF pid/title** (anti-spoiler).
+  Render/upload/send failure → plain text (no buttons). `action.type` 0=open URL,
+  1=callback (fires `INTERACTION_CREATE` with `data.resolved.button_data`, no visible
+  message), 2=command (inserts `@bot <data>`; `enter=false` pre-fill / `true` auto-send;
+  enter/reply type=2/single-chat-only). Command buttons' `@bot` satisfies require-@.
+  `permission.type=2`, `render_data.label` ≤10 chars, `unsupport_tips` required, `bot_appid`
+  from config (omitted if unset). One row left→right sharing width (1 spans, 2 split).
+  Wiring: problem card [提交`/sbm`, 询问题意`/clrf`]; clarify reply [提交`/sbm`,
+  继续询问`/clrf`]; incorrect [继续提交`/sbm`(type2), 清空上下文`/clear`(type1)]; congrats
+  [跳转原题→CF URL, 再来一题`/np`(type1)] (`congrats_keyboard(pid)`; bad pid drops jump);
+  `/np --force` skip notice [跳转原题] (`jump_original_keyboard`); unsolved-`/np` rejection
+  [查看当前题目`/pb`(type1)] (`view_problem_keyboard()`).
+- **Callback ≡ typed command (D17)**: no-arg 再来一题(`/np`)/清空上下文(`/clear`)/查看当前
+  题目(`/pb`) are **type=1 callbacks**. On `INTERACTION_CREATE` (type=11, scene=group)
+  `handlers._interaction_to_message` acks (`PUT /interactions/{id} {"code":0}`,
+  `sender.ack_interaction`; required for type=11/12, code=0 = "received") then synthesizes an
+  equivalent group message (`at_bot=True`, `message_id=""`, `content=button_data`) through
+  the **same `process_event`** — cooldowns/`--force` friction/busy reminders byte-identical;
+  replies ride active quota. Dedup by `interaction_id` (same LRU). Non-type-11/non-group/
+  non-slash/missing identity ignored (no ack). Divergence: callback `/clear` suppresses 👌.
+  **Interaction events carry no nickname** → button-only members migrate after first
+  chat/typed message (official limitation; owner accepted).
+- **Render (P2)**: `render/browser.py` RenderBrowser singleton (headless Chromium,
+  `screenshot_html(html, width=720, device_scale_factor=2)`); `render/html.py` card HTML;
+  `render/forward_card.py` `send_forward_card(...)` renders→uploads→sends, degrades to text,
+  **never raises**. `render/avatars.py` AvatarCache pre-fetches `author.avatar` (public
+  `thirdqq.qlogo.cn` JPEG) to base64 data URI (parallel, LRU+TTL, 60s negative cache);
+  failure → letter-color circle. Bot avatar built-in `render/assets/bot_avatar.jpg` (READY
+  `username` authoritative, no avatar field). Builders `handlers/cards.py`.
+- **Multi-group (D7/D15)**: dispatch serves any group sending an event (no `current_group`
+  filter; membership is the gate). Worker keeps `group_openid → GroupServices` lazily **and
+  seeds known groups from `group_posts` at startup** (prefetch/editorial resume). C2C/private
+  ignored.
+- **Lifecycle (D5/D16)**: outbound WS has no listen port → identity is `app_id`. pidfile
+  `{data_dir}/run/{app_id}.pid`; start/restart/stop/status select by pidfile + cwd and
+  **verify `/proc/<pid>/cmdline` contains `kouhai_bot.worker`** before killing (recycled PID
+  must not be killed). Logs `{data_dir}/logs/{app_id}/YYYY-MM-DD.log`. prod/test = separate
+  app_id.
+- **Commands**: each `handlers/cmd/*.py` exports `register()` → `CommandDef`;
+  `registry.discover_commands()` scans via `pkgutil.iter_modules`. Handlers take one `Ctx`.
+  **Alias-only**: an aliased command registers ONLY its short alias as a usable trigger; the
+  full name is internal identity (dispatch rewrites alias→canonical before parsing) and is
+  NOT accepted. Six aliases: `/sbm`→submit, `/clrf`→clarify, `/rv`→review, `/np`→newproblem,
+  `/pb`→problem, `/fb`→feedback. Alias-less (tag/scoreboard/status/sync/clear/range/help)
+  register their own name. `CommandDef.trigger` = alias[0] if aliased else name. New commands
+  `aliases=[]` unless approved. User-facing hints use the public trigger, never full name.
+- **Ctx (D8)**: `handlers/context.py` `Ctx(group_openid, user_openid, message_id, raw_text,
+  args, nickname, event)`; `db/sender/browser/name` read `handlers/runtime.py`
+  `get_runtime()` (worker `set_runtime` at boot; tests inject fake). `display_name` falls
+  back to `openid[:8]`, never a placeholder. Since 2026-11-16 group `author` carries
+  `username`/`member_nickname`/`avatar`; `normalize_event` resolves nickname (card preferred)
+  and passes avatar + `mentions`/`message_scene`/`msg_elements`.
+- **Dispatch (D14)**: group messages only; callbacks first synthesized (D17) into the same
+  path. Strip leading junk **and `<@bot>` mentions** (quoting a bot card auto-@bot, arrives
+  GROUP_MESSAGE_CREATE); dedup by message_id (global LRU, silent drop before @-gate/
+  cooldown). **Other-bot guard**: `mentions[]` has a bot (`bot=True`) not us (`is_you=False`)
+  and none us → ignore whole message. Every group message feeds
+  `legacy_migration.schedule_migration` (fire-and-forget). **Require-@ gate**:
+  `_mentions_us(event)` = `at_bot` (GROUP_AT_MESSAGE_CREATE) **or** any `mentions[]`
+  `is_you=True` (chip / quoted card / full-message @); un-addressed chatter and bare `/cmd`
+  drop. Then per-(group,user,command) cooldown (silent drop), alias→canonical, Ctx, spawn
+  (`create_task`) or await. No reaction/notice/poke/friend-request branches.
+- **Inbound quote (Q10/E3, 实测)**: inbound @ renders `<@openid>` (**no `!`**).
+  `message_scene.ext` = **list of `"key=value"` strings** (`msg_idx`/`ref_msg_idx`/
+  `auth_token`); `parse_scene_ext` splits on first `=`. Quote = top-level `message_type=103`;
+  `msg_elements[0].content` = quoted text, `.msg_idx` = quoted REFIDX == `ref_msg_idx`. No
+  history API — quoted text inline. Send responses return `ext_info.ref_idx`; sender
+  captures id→ref_idx. `/np`//`/pb` persist card ref_idx→pid in `message_refs` (PK
+  `(group_openid, ref_idx)`); `/review` matches inbound `ref_msg_idx` via `posts.pid_for_ref`
+  to target a quoted older **solved** card, else latest solved. Member/group-info REST
+  whitelist-only (11253); nickname/avatar from event author.
+- **Rating range**: global `problem.min_rating/max_rating`; per-group `/range` override (any
+  member; exactly two ints → min/max validate, else usage hint). Stored in `groups`.
+- **Newproblem friction**: cooldown + plain `/np` on unsolved rejected; exact `/np --force`
+  forces. Cooldown falls back to persisted `posted_at`.
+- **CF/editorial helpers**: `problems/fetcher.py:normalize_mathjax()` keeps only TeX source
+  (`$$$...$$$`), discards rendered/MathML copies (else judge sees duplicated numbers).
+  `problems/cf_fetcher.py` cloudscraper then headless Chromium on 403/timeout/challenge;
+  `content_valid()` usability gate. Editorial extraction matches Div1/Div2 mirrors by title,
+  distinguishes easy/hard; uncertain → `match=false`. Picker stderr classified on full text.
+- **Removed**: private judge, 打星/user_groups/dynamic CD, curfew, jev/sbmjev, top5, NapCat,
+  friend-request approval, poke/notice, echo; `/setproblem`(`/sp`), `/testcd`, `/bad`.
 
 ## Configuration
 
-### config.yaml
+`config.yaml` at repo root (or `KOUHAI_CONFIG=/path`); **never committed** (`.gitignore`).
+Copy `config.example.yaml`.
 
-Runtime config comes from `config.yaml` at the repo root (or set `KOUHAI_CONFIG=/path/to/config.yaml`).
-The file is **never committed** — `config.yaml` is in `.gitignore`.
-Copy `config.example.yaml` to `config.yaml` and fill in your values.
-
-All providers use the OpenAI-compatible `/chat/completions` endpoint.
-``base_url`` should include any version prefix (e.g. `https://api.openai.com/v1`,
-`https://api.deepseek.com`); `/chat/completions` is appended automatically.
-
-#### Top-level keys
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `bot_qq` | int | — | Bot's QQ number |
-| `napcat_ws_host` | str | `0.0.0.0` | WS listen host — MUST be `0.0.0.0` when NapCat runs in Docker |
-| `napcat_ws_port` | int | 8095 | WS listen port |
-| `napcat_http_host` | str | `127.0.0.1` | NapCat HTTP API host |
-| `napcat_http_port` | int | 3000 | NapCat HTTP API port |
-| `current_group` | int | — | QQ group served by the bot (**required**) |
-| `data_dir` | str | `~/.kouhai-bot` | Shared data directory |
-
-#### `llm` section
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `llm.max_retries` | int | 2 | Max retries **per provider** before moving to next |
-| `llm.retry_base_delay_sec` | float | 1.0 | Exponential backoff base |
-| `llm.retry_max_delay_sec` | float | 8.0 | Max backoff cap |
-| `llm.judge_timeout_sec` | int | 1200 | Judge LLM timeout |
-| `llm.clarify_timeout_sec` | int | 600 | Clarify LLM timeout |
-| `llm.review_timeout_sec` | int | 600 | Review LLM timeout |
-| `llm.summary_timeout_sec` | int | 120 | Summary + editorial translation timeout |
-| `llm.smart_model` | list | — | Ordered fallback provider list for `/submit` judge and `/review` (**required, min 1**) |
-| `llm.general_model` | list | — | Ordered fallback provider list for `/clarify` (incl. image-bearing statements), summaries, editorial translation, sample-note translation, and other LLM tasks; providers must accept image inputs (**required, min 1**) |
-
-Each provider in `llm.smart_model` or `llm.general_model`:
+### `official` (required)
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `name` | — | Provider identifier for logging (**required**) |
-| `api_key` | — | API key (**required**) |
-| `base_url` | `https://api.openai.com/v1` | Base URL for chat completions |
-| `model` | — | Model name for this provider entry (**required**) |
-| `reasoning_effort` | — | Provider reasoning effort (e.g. `minimal`/`low`/`medium`/`high`/`xhigh`/`max`, if supported upstream) |
-| `stream` | `false` | Send `stream=true` and read SSE chunks for this provider; DashScope/阿里云百炼 streams automatically |
-| `send_thinking` | `true` | Whether to pass handler-provided `thinking` payloads to this provider |
-| `temperature` | — | Optional provider-level temperature override; omit to use the task's requested temperature |
-| `extra_body` | `{}` | Extra JSON fields merged into this provider's chat-completions request body |
-| `model_tag` | `""` | Short string appended to every LLM-generated user message (judge/clarify/review/summary/editorial); empty means no tag |
+| `app_id` | `""` | Bot AppID (**required**; env `KOUHAI_APP_ID`) |
+| `app_secret` | `""` | Bot AppSecret (**required**; env `KOUHAI_APP_SECRET`) |
+| `bot_name` | `""` | Card attribution name (user nicknames from events) |
+| `sandbox` | `false` | Sandbox REST domain (largely deprecated) |
+| `api_base` | `https://api.bot.qq.com` | REST base |
+| `token_base` | `https://api.bot.qq.com` | access_token base (`/app/getAppAccessToken`) |
+| `intents` | `(1<<25)\|(1<<26)\|(1<<24)` | group+C2C / interaction / group-member |
 
-#### `qwen` section
+`validate_official()` fails fast if app_id/app_secret missing. `bot_qq`/`current_group`
+optional (default 0); legacy `napcat_*`/`user_groups`/`curfew`/`jev`/`qwen` parsed but unused.
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `qwen.api_key` | — | Legacy Qwen-VL API key |
-| `qwen.base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Legacy Qwen-VL base URL |
-| `qwen.model` | `""` | Legacy Qwen-VL model name; no longer required for runtime statement images |
+### `llm`
 
-#### `problem` section
+Two ordered fallback queues: `smart_model` (judge/review) and `general_model` (everything
+else: clarify incl. images, summaries, editorial/sample-note translation, JSON repair).
+`multimodal_*` tasks only mark image parts; route to `general_model` (must accept images).
+Each provider retried `max_retries` times before the next. OpenAI-compatible
+`/chat/completions`; `base_url` includes version prefix.
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `problem.min_rating` | 2000 | Min CF rating |
-| `problem.max_rating` | 3000 | Max CF rating |
-| `problem.newproblem_cooldown` | 300 | `/newproblem` cooldown (seconds) |
-| `problem.submit_ac_backdoor` | `""` | If non-empty, matching `/submit` skips judge |
+| Key | Default | | Key | Default |
+|-----|---------|-|-----|---------|
+| `max_retries` | 2 | | `judge_timeout_sec` | 1200 |
+| `retry_base_delay_sec` | 1.0 | | `clarify_timeout_sec` | 600 |
+| `retry_max_delay_sec` | 8.0 | | `review_timeout_sec` | 600 |
+| | | | `summary_timeout_sec` | 120 |
 
-#### `curfew` section
+Per provider: `name`/`api_key`/`model` (required), `base_url`, `reasoning_effort`, `stream`
+(SSE), `send_thinking` (default true), `send_response_format` (default true), `temperature`,
+`extra_body`, `model_tag`. `send_response_format:false` drops `response_format`
+(`json_object`) — needed for **deepseek-flash** (degenerates to whitespace-only `content`
+~75% under `json_object`; A/B 6/8 empty with, 0/8 without). Prompts already instruct JSON +
+`parse_json_with_llm_repair`, so safe. DashScope/百炼 (by URL/name) and `stream:true` use
+HTTP+SSE — don't blindly send `stream=true` to all (some gateways reject unknown fields).
+Transient failures (timeouts, aiohttp errors, 408/409/429/5xx, malformed empty-choice/SSE)
+retry with backoff; other 4xx fall back immediately. All exhausted → reply suggests
+contacting an admin.
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `curfew.start_hour` | 0 | Start hour (0-23, Beijing time) |
-| `curfew.duration_hours` | 0 | Duration in hours; 0 disables curfew |
-
-#### `user_groups` section
-
-A list of non-default user groups. Users not listed are in the `default` group.
-
-Each group entry:
+### `problem`
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `name` | — | Group name (`[A-Za-z0-9_-]+`) (**required**) |
-| `display_name` | `name` | Display name (e.g. `打星`) |
-| `user_ids` | `[]` | List of QQ user IDs |
-| `submit_delay_sec` | 0 | Minimum post-new-problem submit delay; `>0` enables dynamic per-user waits |
-| `submit_delay_message` | — | Rejection message; `{wait}` → formatted delay |
+| `min_rating` | 2000 | Global min CF rating |
+| `max_rating` | 3000 | Global max CF rating |
+| `newproblem_cooldown` | 300 | `/np` cooldown (sec) |
+| `submit_ac_backdoor` | `""` | Non-empty: matching `/submit` skips judge |
 
-### ⚠️ NAPCAT_WS_HOST — Docker gotcha
+`data_dir` (default `~/.kouhai-bot`) holds kouhai.db, statement mirror, logs, pidfiles,
+render cache, JSON READY slot.
 
-NapCat runs in a Docker container and connects to the host via `host.docker.internal`
-(Docker bridge IP: 172.17.0.1). If the bot binds to `127.0.0.1`, Docker containers
-CANNOT connect — they'll get ECONNREFUSED. Always use `0.0.0.0` when NapCat is in Docker.
+### `legacy_migration` (old service group only)
 
-### NapCat Docker wiring checklist
+Runtime hot-migration of the legacy file-store into SQLite, gated to ONE group. Official API
+has no roster/history endpoint (member-list invite-only: 11253) → QQ→openid can't be mapped
+in bulk. On every service-group message dispatch captures `(openid, nickname)`, matches
+nickname to an old QQ id in a staged source DB, migrates that member's old GROUP solves +
+submissions once (atomic, idempotent via `legacy_migration_map`). Private data NOT migrated;
+other groups no-op.
 
-This bot is a **reverse WebSocket server** plus a **NapCat HTTP API client**:
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Master switch |
+| `group_openid` | `""` | Legacy service group openid (only this group migrates) |
+| `source_db` | `""` | Staged `legacy_source.db` path (local runtime, **never committed**) |
 
-- `kouhai_bot.napcat.client.NapCatServer` listens on `napcat_ws_host:napcat_ws_port`;
-  NapCat must connect to it through a OneBot11 `websocketClients` entry.
-- Message sending uses `napcat_http_host:napcat_http_port` and calls NapCat OneBot11
-  HTTP actions such as `send_group_msg`, `send_private_msg`,
-  `get_group_member_info`, `set_friend_add_request`,
-  `get_doubt_friends_add_request`, and `set_doubt_friends_add_request`; NapCat
-  must expose an enabled OneBot11 `httpServers` entry on that port.
+`legacy_migration.py`: nickname match exact-stripped, latest preferred then historical;
+ambiguous (>1 old QQ)/unmatched skipped + logged. Catalog insert-if-absent (never clobbers
+live). Statements stored RAW so `statement_fingerprint` matches old markers;
+summaries/editorials `verified` only when old marker sha binds to that fingerprint
+(legacy/stale untrusted; `no_editorial` skipped). All SQL parameterized. Accelerated by the
+group enabling 「获取群内全部消息」(GROUP_MESSAGE_CREATE) so ordinary chatter triggers
+capture. Button callbacks carry no nickname → button-only members migrate after first
+chat/typed message. See DECISIONS.md「旧数据热迁移补丁」.
 
-When NapCat is deployed with Docker Compose, prefer this pattern:
-
-```yaml
-services:
-  napcat:
-    environment:
-      ACCOUNT: "<bot_qq>"  # enables fast login after the first successful login
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "3000:3000"  # OneBot HTTP API for bot -> NapCat actions
-      - "8095:8095"  # optional NapCat WS server ports for other clients
-      - "8096:8096"
-      - "8097:8097"
-      - "6099:6099"  # WebUI
-```
-
-NapCat OneBot11 config should include both sides:
-
-```json
-{
-  "network": {
-    "httpServers": [
-      {
-        "enable": true,
-        "name": "kouhai-http-api",
-        "host": "0.0.0.0",
-        "port": 3000,
-        "enableCors": true,
-        "enableWebsocket": false,
-        "messagePostFormat": "array",
-        "token": "",
-        "debug": false
-      }
-    ],
-    "websocketClients": [
-      {
-        "enable": true,
-        "name": "kouhai-bot-reverse-ws",
-        "url": "ws://host.docker.internal:<napcat_ws_port>",
-        "messagePostFormat": "array",
-        "reportSelfMessage": false,
-        "reconnectInterval": 5000,
-        "token": "",
-        "debug": false,
-        "heartInterval": 30000
-      }
-    ]
-  }
-}
-```
-
-Avoid using a bot `napcat_ws_port` that is already published by the NapCat container
-as a WebSocket **server** port. If Docker publishes `8095:8095`, `8096:8096`, and
-`8097:8097`, then the bot cannot also listen on host `8097`; `uv run restart` will
-fail with `OSError: [Errno 98] ... address already in use` or
-`Detached bot failed to bind NapCat WS port ...`. Pick a free host port such as
-`8098` for `config.yaml` and point NapCat `websocketClients[].url` at that same port.
-
-Troubleshooting symptoms:
-
-- `getaddrinfo ENOTFOUND host.docker.internal` in NapCat logs means the container
-  cannot resolve the host alias. Add Compose `extra_hosts:
-  ["host.docker.internal:host-gateway"]` and recreate the container.
-- Bot logs show `NapCat connected from ...`, but group replies do not send and
-  `send_group_msg failed: Server disconnected`: reverse WS is working, but NapCat's
-  OneBot HTTP server is missing or not loaded. Enable `httpServers` on
-  `napcat_http_port` and restart NapCat.
-- NapCat asks for a QR code after every restart even after a successful login:
-  set Compose `ACCOUNT: "<bot_qq>"` so the container starts QQ with `-q <bot_qq>`.
-
-Useful checks:
-
-```bash
-uv run status
-tail -n 80 ~/.kouhai-bot/logs/<group_id>/$(TZ=Asia/Shanghai date +%F).log
-docker logs --tail 160 napcat
-docker exec napcat getent hosts host.docker.internal
-curl -sS -X POST http://127.0.0.1:3000/get_status \
-  -H 'Content-Type: application/json' -d '{}'
-```
-
-Healthy state:
-
-- `uv run status` reports `occupied=yes` and `current_worktree_running=yes`.
-- Bot log contains `NapCat connected from ...`.
-- NapCat log contains `HTTP服务: 0.0.0.0:3000` and
-  `WebSocket反向服务: ws://host.docker.internal:<napcat_ws_port>`.
-- `get_status` returns JSON with `"online": true` and `"good": true`.
-
-### LLM fallback
-
-Providers in the selected queue are tried **in list order**. Each provider is
-retried up to `llm.max_retries` times internally (exponential backoff). On
-exhaustion, the next provider in that same queue is tried. The first successful
-response wins.
-
-Common fallback pattern: OpenAI (better quality, less stable) → DeepSeek (stable backup)
-for smart tasks, with a separate cheaper/faster general queue:
-```yaml
-llm:
-  smart_model:
-    - name: openai
-      model: "gpt-5.5"
-      reasoning_effort: "high"
-    - name: deepseek
-      model: "deepseek-v4-pro"
-  general_model:
-    - name: qwen
-      model: "qwen3.7-plus"
-    - name: deepseek
-      model: "deepseek-v4-chat"
-```
-
-All providers receive the same base request payload, then provider-level controls
-can add or suppress optional fields. `reasoning_effort` is sent when configured and
-not disabled by the caller. `thinking={"type": "enabled"}` is sent only when the
-handler requests it and the provider has `send_thinking` enabled. Use `temperature`
-or `extra_body` for gateway-specific requirements instead of adding per-model
-branches in `llm.py`. DashScope/阿里云百炼 providers (detected by
-`dashscope.aliyuncs.com` base URL or
-`aliyun`/`bailian`/`dashscope` provider name) and providers with `stream: true`
-additionally receive
-`stream=true`; `llm.py` reads the SSE `data:` stream and concatenates
-`choices[].delta.content`. Do not blindly send `stream=true` to every provider:
-some OpenAI-compatible gateways reject unknown or unsupported fields instead of
-ignoring them.
-
-### Transient failures
-
-Transient LLM failures (timeouts, `aiohttp` client errors, `408/409/429/5xx`,
-malformed empty-choice responses, malformed DashScope SSE responses) are retried
-inside `llm.py` with exponential backoff at the per-provider level. Non-retryable
-errors (4xx besides 408/409/429) cause immediate fallback to the next provider.
-
-If all providers are exhausted, the user-facing reply should suggest contacting
-an administrator rather than claiming the model is "thinking too long".
+Migrated solves keep old global `order_num`. Source `MAX(order_num)` persisted per group in
+`group_order_floor`; `record_solve` numbers new solves `max(current_max, floor)+1` (native
+always above old max). `worker.run()` calls `ensure_order_floor(db)` before gateway connect
+(closes first-message-solves race). Non-migration groups → plain `max+1`.
 
 ### Model tags
 
-Each provider can have a `model_tag` — a short emoji/string (e.g. `🐳`, `֎AI`). When
-non-empty, it is appended directly (no newline) to every LLM-generated user message:
-`/submit` results (correct and incorrect), `/clarify`, `/review`, LLM-generated
-summaries, and official editorial translations. The LLM has no knowledge of the tag —
-tagging is done entirely by the framework after the response is received.
-
-The tag reflects which provider actually served the request. If the primary provider
-succeeded, its tag is used. If a fallback provider was invoked, its tag appears instead.
-An empty `model_tag` disables the feature per-provider.
-
-Persistence and derived surfaces (all user-visible LLM output carries the tag):
-
-- **The LLM never sees tags.** Tags are display-only metadata. All context records
-  (judge/clarify/review) store the raw LLM text plus a dedicated `model_tag` field
-  (`_context_record` in `handlers/cmd/submit.py`, set only when non-empty). The
-  prompt builders (`shared._history_dialogue`, `submit._build_review_history`) run
-  stored `reply`/`reason` through `llm.strip_model_tags`, which removes trailing
-  configured-tag suffixes — covering both legacy records that embedded the tag in
-  the stored reply and tags an LLM may echo from earlier dialogue. Mid-text
-  occurrences are user content and are never stripped.
-- `llm.append_model_tag(text, tag)` is the single display-time append helper used by
-  every QQ send path (submit correct/incorrect, clarify, review, sync cheer). Besides
-  rstripping, it refuses to double a tag the text already ends with (the same echo
-  case, at render time).
-- The forwarded history card (`private_judge.build_history_card_nodes` for the
-  per-sender chat-record nodes; `format_history_records` is kept for the plain-text
-  fallback) renders the tag at the end of every bot message, and for empty-reply
-  incorrect verdicts falls back to `reason` + `。再想想？🤔` exactly like the live
-  message in `submit.py:_finalize_submit`. Legacy records whose `reply` already
-  embeds the tag render it once (no field → no append).
-- The `/sync` scored cheer (private AC synced into the group scoreboard) appends the
-  tag of the synced private correct record. The scoring gate and tag lookup share
-  `private_judge.first_correct_submit_record` so they cannot drift; the cheer format
-  (including the named-group `🏆 {display_name} Top 5：` title) mirrors
-  `_send_scoreboard_success`.
-- The annotation bundle exporter (`annotations/exporter.py`) carries `model_tag` in
-  both its per-round and `history_before` whitelists, keeping exported provenance
-  symmetric with what users saw.
+Provider `model_tag` (e.g. `🐳`) appended (no newline) to every LLM-generated user message at
+display time; LLM never sees tags. Records store raw text + `model_tag` field; prompt
+builders run stored reply/reason through `llm.strip_model_tags` (trailing configured tags
+only). `llm.append_model_tag(text, tag)` is the single display helper (rstrips, no doubling).
 
 ## Data Directory
 
-`~/.kouhai-bot/` — mirrors the old `~/.daily-problem/` structure:
 ```
-groups/<gid>/state.json      # today's problem (+ posted_at unix ts when card was delivered)
-groups/<gid>/scoreboard.json # cumulative {solves, user_submissions}
-groups/<gid>/daily_msg.json  # forward card payload (msg_id/sample_msg_ids/note_msg_id/snake_msg_id 等, for /problem)
-groups/<gid>/next_problem.json # source-bound durable READY slot; atomically claimed by /newproblem
-groups/<gid>/problem_summaries.json # verified, source-bound Chinese summaries keyed by pid
-groups/<gid>/used.json       # used problem IDs
-groups/<gid>/groupctx_*.json # group message context
-groups/<gid>/problem_ratings.json # cached problem rating by pid for weighted scoreboard totals
-groups/<gid>/bad_reports.json  # /feedback reports for the group scope (append-only, see Data Format)
-groups/<gid>/last_interaction.json # per-user latest delivered interaction record (per-scope /feedback targeting cache)
-private_judge/users/<uid>.json # per-user private judge current problem, history, solved markers, redirect state
-private_judge/bad_reports/<uid>.json # /feedback reports for a user's private-judge scope (append-only)
-private_judge/last_interaction/<uid>.json # latest delivered interaction record (private-scope /feedback targeting cache)
-annotations/pending/<gid>/<pid>.json # pending human-label bundle for solved problems
-annotations/labeled/<gid>/<pid>.json # completed human-label bundle for solved problems
-statements/<pid>.json        # cached problem statements
-tutorials/<pid>.json         # verified CF editorial source (never an unverified candidate)
-tutorial_translations/<pid>.txt  # cached Chinese editorial for group cards (per pid)
-tutorial_translations/<pid>.verified # statement+editorial-bound READY marker
-tutorial_translations/<pid>.no_editorial # exhaustive source-bound no-match marker
-sessions/                    # per-user session context
-scheduler_config.json        # job config for CURRENT_GROUP
+{data_dir}/kouhai.db                    # SQLite: source of truth
+{data_dir}/run/{app_id}.pid             # instance pidfile
+{data_dir}/logs/{app_id}/YYYY-MM-DD.log # worker log (+8 tz)
+{data_dir}/statements/<pid>.json        # CF statement MIRROR (crawler reuse; DB authoritative)
+{data_dir}/groups/<gid>/next_problem.json # durable READY slot (JSON v2; prefetch_slot table unused)
+{data_dir}/render_cache/problem_cards/<key>/ # pre-rendered /np card (card.png+meta.json; key=version+pid+sha+bot)
 ```
+Picker writes disk mirror; main process writes DB catalog (D6/D13). `legacy_migration_map`
+records migrated openid→old-QQ pairs; `group_order_floor` the per-group legacy order floor.
+Staged `legacy_source.db` lives outside the repo; holds real QQ ids/nicknames, never committed.
 
-Current-worktree runtime state is stored under the repository checkout, not under the
-shared data directory:
+## Commands
 
-```text
-No repository-local runtime queue is used.
-```
+All handlers `async def handle(ctx: Ctx)`; group-only, **require @bot** (`at_bot` or
+`mentions` `is_you=True`; chips/quoted cards auto-@bot). **Public triggers alias-only** (full
+name in parentheses is internal, not usable); alias-less use own name. Table = canonical.
 
-## Command Handlers
+| Command | File | Notes |
+|---------|------|-------|
+| `/submit` (`/sbm`) | submit.py | `smart_model` judge; coordinator; first-blood scoring; offtopic 🙅 no record; 🧐 second judge only if verified editorial cached |
+| `/clarify` (`/clrf`) | clarify.py | `general_model` JSON, anti-spoiler; markdown @asker + buttons |
+| `/review` (`/rv`) | review.py | Latest solved or quoted older solved card; admission snapshot; `smart_model`; `mentions[]` @others; English editorial model-only; short→markdown, long→image |
+| `/newproblem` (`/np`) | newproblem.py | Claims READY slot; unsolved needs exact `--force`; cooldown; image card; commit after delivery |
+| `/problem` (`/pb`) | stubs.py | Resend current card; reuses pre-rendered PNG when pid+fingerprint+bot match, else fresh |
+| `/tag` | stubs.py | Current problem CF tags |
+| `/scoreboard` | stubs.py | Weighted `2^((rating-2000)/300)`; tied ranks; no top5; light-text bubble (`build_scoreboard_html`); migration group adds "数据正在迁移中" note |
+| `/status` | stubs.py | Lists ALL in-flight requests plaintext `🔴 …@昵称 的 submit、…` (admission order + active np); idle → 🟢 |
+| `/sync` | sync.py | Cross-group pull user×current-pid; exact dedup; tagged synced; correct→score |
+| `/clear` | clear.py | Clear caller's current-problem history; 👌 (skip button callback); watermark; args→usage hint |
+| `/feedback` (`/fb`) | feedback.py | Mark latest DELIVERED reply (last_interaction cache only); verbatim snapshot→bad_reports; 👌 |
+| `/help` | help.py | Auto from registry; themed sections (📚/✍️/🔧) one bubble each, Markdown bullets + bold trigger + muted "short for X"; image card |
+| `/range` | range.py | Per-group rating range (smart parsing) |
 
-| Command | File | Handler | Lock | Model | Notes |
-|---------|------|---------|------|-------|-------|
-| `/submit` (`/sbm`) | submit.py | `handle` | ✅ state scheduler | `llm.smart_model` queue | Judge solution, save history, serialize only first-blood/scoreboard; configured dynamic-wait group submits redirect to private judge; private AC does not score until synced |
-| `/clarify` (`/clrf`) | clarify.py | `handle` | ✅ state scheduler | `llm.general_model` queue | Clarify problem details (JSON output, anti-spoiler, no original problem identity), using admission-time pid; private uses pid-specific summary |
-| `/clear` | clear.py | `handle` | ✅ state scheduler | — | Clear the current user's stored submit/clarify/review history for the admission-time current problem or current private problem |
-| `/newproblem` (`/np`) | newproblem.py | `handle` | ✅ post lock | prefetched `llm.general_model` result | Force new problem when solved (or none); unsolved needs exact `/newproblem --force`; a forced refresh announces the skipped problem and sends its verified cached editorial card, when available, before the new-problem card; new-problem cards do not repeat the previous problem; claims the one-slot group prefetch (or awaits its single-flight cold build); samples are forwarded as separate nodes; if statement has `notes`, translate+symbol-normalize and append as a dedicated notes node; commits state only after card delivery succeeds and keeps `daily_msg.json` in sync even on direct-text fallback |
-| `/problem` (`/pb`) | stubs.py | `handle_problem` | ❌ | — | Resend current group/private problem via forward card; group path only uses `daily_msg.json` when pid matches `state.json.today`; if solved, add a friendly `/newproblem` hint |
-| `/tag` | stubs.py | `handle_tag` | ❌ | — | Show current group/private problem CF tags |
-| `/scoreboard` | stubs.py | `handle_scoreboard` | ❌ | — | Cumulative weighted leaderboard; shows the formula at the top, then refreshes latest group nicknames at display time |
-| `/help` | help.py | `handle` | ❌ | — | Auto-generated help (forward card) |
-| `/review` (`/rv`) | review.py | `handle` | ✅ state scheduler | `llm.smart_model` queue | Discuss the latest solved group/private problem by default; quoted group problem cards can target older problems |
-| `/status` | stubs.py | `handle_status` | ❌ | — | Check whether this group or private judge has active stateful work |
-| `/setproblem` (`/sp`) | setproblem.py | `handle` | ❌ | — | Private-only; set current private problem from current group problem, CF pid/link, `random`, or a quoted problem card. Supports rating range (e.g. `/sp 2500-2600`) for targeted difficulty selection |
-| `/sync` | sync.py | `handle` | ✅ short group state lock for group writes | — | Sync current group problem history between group and private judge; empty source aborts without overwrite; the history card is a per-sender chat-record forward (user/bot nodes with real identities; plain-text `👤/🤖` fallback when the forward call fails) |
-| `/testcd` | testcd.py | `handle` | ❌ | — | Private-only; show whether this user can submit the current group problem or how long remains in dynamic submit CD |
-| `/feedback` (`/fb`) | feedback.py | `handle` | ✅ short group state lock for group writes | — | Mark dissatisfaction with the AI's latest DELIVERED reply in the current scope, regardless of problem (works after `/newproblem` and survives `/clear`) — resolved exclusively from the per-user last-interaction cache; markable = any record whose live message was delivered (LLM answers incl. reason-fallback incorrect verdicts, and failure notices timeout/service_unavailable/no_statement), only pending/superseded are skipped; appends a verbatim record snapshot to `bad_reports.json` (group and private stores are separate; `/sync` never moves reports); success acks 👌 (128076) exactly like `/clear` (private gets the fallback message); write-only — no in-chat view command yet; renamed from `/bad` (QQ clients turn a bare `/bad` into an emoji, so it could never reach the bot) |
+### Stateful runtime (GroupCoordinator)
 
-### Stateful Command Runtime
+`/submit`/`/clarify`/`/review`/`/clear` through a per-group `GroupCoordinator`
+(`handlers/cmd/submit.py`); `/np` its own post lock.
 
-Stateful commands (`/submit`, `/clarify`, `/review`, `/clear`) no longer serialize
-through one global lock or one per-group FIFO execution queue. Group requests run
-through a **per-group state scheduler** implemented in `submit.py`; private judge
-requests run through a separate **per-user private coordinator**. `/newproblem` uses
-its own per-group post lock and commits current-problem state only after delivery.
+- **Admission snapshots under lock**: monotonic seq + target pid snapshot **inside
+  `coord.lock`** (submit/clarify/clear → then-current; review → then-latest solved or quoted
+  solved). Never re-read target during compute.
+- **Parallel compute**: LLM starts immediately, global concurrency 8; same-user doesn't wait.
+- **Pending archive**: admitted input saved `result="pending"` + `request_id`; later
+  same-user loads pending + completed (exclude own request_id); final upserts that record.
+  Superseded/timeout/failure stay context (empty reason/reply).
+- **Offtopic no record**: `reaction="123"` → remove pending by request_id, 🙅.
+- **Short critical sections**: DB read/modify/write under coordinator lock
+  (`run_group_state_update`); LLM never holds it; first-blood wait sleeps **outside**.
+- **First-blood serialization**: incorrect/offtopic/failure send immediately. Correct saves
+  immediately; earlier unresolved → "做法判对了～" first; only earliest correct after
+  earlier settle updates scoreboard + cheer+@winner+reveal + schedules editorial. Later
+  correct → `post_solve_correct`, save, no extra message.
+- **Same-user replacement**: newer `/submit`/`/clear` same user+problem before terminal drops
+  older (cancel compute, `status="stale"`); older pending → `superseded` (or removed by
+  /clear). 👀 not terminal.
+- **New problem visibility**: commands see old problem until new card delivers; failed
+  delivery keeps old.
+- **Save-before-deliver**: clarify/review/submit save BEFORE delivering (preserve order).
 
-Key rules:
+Status helpers: `get_group_active_requests` (all in-flight, admission order, {nickname,
+command, user_openid}), `has_active_problem_request`, `get_newproblem_status`.
 
-- **Admission-time snapshots**: every stateful request receives a monotonically
-  increasing per-coordinator sequence and snapshots its target pid at admission.
-  Group `/submit`, `/clarify`, and `/clear` use the then-current group problem;
-  private versions use the then-current private problem. Group `/review` uses the
-  then-latest solved group problem; private `/review` uses the current private problem
-  if solved privately or already solved by the group, otherwise the user's latest
-  private solved problem.
-- **Parallel compute**: expensive LLM work for `/submit`, `/clarify`, and `/review`
-  starts immediately and shares a **global concurrency limit of 8**. Same-user requests
-  do not wait for earlier LLM calls to finish.
-- **Pending archive context**: when a `/submit`, `/clarify`, or `/review` request is
-  admitted for a target problem, its user input is saved immediately to
-  group `scoreboard.json.user_submissions` or private
-  `private_judge/users/<uid>.json.user_submissions` with `result="pending"` and a
-  `request_id`. Later same-user requests load these pending records plus completed
-  history; the current request's own pending record is excluded by `request_id`.
-  Final handling updates that same record in place. Superseded unanswered `/submit`,
-  timeout, and service-failure records therefore remain historical context across
-  restarts with empty `reason`/`reply`.
-- **Offtopic leaves no record**: when the judge marks a `/submit` or `/clarify` as
-  offtopic (`reaction="123"`), the pending record is removed by `request_id`
-  (`remove_user_submission` / `remove_private_submission`) — the interaction is
-  treated as if it never happened: it does not appear in the history card, judge
-  prompts, or `/sync` counts.
-- **Short state critical sections**: JSON read/modify/write endpoints are protected by
-  the relevant group/private coordinator async lock. LLM calls never hold this lock.
-  `/sync` also uses the group coordinator lock when it writes group `scoreboard.json`.
-- **Submit first-blood serialization only**: incorrect/off-topic/failure replies are
-  sent as soon as they finish. Correct submits are saved immediately; if earlier
-  admission-order submit candidates are still unresolved, the user first gets a short
-  “做法判对了～” reply. Only the earliest correct candidate after all earlier candidates
-  settle updates `scoreboard.json`, sends rank/top5/reveal, and schedules the official
-  tutorial. Later correct candidates log `post_solve_correct` and are saved but do not
-  send an extra not-counted message.
-- **Same-user submit replacement**: if a user sends another `/submit` or `/clear` for
-  the same problem before an earlier `/submit` has reached terminal reply handling, the
-  older submit is silently dropped, its local compute task is cancelled, and its command
-  event logs `status="stale"`. The 👀/[睁眼] ack does not count as a terminal reply.
-  This optimization applies only to older `/submit` requests in that exact same-user,
-  same-problem scenario. When superseded by another `/submit`, the older submit's
-  persisted pending record is updated to `result="superseded"` so a quick correction or
-  addendum can refer to it after a restart, and the received `/submit` still counts as a
-  submit attempt in saved user history. When superseded by `/clear`,
-  it is removed with the rest of that user's current-problem context.
-- **New problem visibility**: the worker prepares one candidate without changing
-  `state.json`. `/newproblem` atomically claims it, but all commands continue to see the
-  old problem until the new card is successfully delivered. Failed delivery leaves the
-  old current problem intact; after a forced-refresh skip notice, a final new-card
-  delivery failure sends a correction that the original problem remains active. The
-  claimed candidate is discarded, then background refill begins.
-- **New problem serialization/status**: `/newproblem`, `/newproblem --force`, and the
-  poke trigger use a per-group post lock. User-triggered new-problem commands are
-  rejected immediately with a busy reminder while another post is claiming/building/
-  sending. `/status` reports only admitted post work as busy; routine background
-  prefetch is deliberately invisible.
+### Command flows
 
-Status helpers used by `/status`:
+- **`/submit`**: snapshot pid/solved under lock → AC backdoor short-circuit → else history,
+  👀, judge (`smart_model`). Already-solved at admission → "已经有人解出..." (no judge).
+  Offtopic → 🙅 no record. Correct+first → `posts.record_solve` (score/rank, cheer+@winner+
+  reveal "本题来自 CF{pid} {name} {rating}✨") then `schedule_post_solve_editorial_followup`
+  (background). Incorrect → markdown @asker reason (empty → "reason。再想想？🤔"). Second
+  judge only if verified editorial cached; 🧐 emoji-only. `judge_submission()` sends
+  `json.dumps({"problem","submission","history"})` (JSON, not plain text); statement joins
+  single `\n`.
+- **`/clarify`**: `general_model`, `json_object`, `thinking:enabled`+`reasoning_effort`
+  unconditional. Output `{"reply","reaction"}`; `123` → 🙅 only. No hints/original identity.
+  Grounding = current pid verified summary (`problems.summary_zh`+fingerprint). Reply carries
+  [提交][继续询问] buttons.
+- **`/review`**: latest solved at admission or quoted older solved card
+  (`_resolve_review_pid`: `ref_msg_idx`→`posts.pid_for_ref`, only if solved, else latest).
+  Caller history + @mentioned users' same-problem context from `mentions[]` (ignore
+  is_you/bot/self/dups; nothing persisted to them). `smart_model` free text; verified
+  editorial as **English** (`format_editorial_for_review`, 12k) model-only. Short→markdown
+  @asker; long(>400)→image + bare @asker ping.
+- **`/sync`**: in G for P pull user's P submissions from other groups
+  (`get_cross_group_submissions`, **REPLIED_RESULTS only**), sort by timestamp, **exact
+  dedup** (content+result identical → earliest; zero LLM), import tagged `synced` (source
+  group hidden). Imported correct + G unsolved → `record_solve(source="synced")`; G solved →
+  "只同步记录，不再加分". Idempotent; empty source abort; active same-user/problem reject.
+  History image card; 👌.
+- **`/feedback`**: scope-local, crosses problem switches, survives `/clear`;
+  `last_interaction` cache (DB) ONLY source. Markable = `REPLIED_RESULTS`
+  (correct/incorrect/clarify/review/timeout/service_unavailable/no_statement);
+  pending/superseded unmarkable. Verbatim snapshot (tags kept) → `bad_reports`. 👌; repeats
+  append. Corrupt bad_reports → raise (never reset); corrupt last_interaction → warn+None.
+  Classification `shared.record_kind`.
+- **`/newproblem`**: post lock; busy → reminder not queued. Cooldown starts after delivery
+  (fallback `posted_at`). Claims READY slot (or awaits cold build); previous-problem reveal;
+  image card (summary+samples+optional notes+snake); commits `group_posts`+verified summary
+  only after delivery; releases slot, wakes refill. Plain unsolved → reject (exact
+  `--force`, [查看当前题目] callback). Forced refresh announces skipped problem + cached
+  editorial card. No 👀 (prefetched → fast). **No greeting** (lead = summary+tag+snake).
+  **Pre-render**: prefetch renders long image once →
+  `render_cache/problem_cards/<key>/{card.png,meta.json}` (key=version+pid+fingerprint+bot);
+  random snake `post_msg` frozen in meta.json, reused verbatim so image/text match. `/np`
+  loads cache → `prerendered_png` through `send_problem_card` (upload media library, markdown
+  thumbnail+buttons, skip render); miss renders at post. Best-effort, never blocks READY.
+  `/pb` reuses same cache (`_load_problem_card_cache`); miss renders fresh.
 
-- `get_group_lock_status(group_id)` — earliest active stateful request for that group, if any
-- `get_private_lock_status(user_id, group_id)` — earliest active private request for that user, if any
-- `get_newproblem_status(group_id)` — active `/newproblem` for that group, if any
+### Official tutorials
 
-### `/clear` — Clear current-problem user context
+Offline `tools/tutorial_tools.py crawl|agent|validate`. Runtime `editorial_preparation.py`
+(side-effect-free exhaustive search+validate+translate) + `tutorials.py` (DB `editorials`
+boundary; verified marker bound to BOTH editorial+statement fingerprints; translation UPDATE
+guarded by `source_sha256`). `get_verified_official_editorial(pid)` returns English only when
+fingerprints match. Worker maintenance covers current+READY, resumes interrupted, retries
+INCOMPLETE with backoff (60s base, 6h cap); only completed exhaustive search writes
+`no_editorial`. First-AC delivery via `editorial_followup` (background; warm→immediate; else
+await in-flight then deliver if verified; none→silent skip); shutdown cancels tasks. Card
+translation (`shared.translate_editorial_to_zh`) omits code, avoids LaTeX, normalizes
+symbols; header `📖 {pid} 官方题解` (no 来源 URL). `/review` English(+code) grounding; card
+Chinese without code.
 
-- Targets the caller's stored `user_submissions` records for the **current problem only**
-- Removes that user's saved `/submit`, `/clarify`, and `/review` history for today's pid
-- Runs through the state scheduler and records a clear watermark so earlier in-flight
-  requests for that user/problem cannot write history after clear
-- On group success it reacts to the triggering message with the typed `👌` emoji payload
-  (`type=2`, `id=128076`) and sends no extra text. In private chats it cannot use
-  message reactions, so it sends a plain text `👌` private message instead of a
-  `face` segment.
+### Scheduler
 
-### Dispatch Pattern
-
-`handlers.process_event()` is the reusable command-dispatch core. The worker calls it with
-`spawn_handlers=True`, so the NapCat WS receive loop does not wait for long-running command
-handlers. Tests may pass `spawn_handlers=False` to await a handler directly.
-
-Read-only commands (`/problem`, `/tag`, `/scoreboard`, `/help`, `/status`) still do
-not enter the state scheduler.
-Private dispatch maps DMs to `CURRENT_GROUP`, requires the sender to be a member of that
-service group, and only allows the private command whitelist: `/setproblem`, `/problem`,
-`/tag`, `/submit`, `/clarify`, `/review`, `/feedback`, `/clear`, `/sync`, `/testcd`, `/status`,
-and `/help`.
-Private commands do not require @mentions and should not send @ segments back.
-
-Friend request events are not commands and are not logged to command event logs.
-`process_event()` handles normal `type="request"` friend requests before message
-dispatch. `worker.py` separately polls NapCat's doubtful friend request list because
-those requests may only appear through `get_doubt_friends_add_request`. The poller
-runs every 60 seconds. Both paths accept only confirmed `CURRENT_GROUP` members and
-otherwise return silently; requests already consumed by another QQ client may not be
-visible to the poller.
-
-
-
-### `/submit` — Judge Flow
-
-1. Extract submission text after `/submit`
-2. If curfew is active (`curfew_start_hour` → `curfew_start_hour + curfew_duration_hours`),
-   reply with a friendly rest message; do not enqueue
-3. Enter the group's state scheduler long enough to atomically check dynamic user-group
-   submit wait, snapshot today's pid, and snapshot solved state. If the user is still
-   inside the effective wait window (`max(submit_delay_sec, saved wait_sec)` after
-   `posted_at`) and belongs to a dynamic-wait group, redirect the submit to private
-   judge instead of judging/scoring in the group. If the private intro or repeated
-   submit text cannot be sent, do not recall the group message, do not judge, and do not
-   consume the first-notice marker. Non-dynamic waits still reply with the group's delay
-   message and do not enqueue.
-4. If not blocked, get a sequence number and enqueue the snapshotted pid/solved state
-5. Background compute starts immediately; it loads completed user history plus earlier
-   pending user inputs for the same `(group, user, pid)`. The current request's own
-   pending archive record is excluded by `request_id`; superseded unanswered `/submit`
-   text is visible as `result="superseded"` context.
-6. If `SUBMIT_AC_BACKDOOR` is non-empty and the submission contains that string, return a correct verdict before calling the judge LLM
-7. Otherwise load user history, react with 👀/[睁眼] ack, and call `judge_submission()`.
-   `[睁眼]` is a QQ special emoji reaction (group emoji id `128064` / face id `289`),
-   not plain message text. In private judge, send `face` id `289` instead of group
-   message reactions or literal `[睁眼]` text. If the judge returns
-   `reaction="123"` for spam/off-topic, private judge sends `face` id `123` instead
-   of text.
-8. Incorrect/off-topic/failure results finalize immediately when compute finishes
-9. If the problem was already solved when this `/submit` entered the queue: reply
-   "已经有人解出..." without calling the judge.
-10. If the problem was unsolved at enqueue time, finalize with the judge result even
-   if an earlier admitted submit solves it by now.
-11. Save submission record (troll if reaction=123, else correct/incorrect).
-12. If correct and earlier submit candidates are still unresolved: first reply
-    `做法判对了～`, then wait only for first-blood scoreboard resolution.
-13. If correct and no earlier admitted submit solved first: update scoreboard, show rank
-    + top5 using weighted score (`2^((rating-2000)/300)`), live nickname lookup, and
-    the actual per-problem point gain in the success message (for example `本题 +4 分`);
-    equal scores share the same rank, and solve count is display-only → reveal →
-    send congrats as normal `send_group_msg`, then
-    `schedule_post_solve_editorial_followup()` (does **not** await translation).
-14. If correct but an earlier admitted submit solved first: save the record, log
-    `post_solve_correct`, and do not update the scoreboard. Do not send an additional
-    not-counted message and **do not** send the official tutorial again.
-15. If incorrect: reply with judge's reason.
-
-The face 314 reaction (group `react_emoji` / private `face` 314) is sent only when a
-first-pass correct verdict is followed by an actual second judge — i.e. a verified
-official editorial is cached (`get_verified_official_editorial` returns non-None).
-Without a cached editorial there is no second judge and no 314 reaction.
-
-Private `/submit` uses the same judge path and private history, but a correct result
-only marks the problem solved in `private_judge/users/<uid>.json`; it does not update
-the group scoreboard. The private success message includes the full available problem
-identity (`CF{pid} {name} {rating}`, for example `做对了 CF33C Wonderful Randomized
-Sum 1800！`) so users can tell which private problem was accepted. Missing name/rating
-metadata is omitted gracefully. If the private problem is the current group problem,
-the success message tells the user they can `/sync` in the service group to score it
-if the group has not already solved it.
-
-### `/clarify` — Anti-Spoiler Clarification
-
-LLM timeout comes from `llm.clarify_timeout_sec`; DashScope/阿里云百炼 and
-providers with `stream: true` use HTTP+SSE streaming, while other providers use
-the normal JSON response path.
-Uses `response_format: json_object`. `thinking: enabled` and `reasoning_effort`
-are sent unconditionally; unsupported fields are ignored by the upstream API.
-Output:
-`{"reply": "...", "reaction": ""}`.
-- `reaction="123"` for spam/off-topic → react only, no text
-- Normal: reply text only, must not leak solution hints
-- Must not reveal the original problem identity, including problem ID, title, or contest ID
-
-Group `/clarify` loads **Chinese summary from group context** (last assistant message)
-for LLM grounding. Private `/clarify` uses `problem_summaries.json` for the selected
-pid, so a private CF link/random problem is not paired with the current group summary.
-The target pid is snapshotted at admission. Final saving is protected by the state
-scheduler lock, but final reply is not ordered behind unrelated same-group requests.
-
-### `/review` — Latest Solved Problem Discussion
-
-- Targets the group's **most recently solved problem at enqueue time**, not necessarily today's current problem
-- Only available after the group has solved at least one problem
-- Loads the current user's history for that solved problem as review context
-- If the review message @mentions other users, appends those users' same-problem
-  context as separate blocks, including saved history plus earlier pending/in-flight
-  inputs. Ignore @all, the bot itself, the requester, and duplicate mentions. Do not
-  persist anything to mentioned users' histories; only the requester receives the
-  saved review record.
-- Uses `llm.smart_model` queue (free text, no JSON format). Timeout from
-  `llm.review_timeout_sec`. `thinking: enabled` and `reasoning_effort` are sent
-  unconditionally; unsupported fields are silently ignored.
-- Long replies (>400 chars) → merged-forward card; short replies → @mention inline
-- Saves review interaction to user history under that solved problem's `problem` ID
-- If the group has never solved a problem yet, it is rejected before running the expensive review LLM call
-- The solved-problem target is snapshotted when the request is admitted so `/review` compute can run in parallel with later same-group requests without being retargeted by a newer AC
-- Same-user `/review` and `/submit` requests do **not** serialize on earlier LLM calls; later requests see earlier pending user inputs, and completed bot replies appear only after those requests finish
-- If `tutorials/{pid}.json` exists and passes extraction, `_compute_review` appends the **English**
-  editorial via `format_editorial_for_review()` (truncated to 12k chars). `REVIEW_PROMPT` states
-  that this is official editorial **only the model sees** — do not paste it to the user or spoil
-  that the group received a tutorial card. Use it to validate the user's approach and explain WAs.
-
-Private `/review` targets the current private problem when it was solved privately or
-the group has solved that same current problem. Otherwise it targets the user's latest
-private solved problem. This lets private review become available automatically after
-someone solves the current group problem, even if the user only set that problem in
-private judge.
-
-### Private Judge
-
-Private judge lives in `private_judge.py` plus `/setproblem` and `/sync` command
-modules. It is available only in DMs from members of `CURRENT_GROUP`; group-only
-commands are rejected in private with a friendly message.
-
-- Private state is per user in `private_judge/users/<uid>.json`: current problem,
-  `user_submissions`, solved markers, latest solved pid, and starred-submit redirect
-  notification markers.
-- Private and group contexts are independent by default. `copy_records()` is used when
-  copying history between sides so later writes do not share dict instances.
-- `/setproblem` (`/sp`) is private-only. Empty args select the current group problem;
-  replying to a known problem card with `/sp` selects that card's pid. `CF2234B`,
-  `2234B`, Codeforces problemset/contest links, path fragments such as
-  `/contest/2233/problem/F` and `problem/2230/F`, and `random` are supported.
-  If private history is empty and group history exists for the selected pid, it copies
-  group history into private. If the group has already solved that pid, it marks private
-  review as available. It sends a private problem card, preferring the current group's
-  cached forward-card payload when the pid is the current group problem. Generated
-  private cards must not expose the original CF id, title, contest id, or rating in the
-  card title. If an explicit pid/link fetch fails, tell the user the statement
-  cannot be fetched right now and suggest trying again later or choosing another
-  problem.
-- `/problem` in private resends the selected private problem card. `/tag`, `/status`,
-  `/clear`, `/submit`, `/clarify`, and `/review` all operate on private state and do
-  not emit group @mentions. `/testcd` is private-only and reports the current service-group
-  submit CD: it says the user can submit now when `submit_remaining_sec()` is zero,
-  otherwise it formats the remaining time as days/hours/minutes/seconds.
-- `/sync` copies the **current group problem only** between group and private judge.
-  In a group chat it copies private → group; in private it copies group → private.
-  If the source side has no relevant records, it aborts and does not overwrite the
-  target side. It rejects while there is an active group or private stateful request
-  for the same user/problem.
-- `/sync` sends the source history as a per-sender **chat-record** merged forward to the
-  target chat after copying: every visible message becomes its own node — user bubbles
-  carry the user's QQ id + group display name (real avatar), bot bubbles the bot's own
-  account (its group display name, fallback `AI助手`), so the card reads like a QQ 聊天记录.
-  Node text omits internal type/result/reason fields; empty-reply incorrect verdicts
-  mirror the live `reason。再想想？🤔` fallback; messages longer than
-  `PRIVATE_FORWARD_THRESHOLD` are split across same-sender nodes. If the forward call
-  fails, it degrades to plain-text chunks of the legacy `👤：/🤖：` rendering
-  (`format_history_records`). If the source is empty, it sends only the friendly abort
-  message. On successful group sync, react to the triggering message with `👌`
-  (`id=128076`) instead of sending a generic success message; private sync sends no
-  extra success text.
-- A normal user's private correct submit for the current group problem can score through
-  group `/sync` if the group has not already solved that pid. Scoring is performed under
-  the group coordinator lock, reveals the original problem source, schedules the official
-  editorial follow-up, writes the private records into group `scoreboard.json`, and logs
-- Dynamic-wait/starred users redirected to private judge can still `/sync`. While
-  their current group problem submit CD is active, only `clarify` records are copied
-  in either direction and submit/review/correct records are ignored. Once the CD
-  expires, `/sync` behaves like it does for normal users, including private AC scoring
-  when the group has not already solved that pid.
-
-### 8.5. Review parallelism depends on enqueue-time pid snapshot
-If `/review` is meant to compute in parallel with later same-group requests, do not
-re-read `get_latest_solved_problem_id()` during review compute. Snapshot the target
-pid when admitting the request and carry that pid through compute + finalize, or a
-newer AC can silently retarget an older review request.
-
-### `/newproblem`
-
-`/newproblem` vs `/newproblem --force` when today's problem is unsolved:
-
-- Plain `/newproblem` is rejected with a reminder to use `/newproblem --force` (exact string, space required).
-- `/newproblem --force` runs the same locked force-post path as solved `/newproblem`
-  (shared cooldown + per-group post lock).
-- Plain `/problem` (or `/pb`) still resends the current problem card.
-
-`/newproblem` uses a per-group post lock. If another `/newproblem` is already preparing a card, the user gets a short "新的题目正在准备中，别急～" reply and the request is not queued. Otherwise the command holds the lock while checking cooldown, checking whether plain `/newproblem` is allowed, and claiming/sending the card. Cooldown starts only after a new problem card is successfully delivered and committed. The implementation:
-1. The worker maintains one source-bound `next_problem.json` READY slot. Its complete
-   preparation action runs `picker.py pick-json --with-statement`, builds samples and
-   translated notes, and calls the summary action. The picker marks candidates used and
-   caches statements but does **not** write `state.json`.
-2. The summary action calls `summarize_problem()` through `llm.general_model`, using
-   `llm.summary_timeout_sec`; after the local format/limit/symbol-scope gate it runs the
-   general-model semantic double-check. A mismatch is repaired from structured issues
-   and checked again before the action can return READY. If both outer attempts remain
-   incomplete, the established no-summary publication fallback is retained explicitly.
-3. `/newproblem` claims the READY slot (or awaits that same single-flight preparation on
-   a cold start) and formats the previous-problem reveal from current state.
-4. Assemble the card as custom sender-attributed nodes — summary text; each sample as an
-   independent node; a dedicated `样例解释` node when `notes` exist (with LaTeX/Markdown
-   artifacts normalized to readable symbols such as `→`, `≤`, `<`, `>`); snake image — and
-   publish every node as one merged card with a single `send_group_forward_msg` call
-5. If delivery succeeds, commit `state.json` with `posted_at` and save `daily_msg.json`
-   for `/problem` to resend. A direct-text fallback after forward-card failure still
-   counts as successful delivery and must save `daily_msg.json` with `pid`, `post_msg`,
-   `sample_messages`, `notes_message`, and `snake_enabled` so `/problem` can rebuild a
-   card later. If delivery fails completely, keep the old current problem.
-6. Save a successful Chinese summary to `problem_summaries.json` with its statement
-   fingerprint for later verified reuse.
-7. Release the claimed slot and wake background refill. The worker's READY observer and
-   periodic current/next maintenance own editorial preparation; publication only
-   idempotently reasserts that trigger.
-
-`/newproblem` uses a per-group post lock so two new posts
-do not overlap. They no longer block `/submit`, `/clarify`, or `/review`; those commands
-continue using their admission-time problem snapshot while the new card is being built.
-
-### Official tutorials (scrape + runtime)
-
-**Scraping** (offline, not in the bot hot path):
-
-```bash
-# Batch: statements/*.json → tutorials/<pid>.json using the LLM harness
-KOUHAI_CONFIG=/path/to/config.yaml uv run python tools/tutorial_tools.py crawl \
-  --statements-dir ~/.kouhai-bot/statements \
-  --tutorials-dir ~/.kouhai-bot/tutorials
-
-# Single-problem LLM harness: bounded blog candidates → selector LLM → existing JSON schema
-KOUHAI_CONFIG=/path/to/config.yaml uv run python tools/tutorial_tools.py agent \
-  --pid 542D \
-  --statements-dir ~/.kouhai-bot/statements \
-  --tutorials-dir ~/.kouhai-bot/tutorials \
-  --translate
-
-
-# Optional audit of existing tutorials/
-uv run python tools/tutorial_tools.py validate --heuristic-only
-```
-
-**Runtime** (`editorial_preparation.py` + `tutorials.py`):
-
-| Function | Purpose |
-|----------|---------|
-| `prepare_editorial(pid)` | Side-effect-free exhaustive search + validation + translation; returns READY / EXHAUSTIVE_NO_MATCH / INCOMPLETE |
-| `prefetch_editorial_zh(pid)` | Commit only a complete result; source → translation → verified marker, or exhaustive no-match marker |
-| `get_verified_official_editorial(pid)` | Return English source only when translation marker matches both editorial and statement fingerprints |
-| `has_cached_editorial_zh(pid)` / `is_no_official_editorial(pid)` | Source-bound terminal checks |
-| `format_editorial_for_review(editorial)` | English block for `/review` LLM user message |
-
-**Group card translation** (`handlers/shared.py:translate_editorial_to_zh`):
-
-- `task="summary"`, `timeout=600`
-- Prompt: translate思路/复杂度 only; **omit all program code**; **avoid LaTeX** — prefer Chinese /
-  simple symbols (`≤`, `O(n^2)`); keep LaTeX only when unavoidable for clarity
-- Post-process: `normalize_editorial_zh_for_qq()` strips `\( \)`, `$$`, common `\le` etc.
-- QQ plain text, no Markdown fences in output
-- Re-translate after prompt changes: delete `tutorial_translations/{pid}.txt`
-
-**Prefetch** (worker-owned current + next maintenance):
-
-- A newly persisted READY problem invokes the generic READY observer, so worker
-  orchestration starts its editorial immediately without coupling problem preparation
-  to tutorial code.
-- `editorial_prefetch_maintenance_loop()` continuously covers both `state.json.today`
-  and the READY slot; this resumes interrupted work and retries INCOMPLETE results.
-  Consecutive incomplete attempts back off exponentially (60s base, capped at 6h,
-  in-memory) so a persistently failing pid (challenge pages, LLM outage) is not
-  re-crawled every maintenance tick; a verified cache or confirmed no-editorial
-  marker resets the backoff.
-- Background `prefetch_editorial_zh(pid)` writes no candidate or transient-failure
-  marker. It commits only verified source+translation or an exhaustive no-match result.
-- `/newproblem` publication idempotently reasserts the current pid trigger.
-- Runs outside the state scheduler (parallel with submit/review/clarify)
-
-**Delivery** (on first AC, `editorial_followup.py`):
-
-- `schedule_post_solve_editorial_followup()` → if cache warm, deliver immediately (no prefetch wait)
-- Otherwise await an already in-flight prefetch, then deliver only if it became verified
-- Has cached zh: custom-node chunks → `send_group_forward_msg` (low latency; no self-send)
-- No editorial or still incomplete: silent skip (no group message)
-- **Not** part of `GroupCoordinator`; do not `await` inside `_finalize_submit`
-
-## Annotation Tooling
-
-Solved problems are exported for human labeling:
-
-- The first accepted `/submit` for a problem triggers `export_problem_annotation_bundle()`
-  from `src/kouhai_bot/annotations/exporter.py`
-- Exported bundles live under `~/.kouhai-bot/annotations/pending/`
-- Bundles include the statement snapshot, per-round `/submit` verdict data, the exact
-  `history_before` seen by the judge, and mutable `human_label` fields
-- If a source-bound verified Chinese summary exists in `problem_summaries.json`,
-  annotation export reuses it directly instead of re-translating
-
-Local HTML labeling UI:
-
-- Server entry: `tools/annotation_server.py`
-- Static assets: `tools/annotation_web/`
-- Start with:
-  `uv run python tools/annotation_server.py --host 127.0.0.1 --port 8788`
-- For LAN access, bind to `0.0.0.0`
-- On startup, the server backfills missing solved-problem bundles
-- Detail requests must return quickly; if a bundle lacks `summary_zh`, the UI opens the
-  problem immediately and fetches translation asynchronously through
-  `POST /api/annotations/{group_id}/{problem_id}/translate`
-
-## Scheduler
-
-- **Engine**: `scheduler/engine.py` — loop at 60s intervals, runs due jobs per group
-  configured by `CURRENT_GROUP`; accepts `stop_event` so the single worker can stop cleanly
-- **Jobs** (defined in `scheduler/jobs.py`):
-  - `contest_check` — 12:01: checks CF API for 24h upcoming contests, @all notification with 2s delay.
-- `/newproblem` has a
-  per-group lock and commits `state.json` only after successful delivery.
+`scheduler/engine.py` multi-group loop (60s) iterates `get_groups()`; per-group job dedup by
+date+time; `load_group_config` defaults `contest_check`. `jobs.py:contest_check` →
+`shared.check_contests_for_group`: CF contest.list (phase BEFORE/CODING, type CF/ICPC,
+exclude unrated/mirror/april fools/kotlin/practice, start ≤ now+24h; **none → silent
+return**), sleep 2s, markdown `<qqbot-at-everyone/>` + lines. @all needs admin + 1/group/day.
 
 ## Adding a New Command
 
-1. Create `src/kouhai_bot/handlers/cmd/yourcommand.py`
-2. Define an `async def handle(group_id, user_id, sender, message_id, raw_text, segments, event)`
-3. Define `def register()` that calls `registry.register(CommandDef(...))`
-4. Set `aliases=[]` unless a new alias is explicitly approved
-5. If the command mutates group state or appends to submission history, route it through
-   the state scheduler helpers in `submit.py`; read/modify/write JSON sections must
-   use the same per-group scheduler lock
-6. If the command is usable in private chat, add it to the private whitelist in
-   `handlers/__init__.py`, update private `/help` filtering, and avoid group @mentions
-   or message reactions in private replies
-7. That's it — auto-discovered, auto-listed in /help
+1. `handlers/cmd/yourcommand.py` with `async def handle(ctx: Ctx)`.
+2. `register()` → `registry.register(CommandDef(name, aliases=[], description, usage,
+   handler=handle, cooldown))`. `aliases=[]` unless approved. Aliased → ONLY alias usable
+   (full name internal); parse `ctx.raw_text` by canonical name; hints use `cmd.trigger`.
+3. Mutates state/history → coordinator helpers (`run_group_state_update`); DB read/modify/
+   write under same per-group lock.
+4. Stateful → publish active-request metadata so `/status` stays correct.
+5. Auto-discovered, auto-listed in `/help`. Group-only.
 
-## Adding a Scheduled Job
+## Pitfalls (correctness invariants)
 
-1. Add an async function in `scheduler/jobs.py`
-2. Call `register_job(JobDef(name=..., fn=..., schedule="HH:MM"))`
-3. Enable it for `CURRENT_GROUP` in `scheduler_config.json`
-
-## Data Format (critical for compatibility)
-
-### scoreboard.json `solves` entries
-```json
-{
-  "user_id": 123456,       // int (not string!)
-  "nickname": "Alice",
-  "date": "2026-05-13",    // ISO date string
-  "problem": "542D",
-  "order": 5               // global solve order
-}
-```
-
-### scoreboard.json dynamic submit wait state
-```json
-{
-  "user_group_waits": {
-    "groups": {
-      "starred": {
-        "users": {
-          "<user_id>": {
-            "wait_sec": 1800
-          }
-        }
-      }
-    },
-    "settled_problems": {
-      "542D": 0
-    }
-  }
-}
-```
-
-`settled_problems` maps problem id to an integer Unix timestamp and makes wait
-settlement idempotent. On successful new-problem
-delivery, settle the previous problem before writing the new `state.json`: if the
-previous problem has a first solve, double that solver's wait and halve other configured
-dynamic-wait users down to their `submit_delay_sec` floor. If no one solved it, do
-nothing. If an old in-flight submit is accepted after a newer problem has already been
-posted, settle that old pid immediately after writing its first solve. `post_solve_correct`
-records do not settle waits.
-
-### submission record format
-```json
-{
-  "timestamp": "2026-05-13T12:00:00+08:00",  // ISO datetime string
-  "content": "solution text",
-  "result": "correct",      // "correct", "incorrect", "clarify", or "review"
-  "reason": "reason text",
-  "reply": "reply text",
-  "problem": "542D"
-}
-```
-
-Existing `solves` and submission record fields MUST match the old bridge's format
-exactly for backward compatibility with existing `~/.daily-problem` data.
-Private judge submission records use the same record shape inside
-`private_judge/users/<uid>.json.user_submissions` so group/private history can be copied
-without conversion. Do not add private-only fields to individual history records unless
-all sync paths intentionally preserve or strip them.
-
-### bad_reports.json (/feedback reports)
-
-`groups/<gid>/bad_reports.json` and `private_judge/bad_reports/<uid>.json` —
-append-only stores of `/feedback` reports, one entry per invocation (repeat `/feedback` on the
-same reply appends a new entry). Shape:
-
-```json
-{
-  "version": 1,
-  "reports": [
-    {
-      "id": 1,                          // max(existing ids)+1 per file; reports never move between files
-      "scope": "group",                 // "group" | "private" — the scope where /feedback was issued
-      "group_id": 999999,               // private scope stores cfg.current_group (dispatcher rewrite)
-      "user_id": 42,
-      "reported_at": "2026-09-11T21:03:14.512345+08:00",
-      "note": "复杂度分析说错了",          // optional user note, stripped, capped at 500 chars
-      "cmd_message_id": "msg_001",
-      "target": {
-        "problem": "542D",
-        "record": { /* verbatim snapshot of the submission record, incl. request_id/model_tag */ }
-      }
-      // NOTE: reports written before the last-interaction cache also carry
-      // target.record_index (0-based position in the then-current history) —
-      // legacy field, no longer written.
-    }
-  ]
-}
-```
-
-Rules:
-
-- Never embed `/feedback` fields inside `user_submissions` records — that format is
-  frozen (legacy compatibility + `/sync` copies records verbatim between scopes).
-- Group and private `/feedback` stores are separate; `/sync` never moves reports.
-- Writes are atomic (`atomic_write_json` in `handlers/shared.py`: tempfile +
-  fsync + `os.replace`); group appends run under `run_group_state_update`.
-- Targeting (scope-local, crosses problem switches, survives `/clear`): the
-  per-user last-interaction cache (`groups/<gid>/last_interaction.json` keyed by
-  uid / `private_judge/last_interaction/<uid>.json`, shape `{"record": {...}}`)
-  is the ONLY source — /feedback never scans stored history. The cache is a CACHE:
-  corrupt/missing files read as empty (warn + None), unlike bad_reports which
-  raise. It is updated inside `_save_context_record` (under the coordinator
-  lock, after the clear-watermark guard) whenever a record with a replied
-  result is persisted — so `/clear` never wipes it and stale in-flight
-  finalizes never resurrect it.
-- `/sync` carries the source side's cache entry to the target side together
-  with the history (same "source wins" semantics), but only when the cached
-  record is actually part of what the sync copies: same pid, and clarify-only
-  when a CD-limited starred user syncs clarifies. Reports are never moved.
-- "Replied" = the live message was delivered: results
-  `correct/incorrect/clarify/review` (an empty-reply incorrect verdict fell back
-  to `reason` live) plus the failure notices
-  `timeout/service_unavailable/no_statement`. Only `pending`
-  and `superseded` records are unmarkable. Classification goes through
-  `shared.record_kind` (single source of truth, also used by
-  `_build_review_history`).
-- To keep `/feedback` from seeing a sent-but-unsaved pending tail, the clarify/review
-  finalize paths save the record BEFORE delivering the reply (same order as
-  submit) — preserve that ordering.
-- A corrupt bad_reports file makes `load_bad_reports*` raise instead of resetting
-  to empty — a silent reset would destroy the report history on the next append.
-  (A dict missing the `reports` key is tolerated; the next append repairs the shape.)
-- `target.record` is a full verbatim snapshot (`reply`/`reason` keep model tags),
-  so reports stay replayable even after the underlying history is cleared/synced.
-
-## Pitfalls & Lessons Learned
-
-### 1. Stateful scheduler state must be truly shared
-All submit/clarify/review/clear entry points in a group must use the SAME scheduler
-state for that group. Do not add an ad hoc lock or side path for one command, or
-pending archive updates, clear watermarks, and first-blood resolution will diverge.
-Private judge has separate per-user coordinators; do not route private stateful commands
-through the group coordinator except for the short group write section inside `/sync`.
-
-### 2. Judge user_msg format is JSON
-`judge_submission()` sends `json.dumps({"problem": ..., "submission": ..., "history": ...})`.
-The judge prompt was written expecting JSON input. Do NOT change to plain text.
-
-### 3. load_problem_statement joins with \n not \n\n
-The problem statement sent to the judge must use single `\n` join between sections.
-Using `\n\n` adds extra blank lines that affect judging accuracy.
-
-### 4. @mentions need proper OneBot segments
-`build_at(user_id)` + `build_text(" text")` creates a real QQ @mention (with notification).
-Using `f"@{nickname}"` in plain text is a fake @mention — no notification.
-
-### 5. Contest notifications need @all
-`{"type": "at", "data": {"qq": "all"}}` — the contest check must notify everyone.
-Using plain text without @all means nobody sees the notification.
-
-### 6. WS host must be 0.0.0.0 for Docker
-See Configuration section above. Binding to `127.0.0.1` breaks Docker NapCat connectivity.
-
-### 7. react_emoji needs int message_id
-NapCat's `set_msg_emoji_like` API expects `message_id` as int. Pass string and it
-silently fails.
-
-### 8. Friend requests require confirmed service-group membership
-Auto-approval must remain fail-closed. Do not call `set_friend_add_request` or
-`set_doubt_friends_add_request` unless NapCat confirms the requester is in
-`CURRENT_GROUP`; if member lookup fails, ignore the request rather than approving it.
-
-### 9. save_scoreboard needs indent=2
-Must pass `json.dump(sb, f, ensure_ascii=False, indent=2)` for backward compatibility
-with old scoreboard files.
-
-### 10. save_user_submission keeps full history
-Per-user submission history is intentionally unbounded. Records with a `request_id`
-update the matching existing record in place; records without one append normally.
-
-### 11. Save Chinese summaries by pid if you need later reuse
-An audited summary shown in the group post is persisted in
-`groups/<gid>/problem_summaries.json` with its statement fingerprint. Annotation export
-and the HTML labeling UI reuse only a matching verified entry before attempting any new
-translation. Do not force synchronous translation on detail-page clicks.
-
-### 12. `/newproblem` uses merged-forward
-`/newproblem` assembles summary text, sample nodes, the optional translated notes node,
-and the snake image as custom sender-attributed forward nodes, then publishes them as
-one merged card in a single `send_group_forward_msg` call (no self-send). `daily_msg.json`
-must persist the card CONTENT (`pid`, `post_msg`, `sample_messages`, `notes_message`,
-`snake_enabled`) so `/problem` can rebuild the same card; legacy node-id fields are never
-replayed. If merged-forward fails but direct group text succeeds, `daily_msg.json` must
-still persist the current `pid` and rebuild inputs. `/problem` must ignore stale
-`daily_msg.json` whose `pid` does not match `state.json.today`.
-Complicated but essential for good UX.
-
-### 13. Dispatch uses create_task
-Commands are `asyncio.create_task`'d, not `await`ed. This prevents lightweight
-commands from queuing behind locked operations.
-
-### 14. Off-topic submissions are NOT saved
-If the judge returns `reaction: "123"`, the submission is marked as troll and
-NOT recorded to scoreboard. The save happens AFTER the reaction check. In private
-judge this reaction is delivered as QQ `face` id `123`, not the fallback text `😵`.
-
-### 15. Do not add local off-topic blacklists for `/submit` or `/clarify`
-Off-topic handling belongs to the model output (`reaction="123"`), not substring
-matching in the command entrypoint. Local blacklists are too brittle and can
-misfire on normal solution text such as `操作`.
-
-### 16. Nickname fallback is user_id not "群友"
-`get_display_name()` / `_nick()` fall back to `str(user_id)` (as a string of digits),
-never a generic placeholder like "群友".
-
-### 17. Every message text matters
-The old bridge has specific wording for each message. Every difference was caught
-in review — validation messages, error messages, reminder text, greeting text.
-All must match exactly. See the commit history for the iterative alignment process.
-
-### 18. LaTeX in problem summaries
-`summarize_problem()` prompt explicitly forbids LaTeX/markdown. The summary model
-sometimes still outputs LaTeX — ping the user if you see this happening.
-
-### 19. Annotation detail pages must not block on translation
-The annotation UI can show a placeholder for `summary_zh`, then fetch translation
-asynchronously. Clicking a problem in the left pane should open the right pane
-immediately; do not make `handle_detail()` await a long translation call.
-
-### 20. Active status tracking prevents confusing UX
-The scheduler exposes earliest active request metadata so `/status` can tell users
-there is in-flight stateful work. It is not a queue head and does not imply unrelated
-commands are blocked.
-
-### 21. Clarify reasoning controls
-`/clarify` sends `thinking={"type": "enabled"}` and `reasoning_effort` unconditionally.
-The upstream API silently ignores fields it doesn't support. The JSON output format
-may occasionally break if extra reasoning content leaks into the response —
-`robust_json_parse` handles this.
-
-### 22. `uv run start` / `restart` / `stop` / `status` are selected by NapCat WS port
-The `start`, `restart`, `stop`, and `status` entrypoints must use the configured `NAPCAT_WS_PORT` to
-identify the target instance. Do not kill by broad process names like
-`kouhai_bot.worker`, because production and test instances may run at the same time.
-`uv run start` should refuse to launch a second instance if that port already has a
-listener. `uv run restart` should stop the existing listener on that port, then
-start a fresh detached background instance. `uv run stop` should stop the existing
-listener on that port only. `uv run status` should report whether the port is occupied
-and whether the listener appears to come from the current worktree.
-
-### 23. Official tutorial: first AC only, two messages
-Congrats must stay a direct `send_group_msg` with @mention. Editorial delivery is scheduled
-via `editorial_followup` **after** finalize returns (background task). Merged-forward when
-editorial exists; nothing sent when not. Never bundle congrats and editorial in one card.
-Never `await` editorial translation inside submit finalize — it blocks the whole group queue.
-
-### 24. Tutorial translation cache is per pid
-`tutorial_translations/{pid}.txt` is not invalidated when scrape JSON changes. Delete the
-cache file to force re-translation after updating prompts or rescraping editorial text.
-
-### 25. Review vs group card use different editorial forms
-`/review` gets English source (+ code in extracted text) for internal grounding.
-The post-AC card gets Chinese translation without code. Do not send Chinese translation
-into review unless product requirements change.
-
-### 26. Private judge sync must not erase on empty source
-`/sync` uses the other side as source and overwrites the current side for the current
-group problem only. If the source side has no records, abort with a friendly message and
-leave the target untouched. This protects users from accidental history loss.
-
-### 27. Private chats use messages, not group affordances
-Private command handlers must not send @ segments or call `react_emoji`. Use plain
-private messages or face segments (`build_face`) instead. Long private review/history
-responses can use private merged-forward cards.
-
-### 28. Private problem cards should not reveal source identity
-When `/setproblem` builds a private card for an explicitly selected or random CF
-problem, the card title should stay generic. Do not include the original problem id,
-title, contest id, or rating there; anti-spoiler clarification also assumes the bot does
-not reveal the original problem identity to the user.
-
-### 28.5. High-rating problem cards need a caution
-After sending a problem card for a problem with rating greater than 2800, send a short
-follow-up warning that the problem is hard, the bot's reasoning may be limited, and the
-user should check the official/editorial solution if the bot seems wrong. Keep this as
-a separate message after the card, not inside private card titles where source identity
-could leak.
-
-### 29. Private judge state writes must be atomic
-`private_judge/users/<uid>.json` is user history, not a disposable cache. Write it via a
-same-directory temp file and `os.replace` (implemented once in
-`shared.atomic_write_json`, which `save_private_state` delegates to), and log JSON/IO
-load failures before falling back to defaults so corruption or permission problems are
-diagnosable.
+1. **One shared coordinator per group** (submit/clarify/review/clear) — no ad hoc locks/side
+   paths. DB read/modify/write under that lock; LLM + first-blood wait sleep **outside**.
+2. **Judge user_msg JSON** `{"problem","submission","history"}`; statement single `\n`.
+3. **@ needs markdown** (`<qqbot-at-user id=…/>`, msg_type=2); plain-text @ fake. @all
+   text+markdown, admin + 1/group/day. Contest @all + 2s delay.
+4. **Length not a hard threshold**: ~2000 text/~3000 markdown empirical; E4 实测 no 40054007
+   up to 60000/8000, user-quote read-back of 5000-codepoint message intact (no truncation).
+   Bot outbound not echoed; user quoting returns delivered text in `msg_elements[0].content`
+   (read-back path). Long-image primary; don't chunk for unproven limit. One content type per
+   request (0/2/7 exclusive).
+5. **Offtopic = model output** (`reaction="123"`), not local substring blacklists.
+6. **Save-before-deliver** (clarify/review/submit) for /feedback consistency.
+7. **Editorial first AC only, two messages**: congrats markdown @winner; editorial separate
+   background image. Never bundle; never await translation in finalize. Review English
+   (+code); card Chinese without code.
+8. **High-rating caution**: card rating >2800 → short separate warning (hard, bot may be
+   wrong, check official editorial).
+9. **DB single connection → connection-wide lock**; bad_reports corrupt → raise (never
+   reset); last_interaction corrupt → warn+default.
+10. **Every message text matters** — wording deliberate, preserve intent. Nickname fallback
+    `openid[:8]`, never "群友".
 
 ## Testing
 
@@ -1271,195 +441,51 @@ diagnosable.
 uv sync --group dev
 uv run python -m pytest tests/ -v
 ```
+`conftest.py`: async `db` fixture (tmp SQLite); autouse blocks real
+`aiohttp.ClientSession._request` (no live network); autouse resets global runtime/database/
+cooldowns/message-dedup. Handler tests inject fake runtime
+(`set_runtime(Runtime(db, OfficialSender(FakeRest(), ReplyBudget(db)), browser=None))`) +
+monkeypatch LLM. Dispatch events default to @bot mention. Covers db repos, transport,
+render, dispatch/registry, coordinator/commands, sync, feedback, cards, model tags, config,
+main lifecycle, worker, prefetch/preparation, editorial followup/tutorials, scheduler,
+shared, keyboard, legacy_migration.
 
-Tests mock `data_dir`, group state files, and LLM responses for end-to-end
-command testing. The suite covers submit, clarify, review, problem, tag, scoreboard,
-newproblem, annotation export, napcat parsing, registry discovery, and
-`tutorials.py` extraction/translation (`tests/test_tutorials.py`; submit/review
-editorial paths in `tests/test_commands.py`). Shared Codeforces transport fallback
-coverage lives in `tests/test_cf_fetcher.py`; tutorial wrapper delegation is covered by
-`tests/test_scrape_cf_tutorial.py`.
+### Live field probe (owner-led 实测)
 
-To audit the current group's saved summary against its cached statement with the
-configured `llm.general_model` queue (read-only; no group message or runtime-data write):
-
-```bash
-KOUHAI_CONFIG=/path/to/config.yaml uv run python tools/summary_doublecheck.py
-```
-
-Use `--expect inaccurate` for a regression fixture that is supposed to be rejected,
-or `--pid <pid> --summary-file <path>` to check another candidate.
+`tools/official_probe.py` gathers ground-truth payloads — implement live-shape features only
+after calibration, never speculate. E3/E4 calibrated (DECISIONS.md). Subcommands:
+- `capture` — read-only gateway listener → `{data_dir}/probe/*.jsonl`. Stop live bot first
+  (same app_id conflict).
+- `send --group <gid> [--kind text|markdown] [--text …] [--recall]` — one message, prints
+  FULL response (incl. `ext_info.ref_idx`), optional recall (≤2min).
+- `length --group <gid> [--kind …] [--send] [--recall]` — length ladder, dry-run default.
+  Clean ladder ≠ untruncated; verify via user-quote read-back of `msg_elements[0].content`.
 
 ## GitHub CI
 
-- `.github/workflows/require-markdown-docs.yml` runs on PRs targeting `master`
-- It fails unless the PR adds or modifies at least one `*.md` file
-- To make this merge-blocking in GitHub itself, keep `require-markdown-docs` registered as a required status check in branch protection or the repository ruleset
+`.github/workflows/require-markdown-docs.yml` fails PRs to `master` unless ≥1 `*.md`
+added/modified. Keep `require-markdown-docs` a required check.
 
 ## Startup
 
 ```bash
 cd ~/kouhai-bot
-uv run start
+uv run start      # detached (nohup), pidfile by app_id; refuses if pidfile alive
+uv run restart    # stop existing app_id instance, start fresh
+uv run stop       # stop the app_id instance
+uv run status     # action=/app_id=/occupied=/current_worktree_running=/pid=
 ```
+Logs `{data_dir}/logs/{app_id}/YYYY-MM-DD.log`. Foreground debug:
+`uv run python -m kouhai_bot.worker`. prod/test separate app_id (pidfile/DB).
 
-`uv run start` launches a detached background instance. stdout/stderr are appended to:
+## Design Principles
 
-```text
-~/.kouhai-bot/logs/<CURRENT_GROUP>/YYYY-MM-DD.log
-```
-
-If the configured `NAPCAT_WS_PORT` is already in use, `uv run start` should print a
-short status report and leave the existing instance alone.
-
-The detached instance is launched with `nohup`, and its working directory should be the
-current repo root so `uv run status` can later tell whether the listener belongs to the
-current worktree.
-
-For a foreground debugging session, you can still run:
-
-```bash
-cd ~/kouhai-bot
-uv run python -m kouhai_bot.worker
-```
-
-The worker starts the WS server, discovers commands, registers scheduler jobs,
-maintains one READY next problem plus current/next editorial preparation, and runs the
-scheduler. No external cron or process manager needed.
-
-For an already-managed local instance, prefer:
-
-```bash
-cd ~/kouhai-bot
-uv run restart
-```
-
-`uv run restart` selects the target instance by the configured `NAPCAT_WS_PORT`, so
-it is the safer choice when production and test bots coexist on the same machine.
-It stops the old listener on that port, launches a detached replacement, and prints
-a short status summary (`stopped_existing`, `started`, `pid`, `log`, etc.).
-
-`uv run stop` should print whether it found and stopped a listener on that port.
-
-`uv run status` should print a short machine-readable summary like:
-
-```text
-action=status
-port=<selected-ws-port>
-occupied=yes|no
-current_worktree_running=yes|no|unknown
-pids=...
-```
-
-Interpretation:
-- `occupied=yes` means the configured WS port is currently listening.
-- `current_worktree_running=yes` means at least one listener on that port has `cwd`
-  equal to this repo worktree root.
-- `current_worktree_running=no` means the port is occupied, but the listener appears
-  to belong to another worktree or process.
-- `current_worktree_running=unknown` means the port is occupied, but process cwd
-  inspection was not reliable enough to decide.
-
-## Deployment & Groups
-
-The served group is configured via `config.yaml`:
-- `current_group` — the single QQ group where commands work and scheduled posts are sent
-
-Start with a test group first; switch `current_group` to the production group after verification.
-
-Production and test bot instances must use separate NapCat reverse WebSocket ports.
-When starting or restarting a bot, use the production port for the production bot and
-the test port for the test bot. If an instruction says only "start" or "restart" and
-the intended instance/port is unclear, ask the developer which bot profile and port to
-use before taking action. Do not use broad process-name restarts when multiple bot
-instances are running; stop or start only the selected instance.
-
-**Start / Restart / Stop / Status procedure:**
-```bash
-cd ~/kouhai-bot
-uv run start
-```
-
-```bash
-cd ~/kouhai-bot
-uv run restart
-```
-
-```bash
-cd ~/kouhai-bot
-uv run stop
-```
-
-```bash
-cd ~/kouhai-bot
-uv run status
-```
-
-**Verify connection:**
-```bash
-ss -tnp | grep <selected-ws-port>              # should show ESTAB from the NapCat container
-sudo docker logs napcat --tail 5 | grep <selected-ws-port>  # should NOT show errors for the selected port
-```
-
-## Data Migration
-
-Old data lives at `~/.daily-problem/`. New data at `~/.kouhai-bot/`.
-The old directory is preserved as backup — never delete it.
-
-To migrate a group's data:
-```bash
-cp -r ~/.daily-problem/groups/<gid> ~/.kouhai-bot/groups/<gid>
-```
-
-The picker subprocess is the in-repository `src/kouhai_bot/problems/picker.py`.
-It uses `~/.kouhai-bot` as its default data directory, with group-specific state
-selected by the `--group` flag.
-
-## Design Decisions
-
-- **No auto daily post catch-up**: The old bridge had a startup catch-up that posted if
-  started after 12:00 with no problem. This was intentionally REMOVED — it makes
-  workflow unpredictable. Missed is missed; don't auto-recover.
-- **New problem delivery**: Must use merged-forward assembled from custom
-  sender-attributed nodes (no self-send; one `send_group_forward_msg` call) plus the
-  `daily_msg.json` content cache. Plain-text direct send is fallback-only; if it
-  succeeds, it still needs current-problem `daily_msg.json` so `/problem` never resends
-  stale cached cards.
-- **Forward cards are custom-node assembled**: every merged-forward card (problem,
-  help, scoreboard, review, editorial, history) is built from fabricated
-  `OB11MessageNode`s via `build_node` in `napcat/client.py`, attributed to the bot with
-  `resolve_bot_display_name()` (group card in groups, login nickname in DMs). No
-  self-send dance, no post-send sleep, no stale node-id replay; each card keeps a
-  plain-text fallback path.
-- **Old bridge.py behavior is the ground truth**: All behavior, message text, data
-  formats, and edge cases must match the legacy bridge implementation. When in doubt,
-  compare against the old code if it is available in your local environment.
-
-## Review Checklist
-
-When making changes, verify against old bridge.py:
-
-1. **Data format**: scoreboard entry fields (user_id int, date, order), submission
-   record fields (timestamp ISO, result string, clarify/review result types), save_scoreboard indent=2
-2. **@mentions**: Use `build_at` + `build_text` segments for real QQ mentions
-3. **Message text**: Every validation/error/success message verbatim from old bridge
-4. **Scheduler lock sharing**: submit/clarify/review/clear use the same per-group
-   scheduler; JSON read/modify/write sections use the per-group scheduler lock
-5. **Judge format**: user_msg is JSON `{"problem","submission","history"}`
-6. **Contest**: @all notification, 2s delay
-7. **Dispatch**: create_task (not await), skip own messages, extract_text with @mentions
-8. **WS**: bind 0.0.0.0 for Docker, max_size=2**26, ping_interval=30, ping_timeout=10
-9. **History persistence**: save_user_submission does not trim; records with request_id upsert
-10. **Nickname fallback**: `card or nick or str(user_id)` — never "群友"
-11. **Status visibility**: new stateful commands MUST publish active request metadata
-    so `/status` still reports in-flight work correctly
-12. **Official tutorial**: first AC only; congrats + separate forward card; translation
-    omits code; review uses English editorial in LLM context only, not user-visible spoiler
-13. **Private judge**: private commands are service-group-member only, private history is
-    independent, `/sync` aborts on empty source, and private AC never scores unless a
-    normal user syncs the current group problem back to the group before it is solved.
-    **Private AC does deliver the official editorial** (PR #84): `_send_private_success()`
-    calls `schedule_private_post_solve_editorial_followup(user_id, pid)`, reusing the
-    group path's cache-check/await-prefetch logic; the cached Chinese editorial is
-    forwarded to the user via `send_private_forward_msg` (same forward-card format).
-    Shared chunking + custom-node assembly lives in `_build_editorial_card_nodes()` (same `build_node` helper as every other card).
+- **No auto daily post catch-up**: missed is missed.
+- **New problem delivery**: long-image card + text fallback; commit state only after delivery.
+- **Legacy data**: SQLite fresh; old GROUP data hot-migrated by nickname on access (owner
+  reversed original "no migration"); private-judge data dropped. Disk statement mirror for
+  crawler reuse only.
+- **Preserve UX intent**: when an official limitation blocks a legacy feature, understand WHY
+  it existed and build a replacement preserving intent (reactions→tiny emoji,
+  merged-forward→long images, top5 removed but cheer+reveal kept). Don't speculate (臆想);
+  every present AND absent feature has a reason.

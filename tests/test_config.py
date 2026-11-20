@@ -10,6 +10,13 @@ from kouhai_bot import config
 from kouhai_bot.config import BotConfig
 
 
+@pytest.fixture(autouse=True)
+def _clear_official_env(monkeypatch):
+    """Official credential env fallback must not leak in from the real env."""
+    monkeypatch.delenv("KOUHAI_APP_ID", raising=False)
+    monkeypatch.delenv("KOUHAI_APP_SECRET", raising=False)
+
+
 def _make_yaml(**overrides) -> str:
     """Build a minimal valid config.yaml string with required fields."""
     data = {
@@ -51,19 +58,29 @@ def _from_yaml(yaml_str: str, monkeypatch, tmp_path) -> BotConfig:
     return BotConfig.from_yaml()
 
 
-def test_config_requires_current_group(monkeypatch, tmp_path):
-    yaml_str = _make_yaml()
-    data = yaml.safe_load(yaml_str)
+def test_current_group_optional_defaults_to_zero(monkeypatch, tmp_path):
+    """Official mode is multi-group: current_group is no longer a hard gate."""
+    data = yaml.safe_load(_make_yaml())
     del data["current_group"]
-    with pytest.raises(RuntimeError, match="current_group"):
-        _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+    cfg = _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+    assert cfg.current_group == 0
 
 
-def test_config_requires_bot_qq(monkeypatch, tmp_path):
+def test_bot_qq_optional_defaults_to_zero(monkeypatch, tmp_path):
+    """Official bots have no numeric QQ identity requirement."""
     data = yaml.safe_load(_make_yaml())
     data["bot_qq"] = 0
-    with pytest.raises(RuntimeError, match="bot_qq"):
-        _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+    cfg = _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+    assert cfg.bot_qq == 0
+
+    del data["bot_qq"]
+    cfg = _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+    assert cfg.bot_qq == 0
+
+
+def test_legacy_bot_qq_still_parsed_when_present(monkeypatch, tmp_path):
+    cfg = _from_yaml(_make_yaml(bot_qq=1900000001), monkeypatch, tmp_path)
+    assert cfg.bot_qq == 1900000001
 
 
 def test_config_requires_smart_model_queue(monkeypatch, tmp_path):
@@ -205,14 +222,22 @@ def test_provider_payload_options_load_from_yaml(monkeypatch, tmp_path):
     data = yaml.safe_load(_make_yaml())
     provider = data["llm"]["smart_model"][0]
     provider["send_thinking"] = False
+    provider["send_response_format"] = False
     provider["temperature"] = 1
     provider["extra_body"] = {"service_tier": "priority"}
     cfg = _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
 
     loaded = cfg.llm_smart_providers[0]
     assert loaded.send_thinking is False
+    assert loaded.send_response_format is False
     assert loaded.temperature == 1.0
     assert loaded.extra_body == {"service_tier": "priority"}
+
+
+def test_provider_send_response_format_defaults_true(monkeypatch, tmp_path):
+    cfg = _from_yaml(_make_yaml(), monkeypatch, tmp_path)
+
+    assert cfg.llm_smart_providers[0].send_response_format is True
 
 
 def test_provider_extra_body_must_be_mapping(monkeypatch, tmp_path):
@@ -245,3 +270,126 @@ def test_provider_entry_not_dict_raises(monkeypatch, tmp_path):
     data["llm"]["general_model"] = ["not-a-dict"]
     with pytest.raises(RuntimeError, match="must be a mapping"):
         _from_yaml(yaml.dump(data), monkeypatch, tmp_path)
+
+
+def test_official_section_loaded(monkeypatch, tmp_path):
+    monkeypatch.delenv("KOUHAI_APP_ID", raising=False)
+    monkeypatch.delenv("KOUHAI_APP_SECRET", raising=False)
+    cfg = _from_yaml(_make_yaml(official={
+        "app_id": "1900000000", "app_secret": "secret", "bot_name": "助手",
+        "bot_avatar_url": "https://cdn.example.test/bot.png",
+    }), monkeypatch, tmp_path)
+    assert cfg.app_id == "1900000000"
+    assert cfg.app_secret == "secret"
+    assert cfg.official_bot_name == "助手"
+    assert cfg.official_bot_avatar_url == "https://cdn.example.test/bot.png"
+    assert cfg.official_api_base == "https://api.bot.qq.com"
+    cfg.validate_official()  # no raise
+
+
+def test_official_sandbox_base(monkeypatch, tmp_path):
+    cfg = _from_yaml(_make_yaml(official={
+        "app_id": "1", "app_secret": "s", "sandbox": True,
+    }), monkeypatch, tmp_path)
+    assert cfg.official_api_base == "https://sandbox.api.sgroup.qq.com"
+
+
+def test_official_env_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("KOUHAI_APP_ID", "env-app")
+    monkeypatch.setenv("KOUHAI_APP_SECRET", "env-secret")
+    cfg = _from_yaml(_make_yaml(), monkeypatch, tmp_path)
+    assert cfg.app_id == "env-app"
+    assert cfg.app_secret == "env-secret"
+
+
+def test_validate_official_missing_raises(monkeypatch, tmp_path):
+    monkeypatch.delenv("KOUHAI_APP_ID", raising=False)
+    monkeypatch.delenv("KOUHAI_APP_SECRET", raising=False)
+    cfg = _from_yaml(_make_yaml(), monkeypatch, tmp_path)
+    with pytest.raises(RuntimeError, match="app_id"):
+        cfg.validate_official()
+
+
+def test_official_defaults(monkeypatch, tmp_path):
+    cfg = _from_yaml(_make_yaml(), monkeypatch, tmp_path)
+    assert cfg.app_id == ""
+    assert cfg.app_secret == ""
+    assert cfg.official_api_base == "https://api.bot.qq.com"
+    assert cfg.official_token_base == "https://api.bot.qq.com"
+    assert cfg.official_sandbox is False
+    assert cfg.official_bot_name == ""
+    assert cfg.official_bot_avatar_url == ""
+    assert cfg.official_intents == (1 << 25) | (1 << 26) | (1 << 24)
+
+
+def test_validate_official_missing_secret_raises(monkeypatch, tmp_path):
+    cfg = _from_yaml(
+        _make_yaml(official={"app_id": "1900000000"}), monkeypatch, tmp_path
+    )
+    with pytest.raises(RuntimeError, match="app_secret"):
+        cfg.validate_official()
+
+
+def test_official_custom_bases_strip_trailing_slash(monkeypatch, tmp_path):
+    cfg = _from_yaml(
+        _make_yaml(official={
+            "app_id": "1900000000",
+            "app_secret": "secret",
+            "api_base": "https://api.example.test/",
+            "token_base": "https://token.example.test/",
+        }),
+        monkeypatch,
+        tmp_path,
+    )
+    assert cfg.official_api_base == "https://api.example.test"
+    assert cfg.official_token_base == "https://token.example.test"
+
+
+def test_official_explicit_intents_override_default(monkeypatch, tmp_path):
+    cfg = _from_yaml(
+        _make_yaml(official={"app_id": "1", "app_secret": "s", "intents": 7}),
+        monkeypatch,
+        tmp_path,
+    )
+    assert cfg.official_intents == 7
+
+
+def test_official_sandbox_keeps_explicit_api_base(monkeypatch, tmp_path):
+    cfg = _from_yaml(
+        _make_yaml(official={
+            "app_id": "1", "app_secret": "s", "sandbox": True,
+            "api_base": "https://custom.example.test",
+        }),
+        monkeypatch,
+        tmp_path,
+    )
+    assert cfg.official_sandbox is True
+    assert cfg.official_api_base == "https://custom.example.test"
+
+
+def test_official_yaml_credentials_take_precedence_over_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("KOUHAI_APP_ID", "env-app")
+    monkeypatch.setenv("KOUHAI_APP_SECRET", "env-secret")
+    cfg = _from_yaml(
+        _make_yaml(official={"app_id": "yaml-app", "app_secret": "yaml-secret"}),
+        monkeypatch,
+        tmp_path,
+    )
+    assert cfg.app_id == "yaml-app"
+    assert cfg.app_secret == "yaml-secret"
+
+
+def test_official_credentials_are_stripped(monkeypatch, tmp_path):
+    cfg = _from_yaml(
+        _make_yaml(official={"app_id": " 1900000000 ", "app_secret": " secret "}),
+        monkeypatch,
+        tmp_path,
+    )
+    assert cfg.app_id == "1900000000"
+    assert cfg.app_secret == "secret"
+
+
+def test_official_non_mapping_section_ignored(monkeypatch, tmp_path):
+    cfg = _from_yaml(_make_yaml(official="not-a-mapping"), monkeypatch, tmp_path)
+    assert cfg.app_id == ""
+    assert cfg.official_api_base == "https://api.bot.qq.com"

@@ -1,30 +1,25 @@
 """Background editorial prefetch (on new problem) and delivery (on first AC).
 
-Neither path uses the group coordinator queue.
+Group-only, DB-backed. Neither path uses the group coordinator queue. Delivery
+renders the cached Chinese editorial as a long image (official API has no
+merged-forward primitive); plain text is the fallback.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
-from .config import get_config
-from .napcat.client import (
-    build_node,
-    build_plain_message,
-    build_text,
-    resolve_bot_display_name,
-    send_forward_card_with_legacy_fallback,
-    send_group_msg,
-    send_private_msg,
-)
+from .db.database import get_database
+from .db.repos import posts
+from .handlers.runtime import get_runtime
+from .render.forward_card import send_forward_card
+from .render.html import text_to_html
 from .tutorials import (
     MIN_EDITORIAL_LEN,
-    OfficialEditorial,
     get_verified_official_editorial,
     has_cached_editorial_zh,
     is_no_official_editorial,
@@ -34,8 +29,7 @@ from .tutorials import (
 
 logger = logging.getLogger("kouhai-bot.editorial_followup")
 
-_TUTORIAL_FORWARD_CHUNK_SIZE = 5000
-_TUTORIAL_DIRECT_CHUNK_SIZE = 3000  # plain-text fallback: mirrors /review chunking
+_TUTORIAL_CARD_CHUNK_SIZE = 5000
 _PREFETCH_WAIT_TIMEOUT_SEC = 600
 _PREFETCH_BACKOFF_BASE_SEC = 60.0
 _PREFETCH_BACKOFF_MAX_SEC = 6 * 3600.0
@@ -47,12 +41,6 @@ _prefetch_last_attempt_at: dict[str, float] = {}
 
 
 def _prefetch_backoff_remaining(pid: str) -> float:
-    """Seconds until the next prefetch attempt is allowed (0.0 = allowed now).
-
-    Exponential backoff on consecutive incomplete attempts: 60s, 2m, 4m, ...
-    capped at 6h. A successful terminal state (verified cache or confirmed
-    no-editorial marker) resets the counter.
-    """
     attempts = _prefetch_attempts.get(pid, 0)
     if attempts <= 0:
         return 0.0
@@ -79,24 +67,39 @@ def _track_task(task: asyncio.Task) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
+async def cancel_background_tasks() -> None:
+    """Cancel and drain all tracked editorial prefetch/delivery tasks.
+
+    Called during worker shutdown before closing the browser/DB/REST handles,
+    so a long crawl+translation cannot outlive the resources it writes through.
+    """
+    tasks = list(_background_tasks)
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+    _background_tasks.clear()
+    _prefetch_tasks.clear()
+
+
 def _chunk_text(text: str, chunk_size: int) -> list[str]:
     if chunk_size <= 0:
         return [text]
     return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
 
 
-def _prefetch_needed(pid: str) -> bool:
-    if has_cached_editorial_zh(pid):
+async def _prefetch_needed(pid: str) -> bool:
+    if await has_cached_editorial_zh(pid):
         return False
-    if is_no_official_editorial(pid):
+    if await is_no_official_editorial(pid):
         return False
     return True
 
 
 def schedule_prefetch_editorial(pid: str, *, run_agent: bool = True) -> None:
-    """Start translating editorial when a new problem is set."""
     pid = (pid or "").strip()
-    if not pid or not _prefetch_needed(pid):
+    if not pid:
         return
     if _prefetch_backoff_remaining(pid) > 0:
         return
@@ -119,63 +122,30 @@ def schedule_prefetch_editorial(pid: str, *, run_agent: bool = True) -> None:
 
 
 def ensure_editorial_prefetch(pid: str) -> None:
-    """Keep full editorial prefetch active for an unpublished READY problem.
-
-    This entry point is safe to call from a maintenance loop: an in-flight task
-    is deduplicated by ``schedule_prefetch_editorial``, while a verified cache
-    or a confirmed no-editorial marker is treated as terminal.  If a task dies
-    before reaching either terminal state, the next maintenance pass retries
-    the complete crawler + translation pipeline.
-    """
+    """Idempotent maintenance entry: dedup in-flight, terminal states stop retries."""
     pid = (pid or "").strip()
-    if (
-        not pid
-        or has_cached_editorial_zh(pid)
-        or is_no_official_editorial(pid)
-    ):
+    if not pid:
         return
     schedule_prefetch_editorial(pid, run_agent=True)
 
 
-def _load_group_today_pid(group_id: int) -> str:
-    state_path = os.path.join(get_config().data_dir, "groups", str(group_id), "state.json")
-    if not os.path.isfile(state_path):
-        return ""
-    try:
-        with open(state_path, encoding="utf-8") as f:
-            state = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return ""
-    if not isinstance(state, dict):
-        return ""
-    return str(state.get("today", "") or "").strip()
-
-
-def schedule_prefetch_for_group_today(group_id: int) -> None:
-    """Resume full editorial prefetch for the current problem."""
-    pid = _load_group_today_pid(group_id)
-    if pid:
-        ensure_editorial_prefetch(pid)
-
-
-def schedule_prefetch_for_current_group() -> None:
-    cfg = get_config()
-    if cfg.current_group:
-        schedule_prefetch_for_group_today(cfg.current_group)
+async def _current_pid(group_openid: str) -> str:
+    post = await posts.get_current_post(get_database(), group_openid)
+    return str(post["pid"]) if post else ""
 
 
 async def editorial_prefetch_maintenance_loop(
-    group_id: int,
+    group_openid: str,
     *,
     get_next_problem_pid: Callable[[], Awaitable[str]],
     stop_event: asyncio.Event,
     interval_seconds: float = 60.0,
 ) -> None:
     """Continuously maintain editorial work for both current and READY problems."""
-    logger.info("[group_%s] editorial prefetch maintenance started", group_id)
+    logger.info("[group_%s] editorial prefetch maintenance started", group_openid)
     while not stop_event.is_set():
         try:
-            current_pid = _load_group_today_pid(group_id)
+            current_pid = await _current_pid(group_openid)
             next_pid = (await get_next_problem_pid()).strip()
             for pid in dict.fromkeys([current_pid, next_pid]):
                 if pid:
@@ -185,52 +155,43 @@ async def editorial_prefetch_maintenance_loop(
         except Exception as exc:
             logger.warning(
                 "[group_%s] editorial prefetch maintenance failed: %s",
-                group_id,
-                exc,
-                exc_info=True,
+                group_openid, exc, exc_info=True,
             )
-
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
         except asyncio.TimeoutError:
             continue
-    logger.info("[group_%s] editorial prefetch maintenance stopped", group_id)
+    logger.info("[group_%s] editorial prefetch maintenance stopped", group_openid)
 
 
 async def _run_prefetch_editorial(pid: str, *, run_agent: bool) -> None:
     started = time.monotonic()
     try:
+        if not await _prefetch_needed(pid):
+            _mark_prefetch_succeeded(pid)
+            return
         await prefetch_editorial_zh(pid, run_agent=run_agent)
         elapsed = time.monotonic() - started
-        if has_cached_editorial_zh(pid):
+        if await has_cached_editorial_zh(pid):
             _mark_prefetch_succeeded(pid)
-            logger.info("editorial prefetch ready for %s in %.1fs (cached)", pid, elapsed)
-        elif is_no_official_editorial(pid):
+            logger.info("editorial prefetch ready for %s in %.1fs", pid, elapsed)
+        elif await is_no_official_editorial(pid):
             _mark_prefetch_succeeded(pid)
             logger.info("editorial prefetch: no editorial for %s (%.1fs)", pid, elapsed)
         else:
             _mark_prefetch_failed(pid)
             logger.warning(
-                "editorial prefetch finished for %s in %.1fs without cache",
-                pid,
-                elapsed,
+                "editorial prefetch finished for %s in %.1fs without cache", pid, elapsed
             )
     except Exception as e:
         _mark_prefetch_failed(pid)
-        logger.warning(
-            "editorial prefetch failed for %s: %s",
-            pid,
-            e,
-            exc_info=True,
-        )
+        logger.warning("editorial prefetch failed for %s: %s", pid, e, exc_info=True)
 
 
 async def _await_prefetch_if_running(pid: str) -> None:
-    """Wait for the shared preparation task when one is already in flight."""
     task = _prefetch_tasks.get(pid)
     if task is None or task.done():
         return
-    started = time.monotonic()
     logger.info("editorial delivery waiting for in-flight prefetch of %s", pid)
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout=_PREFETCH_WAIT_TIMEOUT_SEC)
@@ -238,253 +199,83 @@ async def _await_prefetch_if_running(pid: str) -> None:
         logger.warning("editorial prefetch still running for %s after AC", pid)
     except Exception as e:
         logger.warning("editorial prefetch await failed for %s: %s", pid, e)
-    else:
-        logger.info(
-            "editorial prefetch wait for %s done in %.1fs",
-            pid,
-            time.monotonic() - started,
-        )
 
 
-def schedule_post_solve_editorial_followup(group_id: int, pid: str) -> None:
+def schedule_post_solve_editorial_followup(group_openid: str, pid: str) -> None:
     """Fire-and-forget deliver on first AC; translation should already be cached."""
     task = asyncio.create_task(
-        run_post_solve_editorial_followup(group_id, pid),
-        name=f"editorial_deliver_{group_id}_{pid}",
+        run_post_solve_editorial_followup(group_openid, pid),
+        name=f"editorial_deliver_{group_openid}_{pid}",
     )
     _track_task(task)
 
 
-def schedule_private_post_solve_editorial_followup(user_id: int, pid: str) -> None:
-    """Fire-and-forget deliver the editorial to a private-judge user on AC."""
-    task = asyncio.create_task(
-        run_private_post_solve_editorial_followup(user_id, pid),
-        name=f"private_editorial_deliver_{user_id}_{pid}",
-    )
-    _track_task(task)
-
-
-async def run_post_solve_editorial_followup(group_id: int, pid: str) -> None:
+async def run_post_solve_editorial_followup(group_openid: str, pid: str) -> None:
     started = time.monotonic()
     try:
-        editorial = get_verified_official_editorial(pid)
+        editorial = await get_verified_official_editorial(pid)
         if editorial:
-            delivered = await deliver_official_tutorial_forward(group_id, pid, editorial)
-            if delivered:
+            if await deliver_official_tutorial(group_openid, pid):
                 logger.info(
                     "[group_%s] editorial delivered from cache for %s in %.1fs",
-                    group_id,
-                    pid,
-                    time.monotonic() - started,
+                    group_openid, pid, time.monotonic() - started,
                 )
             return
-        if is_no_official_editorial(pid):
-            logger.info(
-                "[group_%s] no official editorial for %s, skipping delivery",
-                group_id,
-                pid,
-            )
+        if await is_no_official_editorial(pid):
             return
 
         await _await_prefetch_if_running(pid)
-        if is_no_official_editorial(pid):
-            logger.info(
-                "[group_%s] no official editorial for %s, skipping delivery",
-                group_id,
-                pid,
-            )
+        if await is_no_official_editorial(pid):
             return
-        editorial = get_verified_official_editorial(pid)
+        editorial = await get_verified_official_editorial(pid)
         if not editorial:
             logger.info(
                 "[group_%s] editorial for %s remains incomplete, skipping delivery",
-                group_id,
-                pid,
+                group_openid, pid,
             )
             return
-        delivered = await deliver_official_tutorial_forward(group_id, pid, editorial)
-        if delivered:
+        if await deliver_official_tutorial(group_openid, pid):
             logger.info(
                 "[group_%s] editorial delivered for %s in %.1fs",
-                group_id,
-                pid,
-                time.monotonic() - started,
+                group_openid, pid, time.monotonic() - started,
             )
     except Exception as e:
         logger.warning(
             "[group_%s] post-solve editorial delivery failed for %s: %s",
-            group_id,
-            pid,
-            e,
-            exc_info=True,
+            group_openid, pid, e, exc_info=True,
         )
 
 
-async def run_private_post_solve_editorial_followup(user_id: int, pid: str) -> None:
-    started = time.monotonic()
-    try:
-        editorial = get_verified_official_editorial(pid)
-        if editorial:
-            delivered = await deliver_official_tutorial_forward_private(user_id, pid, editorial)
-            if delivered:
-                logger.info(
-                    "[user_%s] editorial delivered from cache for %s in %.1fs",
-                    user_id,
-                    pid,
-                    time.monotonic() - started,
-                )
-            return
-        if is_no_official_editorial(pid):
-            logger.info(
-                "[user_%s] no official editorial for %s, skipping delivery",
-                user_id,
-                pid,
-            )
-            return
-
-        await _await_prefetch_if_running(pid)
-        if is_no_official_editorial(pid):
-            logger.info(
-                "[user_%s] no official editorial for %s, skipping delivery",
-                user_id,
-                pid,
-            )
-            return
-        editorial = get_verified_official_editorial(pid)
-        if not editorial:
-            logger.info(
-                "[user_%s] editorial for %s remains incomplete, skipping delivery",
-                user_id,
-                pid,
-            )
-            return
-        delivered = await deliver_official_tutorial_forward_private(user_id, pid, editorial)
-        if delivered:
-            logger.info(
-                "[user_%s] editorial delivered for %s in %.1fs",
-                user_id,
-                pid,
-                time.monotonic() - started,
-            )
-    except Exception as e:
-        logger.warning(
-            "[user_%s] post-solve editorial delivery failed for %s: %s",
-            user_id,
-            pid,
-            e,
-            exc_info=True,
-        )
-
-
-def _editorial_payload(pid: str) -> str | None:
-    """The verified Chinese editorial payload, or None when not deliverable."""
-    verified_editorial = get_verified_official_editorial(pid)
-    if verified_editorial is None:
-        return None
-    zh_text = load_cached_editorial_zh(pid)
+async def _editorial_payload(pid: str) -> str | None:
+    zh_text = await load_cached_editorial_zh(pid)
     if len(zh_text) < MIN_EDITORIAL_LEN:
         return None
     header = f"📖 {pid} 官方题解"
-    if verified_editorial.tutorial_url:
-        header = f"{header}\n来源: {verified_editorial.tutorial_url}"
     return f"{header}\n\n{zh_text}"
 
 
-async def _build_editorial_card_nodes(payload: str, *, group_id: int | None) -> list[dict]:
-    """Build the editorial card as custom forward nodes (one node per chunk).
-
-    The editorial is text-only; each chunk becomes one sender-attributed
-    node of the bot.
-    """
-    cfg = get_config()
-    chunks = _chunk_text(payload, _TUTORIAL_FORWARD_CHUNK_SIZE)
-    bot_name = await resolve_bot_display_name(group_id)
-    return [
-        build_node(user_id=cfg.bot_qq, nickname=bot_name, content=[build_text(chunk)])
-        for chunk in chunks
+async def deliver_official_tutorial(group_openid: str, pid: str) -> bool:
+    """Deliver one verified, cached Chinese editorial as a long-image card."""
+    payload = await _editorial_payload(pid)
+    if payload is None:
+        logger.warning(
+            "[group_%s] tutorial delivery skipped for %s (missing translation)",
+            group_openid, pid,
+        )
+        return False
+    rt = get_runtime()
+    bot_name = rt.sender.bot_name or "算法助手"
+    nodes = [
+        {"nickname": bot_name, "content_html": text_to_html(chunk), "content_text": chunk}
+        for chunk in _chunk_text(payload, _TUTORIAL_CARD_CHUNK_SIZE)
     ]
-
-
-async def _send_editorial_text_fallback(
-    payload: str, *, group_id: int | None, user_id: int | None
-) -> bool:
-    """Plain-text fallback: send the editorial chunks as normal messages."""
-    delivered = False
-    for chunk in _chunk_text(payload, _TUTORIAL_DIRECT_CHUNK_SIZE):
-        segments = [build_text(chunk)]
-        if group_id is not None:
-            resp = await send_group_msg(group_id, segments)
-        else:
-            resp = await send_private_msg(user_id, segments)
-        delivered = delivered or bool(resp)
-    return delivered
-
-
-async def deliver_official_tutorial_forward(
-    group_id: int,
-    pid: str,
-    editorial: OfficialEditorial,
-) -> bool:
-    """Deliver one already verified and cached Chinese editorial to a group.
-
-    Returns True once the card (or its plain-text fallback) reached the group.
-    """
-    payload = _editorial_payload(pid)
-    if payload is None:
-        logger.warning(
-            "[group_%s] tutorial delivery skipped for %s "
-            "(unverified or missing translation)",
-            group_id,
-            pid,
-        )
-        return False
-    nodes = await _build_editorial_card_nodes(payload, group_id=group_id)
-    chunks = _chunk_text(payload, _TUTORIAL_FORWARD_CHUNK_SIZE)
-    fwd_resp = await send_forward_card_with_legacy_fallback(
-        destination="group", group_id=group_id, nodes=nodes,
-        self_send_messages=[build_plain_message(chunk) for chunk in chunks],
+    mid = await send_forward_card(
+        rt.sender,
+        group_openid,
+        nodes,
+        title=f"📖 {pid} 官方题解",
+        msg_id=None,
+        text_fallback=payload,
+        browser=rt.browser,
     )
-    if fwd_resp:
-        return True
-    logger.warning(
-        "[group_%s] failed to forward official tutorial for %s — "
-        "falling back to plain text",
-        group_id,
-        pid,
-    )
-    return await _send_editorial_text_fallback(payload, group_id=group_id, user_id=None)
-
-
-async def deliver_official_tutorial_forward_private(
-    user_id: int,
-    pid: str,
-    editorial: OfficialEditorial,
-) -> bool:
-    """Deliver one already verified and cached Chinese editorial to a user.
-
-    Returns True once the card (or its plain-text fallback) reached the user.
-    """
-    payload = _editorial_payload(pid)
-    if payload is None:
-        logger.warning(
-            "[user_%s] tutorial delivery skipped for %s "
-            "(unverified or missing translation)",
-            user_id,
-            pid,
-        )
-        return False
-    nodes = await _build_editorial_card_nodes(payload, group_id=None)
-    chunks = _chunk_text(payload, _TUTORIAL_FORWARD_CHUNK_SIZE)
-    fwd_resp = await send_forward_card_with_legacy_fallback(
-        destination="private", user_id=user_id, nodes=nodes,
-        self_send_messages=[build_plain_message(chunk) for chunk in chunks],
-    )
-    if fwd_resp:
-        return True
-    logger.warning(
-        "[user_%s] failed to forward official tutorial for %s — "
-        "falling back to plain text",
-        user_id,
-        pid,
-    )
-    return await _send_editorial_text_fallback(payload, group_id=None, user_id=user_id)
+    return bool(mid)

@@ -16,14 +16,21 @@ from typing import Callable, Awaitable
 @dataclass
 class CommandDef:
     """Definition of a bot command."""
-    name: str                           # e.g. "newproblem"
-    aliases: list[str] = field(default_factory=list)  # e.g. ["np", "新题"]
+    name: str                           # canonical internal id, e.g. "newproblem"
+    aliases: list[str] = field(default_factory=list)  # public short triggers, e.g. ["np"]
     description: str = ""               # one-line Chinese description
-    usage: str = ""                     # usage example, e.g. "/newproblem"
+    usage: str = ""                     # usage example, e.g. "/np"
     detailed: str = ""                  # longer help text for /help <cmd>
     handler: Callable[..., Awaitable[None]] | None = None  # async handler(ctx, args)
     cooldown: int = 0                   # per-user cooldown in seconds
     admin_only: bool = False            # requires admin privilege
+
+    @property
+    def trigger(self) -> str:
+        """The public command users type: the short alias when one exists,
+        otherwise the canonical name. Full names of aliased commands are not
+        accepted as triggers (alias-only interface)."""
+        return self.aliases[0] if self.aliases else self.name
 
 
 # Global registry — populated by auto-discovery
@@ -31,10 +38,18 @@ _registry: dict[str, CommandDef] = {}
 
 
 def register(cmd: CommandDef) -> None:
-    """Register a command definition."""
-    _registry[cmd.name] = cmd
-    for alias in cmd.aliases:
-        _registry[alias] = cmd
+    """Register a command's public triggers.
+
+    Aliased commands expose ONLY their short aliases as triggers; the canonical
+    full name is kept for internal identity (dispatch rewrites alias→name before
+    the handler parses raw_text) but is not itself a usable command. Alias-less
+    commands register their name.
+    """
+    if cmd.aliases:
+        for alias in cmd.aliases:
+            _registry[alias] = cmd
+    else:
+        _registry[cmd.name] = cmd
 
 
 def get(name: str) -> CommandDef | None:

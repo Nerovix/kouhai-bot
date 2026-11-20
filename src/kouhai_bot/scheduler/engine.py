@@ -1,6 +1,8 @@
-"""Job scheduler — cron-like task execution for group checks.
+"""Job scheduler — cron-like task execution across served groups.
 
-Jobs are defined in jobs.py and configured for CURRENT_GROUP via scheduler_config.json.
+Jobs are defined in jobs.py and run for every group the worker has discovered
+(group = view). Per-group overrides (enabled jobs / schedule) live in
+``scheduler_config.json`` keyed by group_openid; contest_check is on by default.
 """
 
 from __future__ import annotations
@@ -9,10 +11,8 @@ import asyncio
 import json
 import logging
 import os
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 from typing import Awaitable, Callable
 
 from ..config import get_config
@@ -21,14 +21,12 @@ logger = logging.getLogger("kouhai-bot.scheduler")
 DEFAULT_ENABLED_JOBS = ["contest_check"]
 REMOVED_JOBS = {"daily_achievements", "daily_post"}
 
-# ── Job registry ────────────────────────────────────────────────────────
 
 @dataclass
 class JobDef:
-    """Definition of a scheduled job."""
     name: str
-    fn: Callable[[int], Awaitable[None]]  # async(group_id) -> None
-    schedule: str  # cron expression or interval like "12:00"
+    fn: Callable[[str], Awaitable[None]]  # async(group_openid) -> None
+    schedule: str  # "HH:MM"
     description: str = ""
 
 
@@ -39,16 +37,10 @@ def register_job(job: JobDef) -> None:
     _registry[job.name] = job
 
 
-# ── Per-group config ────────────────────────────────────────────────────
-
 @dataclass
 class GroupSchedulerConfig:
-    group_id: int
+    group_openid: str
     enabled_jobs: list[str] = field(default_factory=lambda: list(DEFAULT_ENABLED_JOBS))
-    # Problem difficulty range
-    min_rating: int | None = None
-    max_rating: int | None = None
-    # Custom cron overrides per job
     job_schedules: dict[str, str] = field(default_factory=dict)
 
 
@@ -60,7 +52,6 @@ def _normalize_enabled_jobs(
     enabled_jobs: list[str],
     disabled_jobs: list[str] | None = None,
 ) -> list[str]:
-    """Drop jobs removed from older scheduler configs."""
     disabled = set(disabled_jobs or [])
     return [
         job for job in enabled_jobs
@@ -68,59 +59,34 @@ def _normalize_enabled_jobs(
     ]
 
 
-def load_group_configs() -> dict[int, GroupSchedulerConfig]:
-    """Load scheduler configs. Creates a default for CURRENT_GROUP if missing."""
+def load_group_config(group_openid: str) -> GroupSchedulerConfig:
+    """Per-group config with contest_check enabled by default."""
     path = _config_path()
-    if not os.path.exists(path):
-        # Default: the current group gets contest checks.
-        cfg = get_config()
-        gid = cfg.current_group
-        defaults = {
-            str(gid): {
-                "group_id": gid,
-                "enabled_jobs": DEFAULT_ENABLED_JOBS,
-            }
-        }
-        with open(path, "w") as f:
-            json.dump(defaults, f, indent=2, ensure_ascii=False)
-        return {
-            gid: GroupSchedulerConfig(
-                group_id=gid,
-                enabled_jobs=list(DEFAULT_ENABLED_JOBS),
-            )
-        }
+    val: dict = {}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                val = data.get(group_openid, {}) or {}
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("scheduler_config unreadable, using defaults: %s", exc)
+    if not isinstance(val, dict):
+        val = {}
+    return GroupSchedulerConfig(
+        group_openid=group_openid,
+        enabled_jobs=_normalize_enabled_jobs(
+            val.get("enabled_jobs", list(DEFAULT_ENABLED_JOBS)),
+            val.get("disabled_jobs", []),
+        ),
+        job_schedules=val.get("job_schedules", {}),
+    )
 
-    with open(path) as f:
-        data = json.load(f)
-    result = {}
-    for key, val in data.items():
-        gid = val.get("group_id", int(key))
-        result[gid] = GroupSchedulerConfig(
-            group_id=gid,
-            enabled_jobs=_normalize_enabled_jobs(
-                val.get("enabled_jobs", list(DEFAULT_ENABLED_JOBS)),
-                val.get("disabled_jobs", []),
-            ),
-            min_rating=val.get("min_rating"),
-            max_rating=val.get("max_rating"),
-            job_schedules=val.get("job_schedules", {}),
-        )
-    cfg = get_config()
-    if cfg.current_group not in result:
-        result[cfg.current_group] = GroupSchedulerConfig(
-            group_id=cfg.current_group,
-            enabled_jobs=list(DEFAULT_ENABLED_JOBS),
-        )
-    return result
-
-
-# ── Engine ──────────────────────────────────────────────────────────────
 
 TZ = timezone(timedelta(hours=8))  # Asia/Shanghai
 
 
 def _parse_time(schedule: str) -> tuple[int, int] | None:
-    """Parse 'HH:MM' schedule into (hour, minute). Returns None if invalid."""
     try:
         parts = schedule.strip().split(":")
         return int(parts[0]), int(parts[1])
@@ -128,59 +94,55 @@ def _parse_time(schedule: str) -> tuple[int, int] | None:
         return None
 
 
-async def _run_jobs_for_group(group_id: int, now: datetime) -> None:
-    """Run all enabled jobs for a group if scheduled."""
-    configs = load_group_configs()
-    gcfg = configs.get(group_id)
-    if not gcfg:
-        return
+_last_run: dict[str, str] = {}  # "group_openid:job_name" → "YYYY-MM-DD HH:MM"
 
+
+async def _run_jobs_for_group(group_openid: str, now: datetime) -> None:
+    gcfg = load_group_config(group_openid)
+    minute_key = now.strftime("%Y-%m-%d %H:%M")
     for job_name in gcfg.enabled_jobs:
         job = _registry.get(job_name)
         if not job:
             continue
-
         schedule = gcfg.job_schedules.get(job_name, job.schedule)
         target = _parse_time(schedule)
         if not target:
             continue
-
-        if now.hour == target[0] and now.minute == target[1]:
-            logger.info(f"[group_{group_id}] Running job: {job_name}")
-            try:
-                await job.fn(group_id)
-            except Exception as e:
-                logger.error(f"Job {job_name} failed for group {group_id}: {e}")
-
-
-_last_run: dict[str, str] = {}  # "group_id:job_name" → "YYYY-MM-DD HH:MM"
+        if now.hour != target[0] or now.minute != target[1]:
+            continue
+        dedup_key = f"{group_openid}:{job_name}"
+        if _last_run.get(dedup_key) == minute_key:
+            continue
+        _last_run[dedup_key] = minute_key
+        logger.info("[group_%s] Running job: %s", group_openid, job_name)
+        try:
+            await job.fn(group_openid)
+        except Exception as exc:
+            logger.error("Job %s failed for group %s: %s", job_name, group_openid, exc)
 
 
 async def scheduler_loop(
     *,
+    get_groups: Callable[[], Awaitable[list[str]]],
     stop_event: asyncio.Event | None = None,
     tick_seconds: float = 60.0,
 ) -> None:
-    """Main scheduler loop — checks every ``tick_seconds`` and runs due jobs."""
+    """Check every ``tick_seconds`` and run due jobs for each served group."""
     logger.info("Scheduler started")
     while True:
         try:
             now = datetime.now(TZ)
-            cfg = get_config()
-
-            await _run_jobs_for_group(cfg.current_group, now)
-
-        except Exception as e:
-            logger.error(f"Scheduler loop error: {e}")
+            for group_openid in await get_groups():
+                await _run_jobs_for_group(group_openid, now)
+        except Exception as exc:
+            logger.error("Scheduler loop error: %s", exc)
 
         if stop_event is None:
             await asyncio.sleep(tick_seconds)
             continue
-
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=tick_seconds)
             break
         except asyncio.TimeoutError:
             continue
-
     logger.info("Scheduler stopped")

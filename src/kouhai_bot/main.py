@@ -1,4 +1,10 @@
-"""Kouhai Bot entry point and local process helpers."""
+"""Kouhai Bot entry point and local process helpers (official API).
+
+The official bot is an outbound WebSocket client with no listening port, so
+instance identity is the ``app_id``: a pidfile under ``{data_dir}/run/`` plus
+process liveness/cwd replaces the legacy NapCat WS-port probe. prod/test bots
+are separate app_ids with separate pidfiles and databases.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +21,10 @@ from pathlib import Path
 from .config import get_config
 from .worker import main_async as worker_main_async
 
-_PORT_WAIT_TIMEOUT_SEC = 10.0
+_START_WAIT_TIMEOUT_SEC = 10.0
+# Worker shutdown drains background tasks for up to 30s before closing handles;
+# give it room to finish gracefully before escalating to SIGKILL.
+_STOP_WAIT_TIMEOUT_SEC = 40.0
 
 
 def _repo_root() -> Path:
@@ -30,84 +39,33 @@ def main() -> None:
     asyncio.run(main_async())
 
 
-def _listener_lines(port: int) -> list[str]:
+# ── pidfile / process helpers ───────────────────────────────────────────
+
+
+def _pidfile_path(app_id: str, data_dir: str) -> Path:
+    return Path(data_dir) / "run" / f"{app_id}.pid"
+
+
+def _read_pidfile(path: Path) -> int | None:
     try:
-        result = subprocess.run(
-            ["ss", "-ltnp", f"( sport = :{port} )"],
-            capture_output=True, text=True, check=False,
-        )
-    except Exception:
-        return []
-
-    return [
-        line
-        for line in result.stdout.splitlines()
-        if line.startswith("LISTEN")
-    ]
+        text = path.read_text().strip()
+    except OSError:
+        return None
+    if not text.isdigit():
+        return None
+    return int(text)
 
 
-def _listener_pids(port: int) -> set[int]:
-    lines = _listener_lines(port)
-    return {int(pid) for line in lines for pid in re.findall(r"pid=(\d+)", line)}
-
-
-def _port_has_listener(port: int) -> bool:
-    return bool(_listener_lines(port))
-
-
-def _kill_pids(pids: set[int], sig: int) -> None:
-    for pid in sorted(pids):
-        try:
-            os.kill(pid, sig)
-        except ProcessLookupError:
-            pass
-
-
-def _current_port_listeners(port: int) -> set[int]:
-    pids = _listener_pids(port)
-    pids.discard(os.getpid())
-    return pids
-
-
-def _wait_for_port_release(port: int, timeout_sec: float) -> set[int]:
-    deadline = time.monotonic() + timeout_sec
-    while time.monotonic() < deadline:
-        remaining = _current_port_listeners(port)
-        if not _port_has_listener(port):
-            return set()
-        time.sleep(0.1)
-    return _current_port_listeners(port)
-
-
-def _stop_existing_instance_on_port(port: int) -> bool:
-    pids = _current_port_listeners(port)
-    if not pids:
-        if _port_has_listener(port):
-            raise RuntimeError(
-                f"NapCat WS port {port} is occupied, but the listener PID is unavailable"
-            )
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
         return False
-
-    _kill_pids(pids, signal.SIGTERM)
-    remaining = _wait_for_port_release(port, timeout_sec=_PORT_WAIT_TIMEOUT_SEC)
-    if not _port_has_listener(port):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
         return True
-
-    _kill_pids(remaining, signal.SIGKILL)
-    remaining = _wait_for_port_release(port, timeout_sec=_PORT_WAIT_TIMEOUT_SEC)
-    if _port_has_listener(port):
-        raise RuntimeError(
-            f"Could not release NapCat WS port {port}; still listening: {sorted(remaining)}"
-        )
     return True
-
-
-def _bot_log_path(group_id: int, data_dir: str) -> Path:
-    tz = timezone(timedelta(hours=8))
-    date_str = datetime.now(tz).strftime("%Y-%m-%d")
-    log_dir = Path(data_dir) / "logs" / str(group_id)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    return log_dir / f"{date_str}.log"
 
 
 def _pid_cwd(pid: int) -> Path | None:
@@ -117,26 +75,74 @@ def _pid_cwd(pid: int) -> Path | None:
         return None
 
 
-def _current_worktree_listener_state(port: int) -> str:
-    repo_root = _repo_root().resolve()
-    saw_unknown = False
-    for pid in sorted(_current_port_listeners(port)):
-        cwd = _pid_cwd(pid)
-        if cwd is None:
-            saw_unknown = True
-            continue
-        if cwd == repo_root:
-            return "yes"
-    return "unknown" if saw_unknown else "no"
+def _pid_is_worker(pid: int) -> bool:
+    """Confirm the PID is our worker, not a recycled innocent process.
+
+    A stale pidfile can point at a PID the OS reassigned to an unrelated
+    process; without this check stop/restart would signal that process and
+    start would refuse to launch. cmdline is readable only for same-uid
+    processes, so an unreadable cmdline is treated as not-ours (fail-safe).
+    """
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return False
+    return b"kouhai_bot.worker" in cmdline
 
 
-def _wait_for_port_bind(port: int, timeout_sec: float) -> bool:
+def _running_pid(app_id: str, data_dir: str) -> int | None:
+    pid = _read_pidfile(_pidfile_path(app_id, data_dir))
+    if pid is not None and _pid_alive(pid) and _pid_is_worker(pid):
+        return pid
+    return None
+
+
+def _current_worktree_state(pid: int | None) -> str:
+    if pid is None:
+        return "no"
+    cwd = _pid_cwd(pid)
+    if cwd is None:
+        return "unknown"
+    return "yes" if cwd == _repo_root().resolve() else "no"
+
+
+def _kill_pid(pid: int, sig: int) -> None:
+    try:
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _wait_for_exit(pid: int, timeout_sec: float) -> bool:
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
-        if _port_has_listener(port):
+        if not _pid_alive(pid):
             return True
         time.sleep(0.1)
-    return _port_has_listener(port)
+    return not _pid_alive(pid)
+
+
+def _stop_existing(app_id: str, data_dir: str) -> bool:
+    path = _pidfile_path(app_id, data_dir)
+    pid = _running_pid(app_id, data_dir)
+    if pid is None:
+        path.unlink(missing_ok=True)
+        return False
+    _kill_pid(pid, signal.SIGTERM)
+    if not _wait_for_exit(pid, _STOP_WAIT_TIMEOUT_SEC):
+        _kill_pid(pid, signal.SIGKILL)
+        if not _wait_for_exit(pid, _STOP_WAIT_TIMEOUT_SEC):
+            raise RuntimeError(f"Could not stop bot pid {pid} (app_id={app_id})")
+    path.unlink(missing_ok=True)
+    return True
+
+
+def _bot_log_path(app_id: str, data_dir: str) -> Path:
+    tz = timezone(timedelta(hours=8))
+    date_str = datetime.now(tz).strftime("%Y-%m-%d")
+    log_dir = Path(data_dir) / "logs" / app_id
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / f"{date_str}.log"
 
 
 def _load_proxy_env() -> dict[str, str]:
@@ -153,16 +159,13 @@ def _load_proxy_env() -> dict[str, str]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        # Match "export KEY=value" or "export KEY="value""
         m = re.match(r"export\s+(\w+)=(.*)", line)
         if not m:
             continue
         key = m.group(1)
         value = m.group(2).strip()
-        # Strip surrounding quotes if present
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
             value = value[1:-1]
-        # Resolve $var references (single level only, enough for proxy_env)
         value = re.sub(
             r"[$](\w+)",
             lambda m2: env_vars.get(m2.group(1), ""),
@@ -172,8 +175,8 @@ def _load_proxy_env() -> dict[str, str]:
     return env_vars
 
 
-def _spawn_detached_bot(port: int, group_id: int, data_dir: str) -> tuple[int, Path]:
-    log_path = _bot_log_path(group_id, data_dir)
+def _spawn_detached_bot(app_id: str, data_dir: str) -> tuple[int, Path]:
+    log_path = _bot_log_path(app_id, data_dir)
     env = os.environ.copy()
     if not env.get("HTTPS_PROXY") and not env.get("https_proxy"):
         proxy_vars = _load_proxy_env()
@@ -192,27 +195,46 @@ def _spawn_detached_bot(port: int, group_id: int, data_dir: str) -> tuple[int, P
             close_fds=True,
             env=env,
         )
+    pidfile = _pidfile_path(app_id, data_dir)
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.write_text(str(proc.pid))
     return proc.pid, log_path
 
 
-def _print_start_status(
+def _wait_for_startup(pid: int, timeout_sec: float) -> bool:
+    """Confirm the detached process stays alive past initial bootstrap."""
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return False
+        time.sleep(0.2)
+    return _pid_alive(pid)
+
+
+def _print_status(
     *,
-    port: int,
     action: str,
+    app_id: str,
     stopped_existing: bool | None = None,
     already_running: bool | None = None,
     started: bool | None = None,
-    pid: int | None,
-    log_path: Path | None,
+    pid: int | None = None,
+    log_path: Path | None = None,
+    occupied: bool | None = None,
+    current_worktree_running: str | None = None,
 ) -> None:
     print(f"action={action}")
-    print(f"port={port}")
+    print(f"app_id={app_id}")
     if stopped_existing is not None:
         print(f"stopped_existing={'yes' if stopped_existing else 'no'}")
     if already_running is not None:
         print(f"already_running={'yes' if already_running else 'no'}")
     if started is not None:
         print(f"started={'yes' if started else 'no'}")
+    if occupied is not None:
+        print(f"occupied={'yes' if occupied else 'no'}")
+    if current_worktree_running is not None:
+        print(f"current_worktree_running={current_worktree_running}")
     if pid is not None:
         print(f"pid={pid}")
     if log_path is not None:
@@ -220,84 +242,57 @@ def _print_start_status(
 
 
 def start() -> None:
-    """Start the bot instance in the background if its WS port is free."""
+    """Start the bot in the background unless its app_id pidfile is live."""
     cfg = get_config()
-    port = cfg.napcat_ws_port
-    if _port_has_listener(port):
-        _print_start_status(
-            port=port,
-            action="start",
-            already_running=True,
-            started=False,
-            pid=None,
-            log_path=None,
+    cfg.validate_official()
+    if _running_pid(cfg.app_id, cfg.data_dir) is not None:
+        _print_status(
+            action="start", app_id=cfg.app_id,
+            already_running=True, started=False,
         )
         return
-
-    pid, log_path = _spawn_detached_bot(port, cfg.current_group, cfg.data_dir)
-    started = _wait_for_port_bind(port, timeout_sec=_PORT_WAIT_TIMEOUT_SEC)
-    _print_start_status(
-        port=port,
-        action="start",
-        already_running=False,
-        started=started,
-        pid=pid,
-        log_path=log_path,
+    pid, log_path = _spawn_detached_bot(cfg.app_id, cfg.data_dir)
+    started = _wait_for_startup(pid, _START_WAIT_TIMEOUT_SEC)
+    _print_status(
+        action="start", app_id=cfg.app_id,
+        already_running=False, started=started, pid=pid, log_path=log_path,
     )
     if not started:
-        raise RuntimeError(
-            f"Detached bot failed to bind NapCat WS port {port}. See log: {log_path}"
-        )
+        raise RuntimeError(f"Detached bot failed to start (app_id={cfg.app_id}). See log: {log_path}")
 
 
 def restart() -> None:
-    """Restart the bot instance bound to the configured NapCat WS port.
-
-    Stops any existing listener on that port, then starts a detached background instance.
-    """
+    """Stop the existing app_id instance, then start a detached replacement."""
     cfg = get_config()
-    port = cfg.napcat_ws_port
-    stopped_existing = _stop_existing_instance_on_port(port)
-    pid, log_path = _spawn_detached_bot(port, cfg.current_group, cfg.data_dir)
-    started = _wait_for_port_bind(port, timeout_sec=_PORT_WAIT_TIMEOUT_SEC)
-    _print_start_status(
-        port=port,
-        action="restart",
-        stopped_existing=stopped_existing,
-        started=started,
-        pid=pid,
-        log_path=log_path,
+    cfg.validate_official()
+    stopped_existing = _stop_existing(cfg.app_id, cfg.data_dir)
+    pid, log_path = _spawn_detached_bot(cfg.app_id, cfg.data_dir)
+    started = _wait_for_startup(pid, _START_WAIT_TIMEOUT_SEC)
+    _print_status(
+        action="restart", app_id=cfg.app_id,
+        stopped_existing=stopped_existing, started=started, pid=pid, log_path=log_path,
     )
     if not started:
-        raise RuntimeError(
-            f"Detached bot failed to bind NapCat WS port {port}. See log: {log_path}"
-        )
+        raise RuntimeError(f"Detached bot failed to start (app_id={cfg.app_id}). See log: {log_path}")
 
 
 def stop() -> None:
-    """Stop the bot instance bound to the configured NapCat WS port."""
+    """Stop the bot instance identified by the configured app_id."""
     cfg = get_config()
-    port = cfg.napcat_ws_port
-    stopped_existing = _stop_existing_instance_on_port(port)
-    print("action=stop")
-    print(f"port={port}")
-    print(f"stopped_existing={'yes' if stopped_existing else 'no'}")
+    stopped_existing = _stop_existing(cfg.app_id, cfg.data_dir)
+    _print_status(action="stop", app_id=cfg.app_id, stopped_existing=stopped_existing)
 
 
 def status() -> None:
-    """Report whether the configured NapCat WS port is occupied."""
+    """Report whether the configured app_id instance is running."""
     cfg = get_config()
-    port = cfg.napcat_ws_port
-    listeners = sorted(_current_port_listeners(port))
-    occupied = _port_has_listener(port)
-    print("action=status")
-    print(f"port={port}")
-    print(f"occupied={'yes' if occupied else 'no'}")
-    print(f"current_worktree_running={_current_worktree_listener_state(port) if occupied else 'no'}")
-    if listeners:
-        print("pids=" + ",".join(str(pid) for pid in listeners))
-    elif occupied:
-        print("pids=unknown")
+    pid = _running_pid(cfg.app_id, cfg.data_dir)
+    _print_status(
+        action="status", app_id=cfg.app_id,
+        occupied=pid is not None,
+        current_worktree_running=_current_worktree_state(pid),
+        pid=pid,
+    )
 
 
 if __name__ == "__main__":

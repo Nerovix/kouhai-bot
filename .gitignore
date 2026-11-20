@@ -8,6 +8,8 @@ venv/
 # Environment
 config.yaml
 config.json
+# Config backups may contain real secrets — never track them.
+config.*.bak*
 
 # Data (runtime, not tracked)
 .xcpc-runtime/

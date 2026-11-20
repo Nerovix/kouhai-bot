@@ -1,0 +1,95 @@
+"""Persistent headless Chromium for long-image card rendering.
+
+Launches once and reuses the browser; each render gets a fresh context/page
+(mobile width, 2x scale for crisp text). Pages are closed after screenshot.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+logger = logging.getLogger("kouhai-bot.render.browser")
+
+try:
+    from playwright.async_api import async_playwright
+except Exception:  # pragma: no cover - playwright optional at import time
+    async_playwright = None
+
+
+class RenderBrowser:
+    def __init__(self) -> None:
+        self._pw = None
+        self._browser = None
+        self._lock = asyncio.Lock()
+
+    async def _ensure(self) -> None:
+        if self._browser is not None:
+            return
+        if async_playwright is None:
+            raise RuntimeError("playwright is not installed; cannot render cards")
+        pw = await async_playwright().start()
+        try:
+            self._browser = await pw.chromium.launch(headless=True)
+        except BaseException:
+            await pw.stop()
+            raise
+        self._pw = pw
+        logger.info("render browser launched (chromium %s)", self._browser.version)
+
+    async def screenshot_html(
+        self,
+        html: str,
+        *,
+        width: int = 720,
+        device_scale_factor: int = 2,
+    ) -> bytes:
+        async with self._lock:
+            await self._ensure()
+            context = await self._browser.new_context(
+                viewport={"width": width, "height": 800},
+                device_scale_factor=device_scale_factor,
+            )
+            try:
+                page = await context.new_page()
+                await page.set_content(html, wait_until="load", timeout=20000)
+                await page.wait_for_timeout(150)
+                # Fit the viewport to the content height so full_page captures
+                # exactly the card — a fixed tall viewport pads short cards
+                # with a blank band below the last bubble.
+                height = await page.evaluate(
+                    "() => Math.ceil(document.body.scrollHeight)"
+                )
+                await page.set_viewport_size(
+                    {"width": width, "height": max(int(height), 1)}
+                )
+                return await page.screenshot(full_page=True, type="png")
+            finally:
+                await context.close()
+
+    async def close(self) -> None:
+        try:
+            if self._browser is not None:
+                await self._browser.close()
+        finally:
+            self._browser = None
+            if self._pw is not None:
+                try:
+                    await self._pw.stop()
+                finally:
+                    self._pw = None
+
+
+_browser: RenderBrowser | None = None
+
+
+def get_render_browser() -> RenderBrowser:
+    global _browser
+    if _browser is None:
+        _browser = RenderBrowser()
+    return _browser
+
+
+def set_render_browser(browser: RenderBrowser | None) -> None:
+    global _browser
+    _browser = browser

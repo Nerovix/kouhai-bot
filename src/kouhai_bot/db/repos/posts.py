@@ -110,11 +110,16 @@ async def record_solve(
             (group_openid, pid),
         )
         is_first_blood = prior[0] == 0
-        total = await conn_fetchone(conn,
-            "SELECT COUNT(*) FROM group_solves WHERE group_openid=?",
+        cur_max = await conn_fetchone(conn,
+            "SELECT COALESCE(MAX(order_num), 0) FROM group_solves WHERE group_openid=?",
             (group_openid,),
         )
-        order_num = total[0] + 1
+        floor_row = await conn_fetchone(conn,
+            "SELECT floor FROM group_order_floor WHERE group_openid=?",
+            (group_openid,),
+        )
+        floor = floor_row[0] if floor_row else 0
+        order_num = max(cur_max[0], floor) + 1
         await conn.execute(
             "INSERT INTO group_solves "
             "(group_openid, user_openid, pid, nickname, solve_date, order_num, "

@@ -37,8 +37,8 @@ PID2 = "543E"
 TAG = "🐳"
 
 EMPTY_CACHE_MSG = (
-    "这边还没有可以标注的 AI 回复哦～先 /submit、/clarify 或 /review 一次，"
-    "收到回复后再来 /feedback 吧。"
+    "这边还没有可以标注的 AI 回复哦～先 /sbm、/clrf 或 /rv 一次，"
+    "收到回复后再来 /fb 吧。"
 )
 
 
@@ -184,14 +184,14 @@ async def test_feedback_empty_cache_friendly_message(env):
 
 async def test_feedback_bad_syntax_shows_usage(env):
     await feedback_cmd.handle(make_ctx("/feedbackx 备注"))
-    assert sent_texts(env.rest) == [f"{at_tag()} 用法：/feedback [简短备注]～"]
+    assert sent_texts(env.rest) == [f"{at_tag()} 用法：/fb [简短备注]～"]
     assert await feedback.load_bad_reports(env.db, G) == []
 
 
 async def test_feedback_without_note_is_allowed(env, monkeypatch):
     await do_incorrect_submit(env, monkeypatch)
     await feedback_cmd.handle(make_ctx("/feedback"))
-    assert sent_texts(env.rest)[-1] == "👌"
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} 👌"
     reports = await feedback.load_bad_reports(env.db, G)
     assert len(reports) == 1 and reports[0]["note"] == ""
 
@@ -219,7 +219,7 @@ async def test_feedback_after_submit_snapshots_verbatim(env, monkeypatch):
 
     ctx = make_ctx("/feedback 复杂度分析说错了")
     await feedback_cmd.handle(ctx)
-    assert sent_texts(env.rest)[-1] == "👌"
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} 👌"
 
     reports = await feedback.load_bad_reports(env.db, G)
     assert len(reports) == 1
@@ -262,7 +262,7 @@ async def test_feedback_correct_reply_markable(env, monkeypatch):
     await feedback_cmd.handle(make_ctx("/feedback 判得太松"))
     report = (await feedback.load_bad_reports(env.db, G))[0]
     assert report["target"]["record"]["result"] == "correct"
-    assert sent_texts(env.rest)[-1] == "👌"
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} 👌"
 
 
 async def test_feedback_failure_notice_markable(env, monkeypatch):
@@ -315,7 +315,7 @@ async def test_feedback_survives_clear(env, monkeypatch):
     assert await submissions.get_user_problem_submissions(env.db, G, U, PID) == []
     # the cache is deliberately untouched by /clear
     await feedback_cmd.handle(make_ctx("/feedback 清空了也要标"))
-    assert sent_texts(env.rest)[-1] == "👌"
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} 👌"
     report = (await feedback.load_bad_reports(env.db, G))[0]
     assert report["target"]["problem"] == PID
     assert report["target"]["record"]["result"] == "incorrect"
@@ -356,7 +356,7 @@ async def test_feedback_pending_submit_unmarkable(env, monkeypatch):
     await asyncio.wait_for(task, 5)
     # once the reply is delivered the same record becomes markable
     await feedback_cmd.handle(make_ctx("/feedback 现在可以了"))
-    assert sent_texts(env.rest)[-1] == "👌"
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} 👌"
     report = (await feedback.load_bad_reports(env.db, G))[0]
     assert report["target"]["record"]["result"] == "incorrect"
 
@@ -402,7 +402,7 @@ async def test_feedback_offtopic_leaves_nothing_markable(env, monkeypatch):
     await seed_problem(env.db)
     mock_judge(monkeypatch, verdict(False, reaction="123"))
     await submit_cmd.handle(make_ctx("/submit 无关内容"))
-    assert sent_texts(env.rest)[-1] == "😵"
+    assert sent_texts(env.rest)[-1] == f"{at_tag()} 🙅"
     assert await submissions.get_user_problem_submissions(env.db, G, U, PID) == []
     assert await feedback.get_last_interaction(env.db, G, U) is None
     await feedback_cmd.handle(make_ctx("/feedback"))
@@ -470,6 +470,7 @@ async def test_fb_alias_dispatches_to_feedback(env, monkeypatch):
             "group_openid": G, "user_openid": U,
             "message_id": "EV-FB", "content": "/fb 别名反馈",
             "author": {"member_openid": U},
+            "mentions": [{"member_openid": "BOT_PLACEHOLDER", "bot": True, "is_you": True}],
         },
         spawn_handlers=False,
     )

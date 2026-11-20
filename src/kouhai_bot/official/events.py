@@ -106,12 +106,20 @@ def _member_event(t: str, d: dict[str, Any]) -> dict[str, Any]:
 
 
 def _interaction(t: str, d: dict[str, Any]) -> dict[str, Any]:
+    data = d.get("data") or {}
+    resolved = data.get("resolved")
+    if not isinstance(resolved, dict):
+        resolved = {}
     return {
         "type": "interaction",
         "group_openid": str(d.get("group_openid", "") or ""),
         "user_openid": str(d.get("group_member_openid", "") or d.get("user_openid", "") or ""),
         "interaction_id": str(d.get("id", "") or ""),
-        "data": d.get("data") or {},
+        "interaction_type": data.get("type") or d.get("type"),
+        "scene": str(d.get("scene", "") or ""),
+        "button_data": str(resolved.get("button_data", "") or ""),
+        "button_id": str(resolved.get("button_id", "") or ""),
+        "data": data,
         "raw": d,
     }
 

@@ -320,9 +320,9 @@ async def test_on_ready_adopts_authoritative_bot_username(env):
     # Gateway is wired to the runtime's READY hook.
     assert env.gateways[0].on_ready == runtime._on_ready
 
-    await runtime._on_ready({"id": "755457195663515057", "username": "KouhaiBot", "bot": True})
+    await runtime._on_ready({"id": "123456789012345678", "username": "KouhaiBot", "bot": True})
     assert env.sender.bot_name == "KouhaiBot"
-    assert env.sender.bot_id == "755457195663515057"
+    assert env.sender.bot_id == "123456789012345678"
 
     # An empty username must not clobber the configured fallback name.
     env.sender.bot_name = "助手"

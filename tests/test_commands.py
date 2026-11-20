@@ -23,7 +23,7 @@ from kouhai_bot.config import BotConfig
 from kouhai_bot.db import set_database
 from kouhai_bot.db.repos import feedback, posts, problems, submissions, users
 from kouhai_bot.editorial_content import OfficialEditorial, bundle_for_editorial
-from kouhai_bot.handlers import process_event
+from kouhai_bot.handlers import process_event, registry
 from kouhai_bot.handlers.cmd import clear as clear_cmd
 from kouhai_bot.handlers.cmd import clarify as clarify_cmd
 from kouhai_bot.handlers.cmd import help as help_cmd
@@ -51,6 +51,9 @@ class FakeRest:
     def __init__(self):
         self.sent: list[tuple[str, dict]] = []
         self.uploads: list[tuple[str, dict]] = []
+        self.md_uploads: list[tuple[bytes, str]] = []
+        self.md_deletes: list[str] = []
+        self.acks: list[tuple[str, int]] = []
 
     async def send_group_message(self, group_openid, payload):
         self.sent.append((group_openid, payload))
@@ -59,6 +62,18 @@ class FakeRest:
     async def upload_group_media(self, group_openid, payload):
         self.uploads.append((group_openid, payload))
         return {"file_info": "FI", "file_uuid": "u", "ttl": 300}
+
+    async def upload_media_image(self, data, *, file_name="card.png", content_type="image/png"):
+        self.md_uploads.append((data, file_name))
+        return {"url": "qqbot-media://image/v1/TOKEN", "image_id": "IMG1", "ttl": 86400}
+
+    async def delete_media_image(self, image_id):
+        self.md_deletes.append(image_id)
+        return True
+
+    async def respond_interaction(self, interaction_id, *, code=0):
+        self.acks.append((interaction_id, code))
+        return True
 
 
 @pytest.fixture
@@ -75,6 +90,9 @@ async def env(db, tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         "kouhai_bot.render.forward_card.render_card_png", _no_render
+    )
+    monkeypatch.setattr(
+        "kouhai_bot.handlers.cards.render_card_png", _no_render
     )
     followups: list[tuple[str, str]] = []
     monkeypatch.setattr(
@@ -119,6 +137,20 @@ def sent_texts(rest: FakeRest) -> list[str]:
 
 def at_tag(user: str = U) -> str:
     return f'<qqbot-at-user id="{user}"/>'
+
+
+def sent_keyboards(rest: FakeRest) -> list[dict | None]:
+    return [payload.get("keyboard") for _g, payload in rest.sent]
+
+
+def button_labels(kb: dict | None) -> list[str]:
+    if not kb:
+        return []
+    return [
+        b["render_data"]["label"]
+        for row in kb["content"]["rows"]
+        for b in row["buttons"]
+    ]
 
 
 def mock_judge(monkeypatch, verdict: dict, *, tag: str = TAG):
@@ -190,7 +222,7 @@ async def seed_problem(
     if post:
         if card is None:
             card = {
-                "post_msg": f"来看看这道新题吧！\n\n{pid} 的题意简述",
+                "post_msg": f"{pid} 的题意简述",
                 "sample_messages": ["输入\n1\n输出\n2"],
                 "notes_message": "",
                 "snake_enabled": False,
@@ -219,20 +251,20 @@ def verdict(correct: bool, *, reason: str = "", reply: str = "", reaction: str =
 
 async def test_submit_without_args_shows_usage(env):
     await submit_cmd.handle(make_ctx("/submit"))
-    assert sent_texts(env.rest) == [f"{at_tag()} 用法：/submit 你的做法。试试看？"]
+    assert sent_texts(env.rest) == [f"{at_tag()} 用法：/sbm 你的做法。试试看？"]
 
 
 async def test_submit_empty_body_reminder(env):
     await submit_cmd.handle(make_ctx("/submit   "))
     assert sent_texts(env.rest) == [
-        f"{at_tag()} /submit 后面要写你的做法呀，只发 /submit 我不知道你做了啥 😅"
+        f"{at_tag()} /sbm 后面要写你的做法呀，只发 /sbm 我不知道你做了啥 😅"
     ]
 
 
 async def test_submit_no_current_problem(env):
     await submit_cmd.handle(make_ctx("/submit 我的做法"))
     assert sent_texts(env.rest) == [
-        f"{at_tag()} 当前还没有题目可以提交～发 /newproblem 刷新一道？"
+        f"{at_tag()} 当前还没有题目可以提交～发 /np 刷新一道？"
     ]
 
 
@@ -245,13 +277,23 @@ async def test_submit_correct_first_blood_scores_cheers_and_reveals(env, monkeyp
     await submit_cmd.handle(make_ctx("/submit 贪心即可", nickname="Alice"))
 
     texts = sent_texts(env.rest)
-    assert texts[0] == "👀"
+    assert texts[0] == f"{at_tag()} 👀"
     cheer = texts[1]
     assert cheer.startswith(at_tag())
-    assert "恭喜拿下本题一血！🎉 本题 +2 分（共 1 题，总分 2），当前第 1" in cheer
+    assert "恭喜拿下本题一血！🎉 本题 +2 分（共 1 题，总分 2）" in cheer
+    assert "当前第" not in cheer
     assert "本题来自 CF542D Nice Problem 2300✨" in cheer
     assert cheer.endswith(TAG)
     assert len(texts) == 2
+    # congrats carries [跳转原题 → CF] + [再来一题 → /np auto-send] in one row
+    kb = sent_keyboards(env.rest)[1]
+    assert button_labels(kb) == ["跳转原题", "再来一题"]
+    jump_btn, next_btn = kb["content"]["rows"][0]["buttons"]
+    assert jump_btn["action"]["type"] == 0
+    assert jump_btn["action"]["data"] == "https://codeforces.com/problemset/problem/542/D"
+    assert next_btn["action"]["type"] == 1
+    assert next_btn["action"]["data"] == "/np"
+    assert "enter" not in next_btn["action"]
 
     # judge saw the statement, the submission and the rating
     assert calls[0]["submission"] == "贪心即可"
@@ -288,7 +330,7 @@ async def test_submit_correct_after_solved_does_not_rescore(env, monkeypatch):
     calls = mock_judge(monkeypatch, verdict(True))
     await submit_cmd.handle(make_ctx("/submit 另一个做法"))
     texts = sent_texts(env.rest)
-    assert texts == [f"{at_tag()} 已经有人解出本题了～想刷下一道可以发 /newproblem 哦"]
+    assert texts == [f"{at_tag()} 已经有人解出本题了～想刷下一道可以发 /np 哦"]
     assert calls == []  # judge skipped entirely
     solves = await posts.get_group_solves(env.db, G)
     assert len(solves) == 1  # no new ledger row
@@ -315,9 +357,15 @@ async def test_submit_incorrect_reply_mentions_asker(env, monkeypatch):
     mock_judge(monkeypatch, verdict(False, reason="复杂度超了", reply="@某人 复杂度超了哦😅"))
     await submit_cmd.handle(make_ctx("/submit 暴力枚举"))
     texts = sent_texts(env.rest)
-    assert texts[0] == "👀"
+    assert texts[0] == f"{at_tag()} 👀"
     # reply wins over reason; fake @ stripped; 😅 → ❤️; tag appended once
     assert texts[1] == f"{at_tag()} 复杂度超了哦❤️{TAG}"
+    # rejection carries the [继续提交 / 清空上下文] action row
+    kb = sent_keyboards(env.rest)[1]
+    assert button_labels(kb) == ["继续提交", "清空上下文"]
+    buttons = kb["content"]["rows"][0]["buttons"]
+    assert [b["action"]["data"] for b in buttons] == ["/sbm", "/clear"]
+    assert buttons[1]["action"]["type"] == 1  # clear is a no-arg callback
     records = await submissions.get_user_problem_submissions(env.db, G, U, PID)
     assert records[0]["result"] == "incorrect"
     assert records[0]["reason"] == "复杂度超了"
@@ -330,6 +378,7 @@ async def test_submit_incorrect_empty_reply_falls_back_to_reason(env, monkeypatc
     mock_judge(monkeypatch, verdict(False, reason="边界没处理"))
     await submit_cmd.handle(make_ctx("/submit 做法"))
     assert sent_texts(env.rest)[1] == f"{at_tag()} 边界没处理。再想想？🤔{TAG}"
+    assert button_labels(sent_keyboards(env.rest)[1]) == ["继续提交", "清空上下文"]
 
 
 async def test_submit_incorrect_no_reason_default_text(env, monkeypatch):
@@ -337,6 +386,7 @@ async def test_submit_incorrect_no_reason_default_text(env, monkeypatch):
     mock_judge(monkeypatch, verdict(False))
     await submit_cmd.handle(make_ctx("/submit 做法"))
     assert sent_texts(env.rest)[1] == f"{at_tag()} 做法不太对呢。再想想？🤔{TAG}"
+    assert button_labels(sent_keyboards(env.rest)[1]) == ["继续提交", "清空上下文"]
 
 
 # ── /submit: offtopic leaves no trace ───────────────────────────────────
@@ -347,7 +397,7 @@ async def test_submit_offtopic_removes_pending_record(env, monkeypatch):
     mock_judge(monkeypatch, verdict(False, reaction="123"))
     await submit_cmd.handle(make_ctx("/submit 讲个笑话"))
     texts = sent_texts(env.rest)
-    assert texts == ["👀", "😵"]  # tiny emoji messages, no verdict text
+    assert texts == [f"{at_tag()} 👀", f"{at_tag()} 🙅"]  # tiny @-emoji acks, no verdict text
     records = await submissions.get_user_problem_submissions(env.db, G, U, PID)
     assert records == []  # pending archive removed by request_id
     assert await feedback.get_last_interaction(env.db, G, U) is None
@@ -357,7 +407,7 @@ async def test_clarify_offtopic_removes_pending_record(env, monkeypatch):
     await seed_problem(env.db)
     mock_chat(monkeypatch, json.dumps({"reply": "", "reaction": "123"}))
     await clarify_cmd.handle(make_ctx("/clarify 今天天气如何"))
-    assert sent_texts(env.rest) == ["👀", "😵"]
+    assert sent_texts(env.rest) == [f"{at_tag()} 👀", f"{at_tag()} 🙅"]
     assert await submissions.get_user_problem_submissions(env.db, G, U, PID) == []
 
 
@@ -436,8 +486,8 @@ async def test_submit_second_judge_overrides_first_correct(env, monkeypatch):
     )
     await submit_cmd.handle(make_ctx("/submit 贪心"))
     texts = sent_texts(env.rest)
-    assert texts[0] == "👀"
-    assert texts[1] == "🧐"  # second-judge emoji reaction
+    assert texts[0] == f"{at_tag()} 👀"
+    assert texts[1] == f"{at_tag()} 🧐"  # second-judge emoji reaction
     assert texts[2] == f"{at_tag()} 再想想边界哦🦊"
     assert len(second_calls) == 1
     assert second_calls[0]["first"]["correct"] is True
@@ -460,7 +510,7 @@ async def test_submit_no_editorial_no_second_judge(env, monkeypatch):
         "kouhai_bot.handlers.cmd.submit.second_judge_submission_result", _second
     )
     await submit_cmd.handle(make_ctx("/submit 做法"))
-    assert "🧐" not in sent_texts(env.rest)
+    assert all("🧐" not in t for t in sent_texts(env.rest))
     assert "恭喜拿下本题一血" in sent_texts(env.rest)[1]
 
 
@@ -573,8 +623,14 @@ async def test_clarify_replies_with_markdown_at(env, monkeypatch):
     calls = mock_chat(monkeypatch, json.dumps({"reply": "n ≤ 1e5 哦～", "reaction": ""}))
     await clarify_cmd.handle(make_ctx("/clarify n 的范围是多少"))
     texts = sent_texts(env.rest)
-    assert texts[0] == "👀"
+    assert texts[0] == f"{at_tag()} 👀"
     assert texts[1] == f"{at_tag()} n ≤ 1e5 哦～{TAG}"
+    # clarify reply carries [提交 /sbm] + [继续询问 /clrf], both pre-fill
+    kb = sent_keyboards(env.rest)[1]
+    assert button_labels(kb) == ["提交", "继续询问"]
+    buttons = kb["content"]["rows"][0]["buttons"]
+    assert [b["action"]["data"] for b in buttons] == ["/sbm", "/clrf"]
+    assert all(b["action"]["enter"] is False for b in buttons)
     assert calls[0]["task"] == "clarify"
     assert calls[0]["response_format"] == {"type": "json_object"}
     user_msg = calls[0]["messages"][1]["content"]
@@ -614,7 +670,7 @@ async def test_clarify_no_problem(env, monkeypatch):
 
 async def test_clarify_usage(env):
     await clarify_cmd.handle(make_ctx("/clarify"))
-    assert sent_texts(env.rest) == [f"{at_tag()} 用法：/clarify 你的问题～"]
+    assert sent_texts(env.rest) == [f"{at_tag()} 用法：/clrf 你的问题～"]
 
 
 # ── /review ─────────────────────────────────────────────────────────────
@@ -628,7 +684,7 @@ async def test_review_targets_latest_solved_problem(env, monkeypatch):
     calls = mock_chat(monkeypatch, "这道题的贪心是对的～")
     await review_cmd.handle(make_ctx("/review 我的做法对吗"))
     texts = sent_texts(env.rest)
-    assert texts[0] == "👀"
+    assert texts[0] == f"{at_tag()} 👀"
     assert texts[1] == f"{at_tag()} 这道题的贪心是对的～{TAG}"
     assert calls[0]["task"] == "review"
     # latest solved = PID (order_num 2), not the older 100A
@@ -716,14 +772,14 @@ async def test_review_long_reply_uses_card_with_text_fallback(env, monkeypatch):
     mock_chat(monkeypatch, long_reply)
     await review_cmd.handle(make_ctx("/review 详细复盘"))
     texts = sent_texts(env.rest)
-    assert texts[0] == "👀"
+    assert texts[0] == f"{at_tag()} 👀"
     assert long_reply + TAG in texts  # render failed → plain-text fallback
-    assert texts[-1] == f"{at_tag()} 回复较长，已折叠到卡片里啦 👆"
+    assert texts[-1].strip() == at_tag()  # long image carries the reply; bare @ ping only
 
 
 async def test_review_usage(env):
     await review_cmd.handle(make_ctx("/review"))
-    assert sent_texts(env.rest) == [f"{at_tag()} 用法：/review 你的问题～"]
+    assert sent_texts(env.rest) == [f"{at_tag()} 用法：/rv 你的问题～"]
 
 
 # ── /clear ──────────────────────────────────────────────────────────────
@@ -736,7 +792,7 @@ async def test_clear_removes_current_problem_history_and_acks(env, monkeypatch):
     assert len(await submissions.get_user_problem_submissions(env.db, G, U, PID)) == 1
     env.rest.sent.clear()
     await clear_cmd.handle(make_ctx("/clear"))
-    assert sent_texts(env.rest) == ["👌"]
+    assert sent_texts(env.rest) == [f"{at_tag()} 👌"]
     assert await submissions.get_user_problem_submissions(env.db, G, U, PID) == []
     # the last-interaction cache survives /clear (feedback still works)
     assert (await feedback.get_last_interaction(env.db, G, U))["result"] == "incorrect"
@@ -875,9 +931,38 @@ async def test_status_reports_active_submit(env, monkeypatch):
     task = asyncio.create_task(submit_cmd.handle(make_ctx("/submit 做法")))
     await asyncio.wait_for(judge_started.wait(), 5)
     await stubs.handle_status(make_ctx("/status", user=U2))
-    assert sent_texts(env.rest)[-1] == "🔴 bot 当前有 submit 请求还在处理中～"
+    assert sent_texts(env.rest)[-1] == "🔴 目前正在处理的请求有：@USER1 的 submit～"
     judge_release.set()
     await asyncio.wait_for(task, 5)
+    await stubs.handle_status(make_ctx("/status", user=U2))
+    assert sent_texts(env.rest)[-1] == "🟢 bot 当前空闲，没有在处理请求～"
+
+
+async def test_status_lists_multiple_active_requests(env, monkeypatch):
+    await seed_problem(env.db)
+    judge_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _judge(*args, **kwargs):
+        judge_started.set()
+        await release.wait()
+        return ChatCompletionResult(text=json.dumps(verdict(False, reason="x")))
+
+    async def _chat(messages, **kwargs):
+        await release.wait()
+        return ChatCompletionResult(text=json.dumps({"reply": "ok", "reaction": ""}))
+
+    monkeypatch.setattr("kouhai_bot.handlers.cmd.submit.judge_submission_result", _judge)
+    monkeypatch.setattr("kouhai_bot.handlers.cmd.submit.call_chat_completion_result", _chat)
+    t1 = asyncio.create_task(submit_cmd.handle(make_ctx("/submit 做法", nickname="Alice")))
+    await asyncio.wait_for(judge_started.wait(), 5)
+    t2 = asyncio.create_task(clarify_cmd.handle(make_ctx("/clarify 题意", user=U2, nickname="Bob")))
+    await wait_for(lambda: len(submit_cmd.get_group_active_requests(G)) >= 2)
+    await stubs.handle_status(make_ctx("/status", user=U2))
+    assert sent_texts(env.rest)[-1] == "🔴 目前正在处理的请求有：@Alice 的 submit、@Bob 的 clarify～"
+    release.set()
+    await asyncio.wait_for(t1, 5)
+    await asyncio.wait_for(t2, 5)
     await stubs.handle_status(make_ctx("/status", user=U2))
     assert sent_texts(env.rest)[-1] == "🟢 bot 当前空闲，没有在处理请求～"
 
@@ -921,7 +1006,7 @@ async def test_scoreboard_weighted_no_top5(env):
     assert len(texts) == 1  # render failed → single text fallback
     board = texts[0]
     assert "📊 累计解题排行榜（共 2 人）" in board
-    assert "计分公式：2000=1 分，每 +300 分翻倍（2^((rating-2000)/300)）" in board
+    assert "计分：2000 分 = 1 分，每 +300 分翻倍" in board
     assert "#1 BobSnap — 1 题 / 4 分" in board
     assert "#2 AliceLive — 1 题 / 2 分" in board  # live nickname preferred
     assert "Top" not in board and "top5" not in board
@@ -939,6 +1024,26 @@ async def test_scoreboard_equal_scores_share_rank(env):
     assert "#2" not in board
 
 
+async def test_scoreboard_migration_note_only_for_service_group(env):
+    await seed_problem(env.db, pid="100A", rating=2300)
+    await posts.record_solve(env.db, G, U, "100A", "Alice")
+
+    # default group: no migration note
+    await stubs.handle_scoreboard(make_ctx("/scoreboard"))
+    assert "数据正在迁移中" not in sent_texts(env.rest)[0]
+
+    # configured legacy service group: gray note under the formula
+    env.cfg.legacy_migration_enabled = True
+    env.cfg.legacy_migration_group_openid = G
+    env.rest.sent.clear()
+    await stubs.handle_scoreboard(make_ctx("/scoreboard"))
+    board = sent_texts(env.rest)[0]
+    assert "计分：2000 分 = 1 分，每 +300 分翻倍" in board
+    assert "数据正在迁移中，排名可能不完整。" in board
+    # note sits directly under the formula, before the ranking rows
+    assert board.index("数据正在迁移中") < board.index("#1 Alice")
+
+
 # ── /problem ────────────────────────────────────────────────────────────
 
 
@@ -951,7 +1056,9 @@ async def test_problem_resends_cached_card_as_text_fallback(env):
     })
     await stubs.handle_problem(make_ctx("/problem"))
     texts = sent_texts(env.rest)
+    # render disabled → plain-text fallback (no thumbnail, no buttons)
     assert texts == ["题意简述正文\n\n样例一\n\n样例二\n\n样例解释"]
+    assert env.rest.md_uploads == []
 
 
 async def test_problem_solved_hint(env):
@@ -959,7 +1066,7 @@ async def test_problem_solved_hint(env):
     await posts.record_solve(env.db, G, U2, PID, "Bob")
     await stubs.handle_problem(make_ctx("/problem"))
     texts = sent_texts(env.rest)
-    assert texts[-1] == "这题已经通过啦，可以发 /newproblem 挑战下一题～"
+    assert texts[-1] == "这题已经通过啦，可以发 /np 挑战下一题～"
 
 
 async def test_problem_high_rating_caution(env):
@@ -972,7 +1079,7 @@ async def test_problem_high_rating_caution(env):
 async def test_problem_no_current(env):
     await stubs.handle_problem(make_ctx("/problem"))
     assert sent_texts(env.rest) == [
-        f"{at_tag()} 暂时不能查看当前题目，可能是暂时还不存在当前题目，试试 /newproblem？"
+        f"{at_tag()} 暂时不能查看当前题目，可能是暂时还不存在当前题目，试试 /np？"
     ]
 
 
@@ -982,6 +1089,41 @@ async def test_problem_missing_card_content(env):
     assert sent_texts(env.rest) == [
         f"{at_tag()} 暂时无法重新发送题目，试试 /tag 查看标签吧～"
     ]
+
+
+async def test_problem_reuses_prerendered_cache(env, monkeypatch):
+    sha = await seed_problem(env.db, card={
+        "post_msg": "题意简述正文",
+        "sample_messages": ["样例一"],
+        "notes_message": "",
+        "snake_enabled": False,
+    })
+    from kouhai_bot.handlers import cards
+
+    fake_png = b"\x89PNG\r\n\x1a\nfake-card-bytes"
+
+    async def _fake_render(*args, **kwargs):
+        return fake_png
+
+    monkeypatch.setattr(cards, "render_card_png", _fake_render)
+    assert await cards.prerender_problem_card(
+        pid=PID, statement_sha256=sha, summary="题意简述正文", model_tag="",
+        sample_messages=["样例一"], notes_message="",
+        bot_name=env.sender.bot_name, bot_avatar_url=env.sender.bot_avatar_url,
+    )
+    # env disables render_card_png (raises), so a cache hit must skip rendering
+    # entirely and upload the cached PNG as a markdown thumbnail + buttons.
+    await stubs.handle_problem(make_ctx("/problem"))
+    assert env.rest.md_uploads
+    assert env.rest.uploads == []
+    card = env.rest.sent[-1][1]
+    assert card["msg_type"] == 2
+    # fake_png is < 24 bytes → no parseable IHDR → default 45×132 hint
+    assert card["markdown"]["content"] == (
+        "![题目 #45px #132px](qqbot-media://image/v1/TOKEN)"
+    )
+    assert button_labels(sent_keyboards(env.rest)[-1]) == ["提交", "询问题意"]
+    assert env.rest.md_deletes == ["IMG1"]
 
 
 # ── /help ───────────────────────────────────────────────────────────────
@@ -995,13 +1137,22 @@ async def test_help_generated_from_registry(env):
     texts = sent_texts(env.rest)
     assert len(texts) == 1
     help_text = texts[0]
-    assert help_text.startswith("可用指令：")
-    assert "/submit(/sbm) 你的做法 — 提交你的做法，AI 判题" in help_text
-    assert "/clarify(/clrf)" in help_text
-    assert "/feedback(/fb)" in help_text
+    # Themed sections, one bullet per command, short trigger + "short for" note.
+    assert "📚 刷题" in help_text
+    assert "✍️ 判题 · 讨论" in help_text
+    assert "🔧 其他" in help_text
+    assert "/sbm 你的做法 — 提交你的做法，AI 判题" in help_text
+    assert "short for submit" in help_text
+    assert "/clrf" in help_text
+    assert "/fb" in help_text
+    assert "/np" in help_text
     assert "/range [最小-最大]" in help_text
-    assert "5分钟冷却" in help_text  # newproblem cooldown from config (300s)
+    assert "/np — 来一道新题" in help_text
+    assert "冷却" not in help_text  # cooldown detail hidden from /help
+    assert "--force" not in help_text  # force hint hidden; bot reminds when needed
     assert "/sync" in help_text
+    # Alias-only interface: the old combined "/full(/alias)" form is gone.
+    assert "/submit(/sbm)" not in help_text
 
 
 # ── process_event dispatch ──────────────────────────────────────────────
@@ -1016,14 +1167,23 @@ def group_event(content: str, *, user: str = U, group: str = G, msg_id: str = "E
         "message_id": msg_id,
         "content": content,
         "author": {"member_openid": user},
+        # Commands require an @bot; default to the chip/full-message form.
+        "mentions": [{"member_openid": "BOT_PLACEHOLDER", "bot": True, "is_you": True}],
+        "at_bot": False,
     }
 
 
 async def test_dispatch_alias_rewrites_to_canonical(env):
     await process_event(group_event("/sbm 做法"), spawn_handlers=False)
     assert sent_texts(env.rest) == [
-        f"{at_tag()} 当前还没有题目可以提交～发 /newproblem 刷新一道？"
+        f"{at_tag()} 当前还没有题目可以提交～发 /np 刷新一道？"
     ]
+
+
+async def test_dispatch_rejects_full_name_of_aliased_command(env):
+    # Alias-only interface: /submit is internal identity, not a usable trigger.
+    await process_event(group_event("/submit 做法", msg_id="EVFULL"), spawn_handlers=False)
+    assert sent_texts(env.rest) == []
 
 
 async def test_dispatch_pb_alias_resends_problem(env):
@@ -1063,3 +1223,99 @@ async def test_dispatch_spawns_handler_task(env):
     assert task is not None
     await task
     assert sent_texts(env.rest) == [f"{at_tag()} 还没有今日题目～"]
+
+
+def interaction_event(
+    button_data: str, *, user: str = U, group: str = G, iid: str = "INT1",
+    interaction_type: int = 11, scene: str = "group",
+) -> dict:
+    return {
+        "type": "interaction",
+        "group_openid": group,
+        "user_openid": user,
+        "interaction_id": iid,
+        "interaction_type": interaction_type,
+        "scene": scene,
+        "button_data": button_data,
+        "button_id": "btn",
+        "data": {"type": interaction_type,
+                 "resolved": {"button_data": button_data, "button_id": "btn"}},
+        "raw": {},
+    }
+
+
+async def test_interaction_clear_callback_clears_without_ok_ack(env, monkeypatch):
+    registry.discover_commands()
+    await seed_problem(env.db)
+    mock_judge(monkeypatch, verdict(False, reason="不对"))
+    await submit_cmd.handle(make_ctx("/submit 做法"))
+    assert len(await submissions.get_user_problem_submissions(env.db, G, U, PID)) == 1
+    env.rest.sent.clear()
+    # Clicking 清空上下文 (type=1 callback "/clear") clears history exactly like
+    # typing /clear and acks the interaction (PUT code=0). Unlike typed /clear it
+    # sends NO 👌 — QQ already shows the clicker an "操作成功" toast.
+    await process_event(interaction_event("/clear", iid="INT_CLEAR"), spawn_handlers=False)
+    assert sent_texts(env.rest) == []
+    assert await submissions.get_user_problem_submissions(env.db, G, U, PID) == []
+    assert env.rest.acks == [("INT_CLEAR", 0)]
+
+
+async def test_unsolved_np_rejection_carries_view_problem_callback(env):
+    registry.discover_commands()
+    grp = "G_UNSOLVED"
+    await seed_problem(env.db, group=grp)  # current problem, unsolved
+    await process_event(group_event("/np", group=grp, msg_id="EVNP"), spawn_handlers=False)
+    assert sent_texts(env.rest) == [
+        f"{at_tag()} 当前题目还没有人解出来呢～不能直接刷题哦。\n"
+        "可使用 /pb 查看当前题目。\n"
+        "如果确定要换题，请发 /np --force"
+    ]
+    kb = sent_keyboards(env.rest)[0]
+    assert button_labels(kb) == ["查看当前题目"]
+    btn = kb["content"]["rows"][0]["buttons"][0]
+    assert btn["action"]["type"] == 1          # callback, not auto-send command
+    assert btn["action"]["data"] == "/pb"
+    assert "enter" not in btn["action"]
+    # Clicking 查看当前题目 (callback "/pb") resends the current problem card,
+    # exactly like typing /pb.
+    env.rest.sent.clear()
+    await process_event(
+        interaction_event("/pb", group=grp, iid="INT_PB"), spawn_handlers=False
+    )
+    assert any("题意简述" in t for t in sent_texts(env.rest))
+    assert env.rest.acks == [("INT_PB", 0)]
+
+
+# ── /np --force skip notice: markdown + 跳转原题 button ─────────────────
+
+
+async def test_forced_skip_notice_carries_jump_original_button(env, monkeypatch):
+    from kouhai_bot.handlers.cmd import newproblem as np_cmd
+
+    captured: list[tuple[str, str, dict | None]] = []
+
+    class _Sender:
+        async def send_group_markdown(self, group, markdown, *, keyboard=None, msg_id=None):
+            captured.append((group, markdown, keyboard))
+            return "M1"
+
+    monkeypatch.setattr(
+        np_cmd, "get_runtime", lambda: SimpleNamespace(sender=_Sender())
+    )
+
+    async def _no_editorial(pid):
+        return None
+
+    monkeypatch.setattr(np_cmd, "get_verified_official_editorial", _no_editorial)
+
+    problem = {"today": "1856E1", "name": "Some Problem", "rating": "2500"}
+    ok = await np_cmd._send_forced_skip_followup(G, problem)
+    assert ok is True
+    assert len(captured) == 1
+    group, markdown, kb = captured[0]
+    assert group == G
+    assert markdown == "当前题目已被跳过，原题为 CF1856E1 Some Problem 2500。"
+    assert button_labels(kb) == ["跳转原题"]
+    btn = kb["content"]["rows"][0]["buttons"][0]
+    assert btn["action"]["type"] == 0
+    assert btn["action"]["data"] == "https://codeforces.com/problemset/problem/1856/E1"

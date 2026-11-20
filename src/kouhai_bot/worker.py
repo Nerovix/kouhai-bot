@@ -14,6 +14,7 @@ import logging
 import signal
 from contextlib import suppress
 
+from . import legacy_migration
 from .config import get_config
 from .db.database import get_database, set_database
 from .editorial_followup import (
@@ -98,6 +99,7 @@ class WorkerRuntime:
         await self._db.open()
         set_database(self._db)
         set_runtime(Runtime(db=self._db, sender=self._sender, browser=self._browser))
+        await legacy_migration.ensure_order_floor(self._db)
         await self._seed_groups()
         self._gateway_task = asyncio.create_task(
             self._gateway.run(self._gateway_stop), name="worker_gateway",
@@ -134,7 +136,10 @@ class WorkerRuntime:
             self._ensure_group(str(row["group_openid"] or ""))
 
     async def _on_event(self, event: dict) -> None:
-        if event.get("type") == "message" and event.get("message_type") == "group":
+        etype = event.get("type")
+        if (
+            etype == "message" and event.get("message_type") == "group"
+        ) or etype == "interaction":
             self._ensure_group(str(event.get("group_openid", "") or ""))
         await process_event(event, spawn_handlers=True)
 

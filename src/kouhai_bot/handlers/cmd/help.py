@@ -1,4 +1,10 @@
-"""/help — dynamically generated from the command registry, delivered as a card."""
+"""/help — dynamically generated from the command registry, delivered as a card.
+
+Commands are grouped into themed sections, each rendered as its own bubble in
+the long-image chat record. Only the public short trigger is shown; aliased
+commands carry a muted "short for <full name>" note. Markdown-style headings,
+bullets and bold keep the list readable instead of one cramped text block.
+"""
 
 from __future__ import annotations
 
@@ -6,53 +12,59 @@ from .. import registry
 from ..registry import CommandDef, all_commands
 from ..context import Ctx
 from ..runtime import get_runtime
-from ...config import get_config
 from ...render.forward_card import send_forward_card
-from ...render.html import text_to_html
+from ...render.html import escape
+
+# Themed grouping (canonical name → section). Order here is display order.
+_SECTIONS: list[tuple[str, list[str]]] = [
+    ("📚 刷题", ["newproblem", "problem", "tag", "range", "scoreboard"]),
+    ("✍️ 判题 · 讨论", ["submit", "clarify", "review", "clear"]),
+    ("🔧 其他", ["feedback", "sync", "status", "help"]),
+]
 
 
-def _format_command_name(cmd: CommandDef) -> str:
-    if not cmd.aliases:
-        return f"/{cmd.name}"
-    aliases = ", ".join(f"/{alias}" for alias in cmd.aliases)
-    return f"/{cmd.name}({aliases})"
+def _command_parts(cmd: CommandDef) -> tuple[str, str, str]:
+    """Return (trigger_with_args, description, short_for_note)."""
+    args = f" {cmd.usage}" if cmd.usage else ""
+    trigger = f"/{cmd.trigger}{args}"
+    short = f"short for {cmd.name}" if cmd.aliases else ""
+    return trigger, cmd.description, short
 
 
-def _format_duration(seconds: int) -> str:
-    seconds = max(0, int(seconds))
-    if seconds == 0:
-        return "无冷却"
-    if seconds % 60 == 0:
-        return f"{seconds // 60}分钟"
-    return f"{seconds}秒"
-
-
-def _description_for_help(cmd: CommandDef, newproblem_cooldown: int) -> str:
-    if cmd.name == "newproblem":
-        return f"刷一道新题（未解须 --force；{_format_duration(newproblem_cooldown)}冷却）"
-    return cmd.description
-
-
-def _help_text() -> str:
-    cfg = get_config()
-    cooldown = int(getattr(cfg, "newproblem_cooldown", 300))
-    lines = ["可用指令："]
-    for cmd in all_commands():
-        args = f" {cmd.usage}" if cmd.usage else ""
-        lines.append(
-            f"{_format_command_name(cmd)}{args} — {_description_for_help(cmd, cooldown)}"
-        )
-    return "\n".join(lines)
+def _section_nodes() -> tuple[list[dict], str]:
+    by_name = {cmd.name: cmd for cmd in all_commands()}
+    nodes: list[dict] = []
+    text_sections: list[str] = []
+    bot_name = get_runtime().sender.bot_name or "算法助手"
+    for title, names in _SECTIONS:
+        cmds = [by_name[n] for n in names if n in by_name]
+        if not cmds:
+            continue
+        li_html: list[str] = []
+        li_text: list[str] = []
+        for cmd in cmds:
+            trigger, desc, short = _command_parts(cmd)
+            short_html = f' <span class="short">{escape(short)}</span>' if short else ""
+            li_html.append(
+                f"<li><strong>{escape(trigger)}</strong> — {escape(desc)}{short_html}</li>"
+            )
+            short_text = f"（{short}）" if short else ""
+            li_text.append(f"• {trigger} — {desc}{short_text}")
+        nodes.append({
+            "nickname": bot_name,
+            "content_html": f"<h3>{escape(title)}</h3><ul>{''.join(li_html)}</ul>",
+            "content_text": f"{title}\n" + "\n".join(li_text),
+        })
+        text_sections.append(f"{title}\n" + "\n".join(li_text))
+    return nodes, "\n\n".join(text_sections)
 
 
 async def handle(ctx: Ctx) -> None:
-    text = _help_text()
+    nodes, fallback = _section_nodes()
     rt = get_runtime()
-    bot_name = rt.sender.bot_name or "算法助手"
-    nodes = [{"nickname": bot_name, "content_html": text_to_html(text), "content_text": text}]
     await send_forward_card(
         rt.sender, ctx.group_openid, nodes, title="帮助",
-        msg_id=ctx.message_id, text_fallback=text, browser=rt.browser,
+        msg_id=ctx.message_id, text_fallback=fallback, browser=rt.browser,
     )
 
 

@@ -118,25 +118,30 @@ async def send_forward_card(
     msg_id: str | None = None,
     text_fallback: str | None = None,
     browser: RenderBrowser | None = None,
+    png_override: bytes | None = None,
 ) -> str | None:
     """Render → upload → send long image; degrade to text on any failure.
 
     Never raises: a render/upload/send error (including transport failures)
     falls back to plain text, and a failed text fallback returns None so the
     caller can report delivery failure instead of crashing mid-command.
+    ``png_override`` skips rendering when a pre-rendered image is supplied.
     """
-    png = None
-    try:
-        png = await render_card_png(
-            nodes, title=title, footer=footer, browser=browser,
-            bot_name=sender.bot_name, bot_avatar_url=sender.bot_avatar_url,
-        )
-    except Exception as e:
-        logger.warning("card render failed; using text fallback: %s", e)
+    png = png_override
+    if png is None:
+        try:
+            png = await render_card_png(
+                nodes, title=title, footer=footer, browser=browser,
+                bot_name=sender.bot_name, bot_avatar_url=sender.bot_avatar_url,
+            )
+        except Exception as e:
+            logger.warning("card render failed; using text fallback: %s", e)
     if png:
         try:
+            # No `content` caption: the rendered header already carries the
+            # title; a media content field would repeat it below the image.
             mid = await sender.send_group_image_bytes(
-                group_openid, png, msg_id=msg_id, content=title
+                group_openid, png, msg_id=msg_id
             )
         except Exception as e:
             logger.warning("card media send errored; using text fallback: %s", e)

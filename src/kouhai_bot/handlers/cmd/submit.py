@@ -41,6 +41,11 @@ from ...config import get_config
 from ...db.repos import feedback, posts, submissions
 from ...db.repos.submissions import REPLIED_RESULTS
 from ...editorial_followup import schedule_post_solve_editorial_followup
+from ...official.keyboard import (
+    clarify_action_keyboard,
+    congrats_keyboard,
+    reject_action_keyboard,
+)
 from ...problem_content import statement_images
 from ...render.forward_card import send_forward_card
 from ...render.html import text_to_html
@@ -61,10 +66,12 @@ _REVIEW_CARD_CHUNK_SIZE = 3000
 _LLM_FAILURE_TEXT = "模型服务出故障了，联系一下管理员帮帮忙吧～"
 T = TypeVar("T")
 
-# Official API has no message-reaction primitive; reactions become tiny
-# emoji-character group messages. 314 (second judge) is emoji-only, no text.
+# Official API has no message-reaction primitive and group sends cannot carry
+# QQ system faces; reactions become tiny emoji-character group messages.
+# Offtopic uses 🙅 (the "NO" gesture) — the unicode stand-in for legacy QQ
+# system face 123 "NO" (摇手指). 314 (second judge) is emoji-only, no text.
 _ACK_EMOJI = "👀"
-_OFFTOPIC_EMOJI = "😵"
+_OFFTOPIC_EMOJI = "🙅"
 _OK_EMOJI = "👌"
 _SECOND_JUDGE_EMOJI = "🧐"
 
@@ -171,6 +178,7 @@ class PendingRequest:
     message_id: str
     command: str
     nickname: str
+    from_callback: bool = False
     payload: str = ""
     submit_pid: str = ""
     submit_problem: dict | None = None
@@ -191,15 +199,6 @@ class PendingRequest:
     submit_score_candidate: bool = False
     submit_score_resolved: bool = False
     submit_waiting_reply_sent: bool = False
-
-    def status_dict(self) -> dict:
-        return {
-            "group_openid": self.group_openid,
-            "user_openid": self.user_openid,
-            "message_id": self.message_id,
-            "command": self.command,
-            "admitted_at": self.admitted_at,
-        }
 
 
 def _refresh_runtime() -> None:
@@ -253,16 +252,22 @@ async def _second_judge_llm_limited(
         )
 
 
-async def _send_plain(req: PendingRequest, text: str, *, mention: bool = True) -> str | None:
+async def _send_plain(
+    req: PendingRequest, text: str, *, mention: bool = True, keyboard: dict | None = None
+) -> str | None:
     sender = get_runtime().sender
     text = text.strip()
     if mention:
-        return await sender.send_group_at(req.group_openid, req.user_openid, text, msg_id=req.message_id)
+        return await sender.send_group_at(
+            req.group_openid, req.user_openid, text, msg_id=req.message_id, keyboard=keyboard
+        )
     return await sender.send_group_text(req.group_openid, text, msg_id=req.message_id)
 
 
 async def _react(req: PendingRequest, emoji: str) -> None:
-    await get_runtime().sender.react(req.group_openid, emoji, msg_id=req.message_id)
+    await get_runtime().sender.react(
+        req.group_openid, emoji, msg_id=req.message_id, user_openid=req.user_openid
+    )
 
 
 def _build_review_history(history: list[dict]) -> str:
@@ -391,11 +396,6 @@ class GroupCoordinator:
         async with self.lock:
             self._enqueue_locked(req)
         await req.done_event.wait()
-
-    def status(self) -> dict | None:
-        if not self.active:
-            return None
-        return min(self.active.values(), key=lambda item: item.admitted_at).status_dict()
 
     def _finish_request_locked(self, req: PendingRequest) -> str:
         self.active.pop(req.seq, None)
@@ -654,7 +654,7 @@ class GroupCoordinator:
         return {"kind": "review", "pid": pid, "reply": reply, "model_tag": result.model_tag}
 
     async def _send_already_solved(self, req: PendingRequest) -> None:
-        await _send_plain(req, "已经有人解出本题了～想刷下一道可以发 /newproblem 哦")
+        await _send_plain(req, "已经有人解出本题了～想刷下一道可以发 /np 哦")
 
     async def _send_llm_failure(self, req: PendingRequest) -> None:
         await _send_plain(req, _LLM_FAILURE_TEXT)
@@ -690,17 +690,16 @@ class GroupCoordinator:
 
         is_fb = solve["is_first_blood"]
         solved = solve["solved_count"]
-        rank = int(current["rank"]) if current else 1
         total_score = format_points(float(current["score"])) if current else "0"
         score_gain = format_points(posts.rating_to_points(rating)) if rating is not None else "0"
 
         if is_fb:
-            cheer = f"恭喜拿下本题一血！🎉 本题 +{score_gain} 分（共 {solved} 题，总分 {total_score}），当前第 {rank}"
+            cheer = f"恭喜拿下本题一血！🎉 本题 +{score_gain} 分（共 {solved} 题，总分 {total_score}）"
         else:
-            cheer = f"做对了！🎉 本题 +{score_gain} 分（共 {solved} 题，总分 {total_score}），当前第 {rank}"
+            cheer = f"做对了！🎉 本题 +{score_gain} 分（共 {solved} 题，总分 {total_score}）"
         reveal = f"本题来自 {self._problem_label(req, pid)}✨"
         resp_text = append_model_tag(f"{cheer}\n\n{reveal}", model_tag)
-        await _send_plain(req, resp_text)
+        await _send_plain(req, resp_text, keyboard=congrats_keyboard(pid))
         schedule_post_solve_editorial_followup(self.group_openid, pid)
 
     async def _resolve_submit_scores(self, pid: str) -> None:
@@ -756,7 +755,7 @@ class GroupCoordinator:
         result = req.compute_result or {}
         kind = result.get("kind")
         if kind == "no_problem":
-            await _send_plain(req, "当前还没有题目可以提交～发 /newproblem 刷新一道？")
+            await _send_plain(req, "当前还没有题目可以提交～发 /np 刷新一道？")
             await self._finish_request(req)
             return
         if kind == "already_solved":
@@ -822,13 +821,18 @@ class GroupCoordinator:
 
         if reply:
             reply = re.sub(r'@\S+', '', reply.replace("\U0001f605", "\u2764\ufe0f")).strip()
-            await _send_plain(req, append_model_tag(reply, model_tag))
+            await _send_plain(
+                req, append_model_tag(reply, model_tag), keyboard=reject_action_keyboard()
+            )
             await self._resolve_submit_scores(pid)
             await self._finish_request(req)
             return
 
         reason = reason or "做法不太对呢"
-        await _send_plain(req, append_model_tag(f"{reason}。再想想？🤔", model_tag))
+        await _send_plain(
+            req, append_model_tag(f"{reason}。再想想？🤔", model_tag),
+            keyboard=reject_action_keyboard(),
+        )
         await self._resolve_submit_scores(pid)
         await self._finish_request(req)
 
@@ -871,7 +875,7 @@ class GroupCoordinator:
         reply = reply.replace("😅", "❤️")
         model_tag = result.get("model_tag", "")
         await self._save_context_record(req, _context_record(req, result="clarify", reply=reply, problem=pid, model_tag=model_tag))
-        await _send_plain(req, append_model_tag(reply, model_tag))
+        await _send_plain(req, append_model_tag(reply, model_tag), keyboard=clarify_action_keyboard())
         await self._finish_request(req)
 
     async def _finalize_review(self, req: PendingRequest) -> None:
@@ -917,7 +921,8 @@ class GroupCoordinator:
                 text_fallback=display_reply, browser=rt.browser,
             )
             if mid:
-                await _send_plain(req, "回复较长，已折叠到卡片里啦 👆")
+                # The long image already carries the reply; a bare @ just pings the asker.
+                await _send_plain(req, "")
             else:
                 for chunk in chunks:
                     await get_runtime().sender.send_group_text(self.group_openid, chunk)
@@ -928,21 +933,37 @@ class GroupCoordinator:
     async def _finalize_clear(self, req: PendingRequest) -> None:
         pid = req.target_pid
         if not pid:
-            await _react(req, _OK_EMOJI)
+            if not req.from_callback:
+                await _react(req, _OK_EMOJI)
             await self._finish_request(req)
             return
         async with self.lock:
             await submissions.clear_user_problem(get_runtime().db, self.group_openid, req.user_openid, pid)
             key = (self.group_openid, req.user_openid, pid)
             self.clear_watermarks[key] = max(self.clear_watermarks.get(key, 0), req.seq)
-        await _react(req, _OK_EMOJI)
+        # A button callback already shows QQ's "操作成功" toast, so the 👌 ack
+        # would be redundant; typed /clear still gets it.
+        if not req.from_callback:
+            await _react(req, _OK_EMOJI)
         await self._finish_request(req)
 
 
-def get_group_lock_status(group_openid: str) -> dict | None:
+def get_group_active_requests(group_openid: str) -> list[dict]:
+    """All in-flight stateful requests for a group in admission order, each as
+    {nickname, command, user_openid}. Superseded/discarded requests are excluded.
+    /status uses this to list who is being processed (not just the earliest)."""
     _refresh_runtime()
     coord = _coordinators.get(group_openid)
-    return coord.status() if coord else None
+    if coord is None:
+        return []
+    reqs = sorted(
+        (r for r in coord.active.values() if not r.discarded),
+        key=lambda r: r.seq,
+    )
+    return [
+        {"nickname": r.nickname, "command": r.command, "user_openid": r.user_openid}
+        for r in reqs
+    ]
 
 
 def has_active_problem_request(*, group_openid: str, user_openid: str, pid: str) -> bool:
@@ -1043,6 +1064,7 @@ async def enqueue_clear_request(ctx: Ctx) -> None:
         req = PendingRequest(
             kind="clear", group_openid=ctx.group_openid, user_openid=ctx.user_openid,
             message_id=ctx.message_id, command="clear", nickname=ctx.name, target_pid=pid,
+            from_callback=ctx.event.get("event_type") == "INTERACTION_CREATE",
         )
         coord._enqueue_locked(req)
     await req.done_event.wait()
@@ -1053,11 +1075,11 @@ async def handle(ctx: Ctx) -> None:
     stripped = ctx.raw_text.lstrip()
     match = re.match(r'/submit\s+', stripped)
     if not match:
-        await ctx.sender.send_group_at(ctx.group_openid, ctx.user_openid, "用法：/submit 你的做法。试试看？", msg_id=ctx.message_id)
+        await ctx.sender.send_group_at(ctx.group_openid, ctx.user_openid, "用法：/sbm 你的做法。试试看？", msg_id=ctx.message_id)
         return
     submission = stripped[match.end():].strip()
     if not submission:
-        await ctx.sender.send_group_at(ctx.group_openid, ctx.user_openid, "/submit 后面要写你的做法呀，只发 /submit 我不知道你做了啥 😅", msg_id=ctx.message_id)
+        await ctx.sender.send_group_at(ctx.group_openid, ctx.user_openid, "/sbm 后面要写你的做法呀，只发 /sbm 我不知道你做了啥 😅", msg_id=ctx.message_id)
         return
     await enqueue_submit_request(ctx, submission)
 

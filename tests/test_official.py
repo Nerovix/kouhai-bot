@@ -90,9 +90,14 @@ def test_normalize_member_and_interaction():
     rem = normalize_event("GROUP_MEMBER_REMOVE", {"group_openid": "G1", "member_openid": "U1"})
     assert rem["type"] == "member_remove"
     inter = normalize_event("INTERACTION_CREATE", {
-        "id": "I1", "group_openid": "G1", "group_member_openid": "U1", "data": {"resolved": "x"},
+        "id": "I1", "group_openid": "G1", "group_member_openid": "U1", "scene": "group",
+        "data": {"type": 11, "resolved": {"button_data": "/np", "button_id": "next"}},
     })
     assert inter["type"] == "interaction"
+    assert inter["interaction_type"] == 11
+    assert inter["button_data"] == "/np"
+    assert inter["button_id"] == "next"
+    assert inter["user_openid"] == "U1"
     assert normalize_event("UNKNOWN", {}) is None
 
 
@@ -256,6 +261,17 @@ async def test_rest_get_gateway():
     assert await rest.get_gateway() == "wss://gw.test"
 
 
+async def test_rest_respond_interaction_puts_ack():
+    rest, sess, _ = await _rest_with_fake()
+    sess.next_response = {}
+    assert await rest.respond_interaction("I1") is True
+    method, url, payload, headers = sess.requests[-1]
+    assert method == "PUT"
+    assert url == "https://api.test/interactions/I1"
+    assert payload == {"code": 0}
+    assert await rest.respond_interaction("") is False  # no id → no request
+
+
 # ── sender ──────────────────────────────────────────────────────────────
 
 class FakeRest:
@@ -263,6 +279,7 @@ class FakeRest:
         self.sent = []
         self.uploads = []
         self.recalled = []
+        self.acks = []
         self.fail_passive = False
 
     async def send_group_message(self, group_openid, payload):
@@ -278,6 +295,10 @@ class FakeRest:
 
     async def recall_group_message(self, group_openid, message_id):
         self.recalled.append((group_openid, message_id))
+        return True
+
+    async def respond_interaction(self, interaction_id, *, code=0):
+        self.acks.append((interaction_id, code))
         return True
 
 
@@ -333,6 +354,16 @@ async def test_sender_react_is_tiny_text():
     assert rest.sent[-1][1] == {"content": "👀", "msg_type": 0, "msg_id": "M1", "msg_seq": 1}
 
 
+async def test_sender_react_mentions_user():
+    rest = FakeRest()
+    s = OfficialSender(rest, ReplyBudget())
+    await s.react("G1", "👀", msg_id="M1", user_openid="U1")
+    payload = rest.sent[-1][1]
+    assert payload["msg_type"] == sender_mod.MSG_MARKDOWN
+    assert payload["markdown"]["content"] == '<qqbot-at-user id="U1"/> 👀'
+    assert payload["msg_id"] == "M1"
+
+
 async def test_sender_active_quota_exhausted_returns_none():
     rest = FakeRest()
     b = ReplyBudget()
@@ -354,6 +385,13 @@ async def test_sender_captures_outbound_ref_idx():
     assert s.ref_idx_for(mid) == "REFIDX_1"
     assert s.ref_idx_for("unknown") is None
     assert s.ref_idx_for(None) is None
+
+
+async def test_sender_ack_interaction():
+    rest = FakeRest()
+    s = OfficialSender(rest, ReplyBudget())
+    assert await s.ack_interaction("I1") is True
+    assert rest.acks == [("I1", 0)]
 
 
 # ── scene.ext parsing + quote normalization (实测 shapes) ────────────────

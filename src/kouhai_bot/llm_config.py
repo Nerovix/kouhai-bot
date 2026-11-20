@@ -40,6 +40,7 @@ class LlmProviderConfig:
     model_tag: str = ""
     stream: bool = False
     send_thinking: bool = True
+    send_response_format: bool = True
     temperature: float | None = None
     extra_body: dict[str, Any] = field(default_factory=dict)
     min_rating: int | None = None
@@ -145,6 +146,9 @@ def _build_provider_list(raw: Any, *, section_name: str) -> list[LlmProviderConf
                 model_tag=str(p.get("model_tag", "")).strip(),
                 stream=_parse_bool(p.get("stream", False)),
                 send_thinking=_parse_bool(p.get("send_thinking", True), default=True),
+                send_response_format=_parse_bool(
+                    p.get("send_response_format", True), default=True
+                ),
                 temperature=temperature,
                 extra_body=dict(extra_body),
                 min_rating=min_rating,

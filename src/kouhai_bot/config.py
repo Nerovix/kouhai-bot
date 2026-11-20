@@ -157,6 +157,11 @@ class BotConfig:
     curfew_start_hour: int = 0
     curfew_duration_hours: int = 0
 
+    # --- Legacy hot-migration (old service group only) ---
+    legacy_migration_enabled: bool = False
+    legacy_migration_group_openid: str = ""
+    legacy_migration_source_db: str = ""
+
     # --- Paths ---
     data_dir: str = str(Path.home() / ".kouhai-bot")
     sessions_dir: str = ""
@@ -310,6 +315,17 @@ class BotConfig:
             )
             c.curfew_duration_hours = int(
                 curfew.get("duration_hours", c.curfew_duration_hours)
+            )
+
+        # --- Legacy hot-migration (old service group only) ---
+        lm = data.get("legacy_migration", {})
+        if isinstance(lm, dict):
+            c.legacy_migration_enabled = bool(lm.get("enabled", False))
+            c.legacy_migration_group_openid = str(
+                lm.get("group_openid", "") or ""
+            ).strip()
+            c.legacy_migration_source_db = os.path.expanduser(
+                str(lm.get("source_db", "") or "")
             )
 
         # --- Paths ---

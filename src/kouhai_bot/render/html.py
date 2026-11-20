@@ -50,6 +50,11 @@ img.avatar { object-fit: cover; display: block; }
 .bubble img { max-width: 100%; border-radius: 8px; display: block; margin: 8px 0; }
 .bubble .muted { color: #8a8a8a; font-size: 24px; }
 .bubble h3 { font-size: 28px; margin: 6px 0; }
+.bubble ul { margin: 8px 0 4px; padding-left: 26px; }
+.bubble li { margin: 7px 0; }
+.bubble strong { font-weight: 600; }
+.bubble .short { color: #9a9a9a; font-size: 22px; }
+.bubble sup { font-size: 0.75em; }
 .footer { text-align: center; color: #b0b0b0; font-size: 20px; padding: 12px 0 6px; }
 """
 
@@ -115,3 +120,45 @@ def build_forward_card_html(
         f"{footer_html}"
         "</body></html>"
     )
+
+
+# ── Scoreboard: light text enhancement (same style as /help) ────────────
+
+_SB_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+
+def _fmt_points(points: float) -> str:
+    return f"{float(points):.2f}".rstrip("0").rstrip(".")
+
+
+def build_scoreboard_html(
+    ranked: list[dict[str, Any]], *, migration_note: str = ""
+) -> str:
+    """Inner bubble HTML for /scoreboard, styled like /help: a bold heading,
+    a muted formula line (real superscript instead of a raw ``2^`` caret), and
+    a simple bullet list with bold nicknames. Keeps the chat-record card form
+    rather than a designed poster. ``ranked`` entries carry rank/nickname/
+    solved/score (posts.group_scoreboard). Nicknames are escaped; plain-text
+    fallback stays with the caller. ``migration_note`` (legacy service group
+    only) renders as an extra muted line under the formula.
+    """
+    total = len(ranked)
+    parts = [
+        f'<h3>📊 累计解题排行榜 <span class="muted">共 {total} 人</span></h3>',
+        '<div class="muted">计分：2000 分 = 1 分，每 +300 分翻倍'
+        '（2<sup>(rating−2000)/300</sup>）</div>',
+    ]
+    if migration_note:
+        parts.append(f'<div class="muted">{escape(migration_note)}</div>')
+    items = []
+    for entry in ranked:
+        rank = int(entry.get("rank", 0) or 0)
+        nickname = escape(str(entry.get("nickname", "") or ""))
+        solved = int(entry.get("solved", 0) or 0)
+        points = _fmt_points(entry.get("score", 0) or 0)
+        rank_text = _SB_MEDALS.get(rank) or f"#{rank}"
+        items.append(
+            f"<li>{rank_text} <strong>{nickname}</strong> — {solved} 题 / {points} 分</li>"
+        )
+    parts.append(f'<ul>{"".join(items)}</ul>')
+    return "".join(parts)

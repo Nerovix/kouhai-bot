@@ -156,7 +156,9 @@ async def handle(ctx: Ctx) -> None:
         )
     if scored:
         schedule_post_solve_editorial_followup(ctx.group_openid, pid)
-    await ctx.sender.react(ctx.group_openid, "👌", msg_id=ctx.message_id)
+    await ctx.sender.react(
+        ctx.group_openid, "👌", msg_id=ctx.message_id, user_openid=ctx.user_openid
+    )
 
 
 def register() -> None:

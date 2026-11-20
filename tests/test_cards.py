@@ -12,15 +12,21 @@ NapCat segment / react_emoji coverage is dropped (no official equivalent).
 from __future__ import annotations
 
 import base64
+import struct
 
 import pytest
 
 from kouhai_bot.config import BotConfig
 from kouhai_bot.handlers.cards import (
     _bot_reply_text,
+    _png_size,
+    _thumb_hint,
     build_history_card_nodes,
     build_problem_card_nodes,
+    build_problem_post_msg,
     history_card_text,
+    load_prerendered_problem_card,
+    prerender_problem_card,
     problem_card_text,
     send_history_card,
     send_problem_card,
@@ -211,6 +217,11 @@ class FakeRest:
             {"file_info": "FI", "file_uuid": "u", "ttl": 300}
             if upload_response is None else upload_response
         )
+        self.md_uploads: list[tuple[bytes, str]] = []
+        self.md_deletes: list[str] = []
+        self.md_upload_response = {
+            "url": "qqbot-media://image/v1/TOKEN", "image_id": "IMG1", "ttl": 86400,
+        }
 
     async def send_group_message(self, group_openid, payload):
         self.sent.append((group_openid, payload))
@@ -220,9 +231,21 @@ class FakeRest:
         self.uploads.append((group_openid, payload))
         return self.upload_response
 
+    async def upload_media_image(self, data, *, file_name="card.png", content_type="image/png"):
+        self.md_uploads.append((data, file_name))
+        return self.md_upload_response
+
+    async def delete_media_image(self, image_id):
+        self.md_deletes.append(image_id)
+        return True
+
 
 @pytest.fixture
-def sender(db):
+def sender(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "kouhai_bot.config._config",
+        BotConfig(data_dir=str(tmp_path), app_id="1900000000"),
+    )
     return OfficialSender(FakeRest(), ReplyBudget(db), bot_name=BOT_NAME)
 
 
@@ -232,6 +255,7 @@ def no_render(monkeypatch):
         raise RuntimeError("render disabled in tests")
 
     monkeypatch.setattr("kouhai_bot.render.forward_card.render_card_png", _fail)
+    monkeypatch.setattr("kouhai_bot.handlers.cards.render_card_png", _fail)
 
 
 @pytest.fixture
@@ -243,6 +267,7 @@ def fake_render(monkeypatch):
         return b"PNG"
 
     monkeypatch.setattr("kouhai_bot.render.forward_card.render_card_png", _png)
+    monkeypatch.setattr("kouhai_bot.handlers.cards.render_card_png", _png)
     return captured
 
 
@@ -281,7 +306,7 @@ async def test_send_history_card_media_path(sender, fake_render):
     _group, payload = sender._rest.sent[0]
     assert payload["msg_type"] == 7
     assert payload["media"] == {"file_info": "FI"}
-    assert payload["content"] == "聊天记录"
+    assert "content" not in payload  # no caption repeating the header title
 
 
 async def test_send_history_card_upload_without_file_info_falls_back(sender, fake_render):
@@ -295,7 +320,7 @@ async def test_send_history_card_upload_without_file_info_falls_back(sender, fak
     )
 
 
-async def test_send_problem_card_media_path_includes_snake_node(sender, fake_render):
+async def test_send_problem_card_markdown_thumbnail_with_buttons(sender, fake_render):
     mid = await send_problem_card(
         sender, G,
         post_msg="题面", sample_messages=["样例"], notes_message="解释",
@@ -305,9 +330,37 @@ async def test_send_problem_card_media_path_includes_snake_node(sender, fake_ren
     assert fake_render[0]["title"] == "题目"
     nodes = fake_render[0]["nodes"]
     assert [n["content_text"] for n in nodes] == ["题面", "样例", "解释", "🐍"]
+    # ONE markdown message: fixed-height thumbnail + action buttons, no media
+    assert sender._rest.uploads == []
+    assert sender._rest.md_uploads == [(b"PNG", "problem_card.png")]
+    assert len(sender._rest.sent) == 1
     payload = sender._rest.sent[0][1]
-    assert payload["msg_type"] == 7
-    assert payload["content"] == "题目"
+    assert payload["msg_type"] == 2
+    # b"PNG" has no valid IHDR → default 45×132 hint; no CF identity in alt text
+    assert payload["markdown"]["content"] == (
+        "![题目 #45px #132px](qqbot-media://image/v1/TOKEN)"
+    )
+    labels = [
+        b["render_data"]["label"]
+        for row in payload["keyboard"]["content"]["rows"]
+        for b in row["buttons"]
+    ]
+    assert labels == ["提交", "询问题意"]
+    # source image deleted after delivery to free the media quota
+    assert sender._rest.md_deletes == ["IMG1"]
+
+
+async def test_send_problem_card_upload_failure_falls_back_to_text(sender, fake_render):
+    sender._rest.md_upload_response = {}
+    mid = await send_problem_card(
+        sender, G, post_msg="题面", sample_messages=["样例1", "样例2"],
+        notes_message="解释",
+    )
+    assert mid == "M1"
+    payload = sender._rest.sent[0][1]
+    assert payload["msg_type"] == 0
+    assert payload["content"] == "题面\n\n样例1\n\n样例2\n\n解释"
+    assert sender._rest.md_deletes == []
 
 
 async def test_send_problem_card_render_failure_falls_back_to_text(sender, no_render):
@@ -319,3 +372,134 @@ async def test_send_problem_card_render_failure_falls_back_to_text(sender, no_re
     payload = sender._rest.sent[0][1]
     assert payload["msg_type"] == 0
     assert payload["content"] == "题面\n\n样例1\n\n样例2\n\n解释"
+
+
+# ── greeting-less post_msg + background pre-render cache ────────────────
+
+
+@pytest.fixture
+def cache_cfg(tmp_path, monkeypatch):
+    cfg = BotConfig(data_dir=str(tmp_path))
+    monkeypatch.setattr("kouhai_bot.config._config", cfg)
+    return cfg
+
+
+def test_build_problem_post_msg_summary_plus_tag(monkeypatch):
+    monkeypatch.setattr("kouhai_bot.handlers.cards.snake_replace", lambda t: t)
+    assert build_problem_post_msg("题意简述", "🐳") == "题意简述🐳"
+    assert build_problem_post_msg("题意简述", "") == "题意简述"
+    assert build_problem_post_msg("", "") == ""
+
+
+def test_build_problem_post_msg_applies_snake(monkeypatch):
+    monkeypatch.setattr("kouhai_bot.handlers.cards.snake_replace", lambda t: t + "🐍")
+    assert build_problem_post_msg("正文", "") == "正文🐍"
+
+
+async def test_prerender_and_load_roundtrip(cache_cfg, monkeypatch):
+    async def _png(nodes, **kwargs):
+        return b"PNGDATA"
+
+    monkeypatch.setattr("kouhai_bot.handlers.cards.render_card_png", _png)
+    monkeypatch.setattr("kouhai_bot.handlers.cards.snake_replace", lambda t: t)
+    sha = "b" * 64
+    ok = await prerender_problem_card(
+        pid="542D", statement_sha256=sha, summary="题意", model_tag="🐳",
+        sample_messages=["样例"], notes_message="解释",
+        bot_name=BOT_NAME, bot_avatar_url="",
+    )
+    assert ok is True
+    loaded = load_prerendered_problem_card(
+        "542D", sha, bot_name=BOT_NAME, bot_avatar_url="",
+    )
+    assert loaded == (b"PNGDATA", "题意🐳")
+    # cache key binds bot identity, pid and statement fingerprint
+    assert load_prerendered_problem_card(
+        "542D", sha, bot_name="别的bot", bot_avatar_url="",
+    ) is None
+    assert load_prerendered_problem_card(
+        "999A", sha, bot_name=BOT_NAME, bot_avatar_url="",
+    ) is None
+    assert load_prerendered_problem_card(
+        "542D", "c" * 64, bot_name=BOT_NAME, bot_avatar_url="",
+    ) is None
+
+
+async def test_prerender_empty_card_writes_nothing(cache_cfg, monkeypatch):
+    async def _png(nodes, **kwargs):
+        return b"PNGDATA"
+
+    monkeypatch.setattr("kouhai_bot.handlers.cards.render_card_png", _png)
+    monkeypatch.setattr("kouhai_bot.handlers.cards.snake_replace", lambda t: t)
+    ok = await prerender_problem_card(
+        pid="542D", statement_sha256="b" * 64, summary="", model_tag="",
+        sample_messages=[], notes_message="", snake_enabled=False,
+        bot_name=BOT_NAME, bot_avatar_url="",
+    )
+    assert ok is False
+    assert load_prerendered_problem_card(
+        "542D", "b" * 64, bot_name=BOT_NAME, bot_avatar_url="",
+    ) is None
+
+
+async def test_send_problem_card_prerendered_skips_render(sender, monkeypatch):
+    async def _fail(*args, **kwargs):
+        raise AssertionError("must not render when prerendered_png is supplied")
+
+    monkeypatch.setattr("kouhai_bot.render.forward_card.render_card_png", _fail)
+    mid = await send_problem_card(
+        sender, G, post_msg="题意", sample_messages=["样例"],
+        prerendered_png=b"CACHED",
+    )
+    assert mid == "M1"
+    assert sender._rest.md_uploads == [(b"CACHED", "problem_card.png")]
+    assert sender._rest.uploads == []
+    assert sender._rest.sent[0][1]["msg_type"] == 2
+
+
+def test_problem_card_nodes_skip_empty_post_msg():
+    nodes = build_problem_card_nodes(
+        post_msg="", sample_messages=["样例"], notes_message="", snake_enabled=False,
+    )
+    assert [n["content_text"] for n in nodes] == ["样例"]
+    assert problem_card_text(post_msg="", sample_messages=["样例"]) == "样例"
+
+
+# ── fixed-height thumbnail scaling ──────────────────────────────────────
+
+
+def _fake_png(w: int, h: int) -> bytes:
+    # PNG signature + IHDR length/type + width/height (bytes 16:24)
+    return b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + struct.pack(">II", w, h)
+
+
+def test_png_size_parses_ihdr():
+    assert _png_size(_fake_png(1440, 4226)) == (1440, 4226)
+    assert _png_size(b"PNG") is None
+    assert _png_size(b"") is None
+
+
+def test_thumb_hint_keeps_height_constant():
+    # standard card 1440×4226 → owner-approved 45×132
+    assert _thumb_hint(1440, 4226) == (45, 132)
+    # a taller card shrinks width proportionally but keeps height ~132
+    hw, hh = _thumb_hint(1440, 8452)
+    assert hh == 132
+    assert hw == 22
+    # a shorter card grows width but still caps height at 132
+    hw, hh = _thumb_hint(1440, 2113)
+    assert hh == 132
+    assert hw == 90
+
+
+async def test_send_problem_card_tall_image_fixed_height(sender, monkeypatch):
+    tall = _fake_png(1440, 8452)
+
+    async def _png(nodes, **kwargs):
+        return tall
+
+    monkeypatch.setattr("kouhai_bot.render.forward_card.render_card_png", _png)
+    monkeypatch.setattr("kouhai_bot.handlers.cards.render_card_png", _png)
+    await send_problem_card(sender, G, post_msg="题面", sample_messages=["样例"])
+    content = sender._rest.sent[0][1]["markdown"]["content"]
+    assert content == "![题目 #22px #132px](qqbot-media://image/v1/TOKEN)"

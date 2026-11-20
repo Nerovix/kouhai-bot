@@ -208,9 +208,42 @@ class NextProblemPrefetcher:
         self._ready_slot = slot
         return slot
 
+    async def _prerender_card(self, prepared: PreparedProblem) -> None:
+        """Render the problem card long image in the background so a later
+        /newproblem claim only uploads+sends. Best-effort: any failure (no
+        runtime in tests, browser down) leaves the slot intact and publication
+        falls back to rendering at post time."""
+        try:
+            from .handlers.cards import prerender_problem_card
+            from .handlers.runtime import get_runtime
+
+            rt = get_runtime()
+            ok = await prerender_problem_card(
+                pid=prepared.pid,
+                statement_sha256=prepared.statement_sha256,
+                summary=prepared.summary,
+                model_tag=prepared.model_tag,
+                sample_messages=prepared.sample_messages,
+                notes_message=prepared.notes_message,
+                bot_name=rt.sender.bot_name or "算法助手",
+                bot_avatar_url=rt.sender.bot_avatar_url,
+                browser=rt.browser,
+            )
+            if ok:
+                logger.info(
+                    "[group_%s] next problem card pre-rendered pid=%s",
+                    self.group_openid, prepared.pid,
+                )
+        except Exception as exc:
+            logger.warning(
+                "[group_%s] next problem card pre-render skipped for %s: %s",
+                self.group_openid, prepared.pid, exc,
+            )
+
     async def _build_and_store(self) -> PrefetchedProblem:
         started = asyncio.get_running_loop().time()
         prepared = await self._prepare(self.group_openid)
+        await self._prerender_card(prepared)
         slot = PrefetchedProblem(slot_id=uuid.uuid4().hex, problem=prepared)
         async with self._lock:
             existing = await self._load_slot_locked()

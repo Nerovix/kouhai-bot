@@ -16,7 +16,7 @@ official:
   # api_base: "https://api.bot.qq.com"      # 默认 REST 域名（2026-08-10 起官方统一为此域名）
   # token_base: "https://api.bot.qq.com"    # 默认 access_token 域名
   # intents: 50331648            # 默认 群+C2C(1<<25) | 互动(1<<26) | 群成员(1<<24)
-                                 # 复读机需要群开启「获取群内全部消息」(GROUP_MESSAGE_CREATE)
+                                 # 热迁移按昵称即时匹配老用户，需要群开启「获取群内全部消息」(GROUP_MESSAGE_CREATE)
 
 # ── LLM 配置 ──
 # Bot 使用两个模型队列，按顺序尝试每个 provider，失败自动 fallback。
@@ -70,6 +70,17 @@ llm:
     #   model_tag: "『QwenVL』"
     #   stream: true  # DashScope/百炼 自动使用 SSE
 
+    # deepseek-flash 兜底注意：它在 response_format=json_object 结构化输出模式下
+    # 会高频（实测约 75%）退化成纯空白 content（finish_reason=stop），导致 clarify
+    # 等 JSON 任务兜底失败。设 send_response_format: false 关掉该模式即可稳定——
+    # clarify/summary 的 prompt 本就要求输出 JSON，另有 robust JSON 解析兜底。
+    # - name: "deepseek"
+    #   api_key: "sk-..."
+    #   base_url: "https://api.deepseek.com/v1"
+    #   model: "deepseek-flash"
+    #   model_tag: "『🐳』"
+    #   send_response_format: false
+
 # ── 题目选择（全局默认难度） ──
 # 每个群可用 /range 指令覆盖本群难度区间（任何群友可设）。
 problem:
@@ -81,6 +92,15 @@ problem:
 # ── 数据目录 ──
 # SQLite 数据库 (kouhai.db)、题面缓存镜像、题解、日志、pidfile 都在此目录下。
 # data_dir: "~/.kouhai-bot"
+
+# ── 旧数据热迁移（仅旧服务群） ──
+# 官方 openid 只在成员互动时下发、无 roster/history 接口，故按访问热迁移：
+# 每收到一条服务群消息捕获 openid+群昵称，匹配旧 QQ 号后即刻迁该成员的旧群数据。
+# 私聊数据不迁。source_db 为整理脚本产出的本地运行时文件（含真实 QQ/昵称，绝不提交）。
+# legacy_migration:
+#   enabled: false
+#   group_openid: "<旧服务群的 group_openid>"
+#   source_db: "/path/to/legacy_source.db"
 
 # ── 以下旧字段已废弃，官方多群架构不再使用，保留仅为兼容旧配置解析 ──
 # bot_qq / current_group：官方按群 openid 惰性发现服务群，无需预配置群号。

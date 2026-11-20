@@ -18,14 +18,14 @@ async def handle(ctx: Ctx) -> None:
     match = re.match(r'/clarify\s+', stripped)
     if not match:
         await ctx.sender.send_group_at(
-            ctx.group_openid, ctx.user_openid, "用法：/clarify 你的问题～",
+            ctx.group_openid, ctx.user_openid, "用法：/clrf 你的问题～",
             msg_id=ctx.message_id,
         )
         return
     question = stripped[match.end():].strip()
     if not question:
         await ctx.sender.send_group_at(
-            ctx.group_openid, ctx.user_openid, "/clarify 后面要写你的问题呀～",
+            ctx.group_openid, ctx.user_openid, "/clrf 后面要写你的问题呀～",
             msg_id=ctx.message_id,
         )
         return

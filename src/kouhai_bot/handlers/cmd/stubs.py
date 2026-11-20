@@ -9,11 +9,12 @@ from ..registry import CommandDef
 from ..context import Ctx
 from ..runtime import get_runtime
 from .. import state
-from ..cards import send_problem_card
+from ..cards import load_prerendered_problem_card, send_problem_card
 from ..shared import format_points, high_difficulty_notice
-from ...db.repos import posts
+from ... import legacy_migration
+from ...db.repos import posts, problems
 from ...render.forward_card import send_forward_card
-from ...render.html import text_to_html
+from ...render.html import build_scoreboard_html
 
 logger = logging.getLogger("kouhai-bot.cmd.stubs")
 
@@ -34,6 +35,27 @@ async def handle_problem(ctx: Ctx) -> None:
     await resend_current_problem_group(ctx.group_openid, ctx.user_openid, ctx.message_id)
 
 
+async def _load_problem_card_cache(rt, db, pid: str) -> bytes | None:
+    """Reuse the background pre-rendered card PNG for /pb (no re-render).
+
+    Keyed by pid + statement fingerprint + bot identity, exactly as publication
+    and prefetch compute it; a miss (legacy/cold problem) returns None so the
+    caller renders fresh. The frozen post_msg in the cache matches card_json.
+    """
+    if not pid:
+        return None
+    problem = await problems.get_problem(db, pid)
+    sha = str(problem.get("statement_sha256", "") or "") if problem else ""
+    if not sha:
+        return None
+    cached = load_prerendered_problem_card(
+        pid, sha,
+        bot_name=rt.sender.bot_name or "算法助手",
+        bot_avatar_url=rt.sender.bot_avatar_url,
+    )
+    return cached[0] if cached is not None else None
+
+
 async def resend_current_problem_group(
     group_openid: str, user_openid: str = "", message_id: str = "",
 ) -> None:
@@ -44,7 +66,7 @@ async def resend_current_problem_group(
     if not current:
         await _notify(
             group_openid, user_openid, message_id,
-            "暂时不能查看当前题目，可能是暂时还不存在当前题目，试试 /newproblem？",
+            "暂时不能查看当前题目，可能是暂时还不存在当前题目，试试 /np？",
         )
         return
 
@@ -52,6 +74,8 @@ async def resend_current_problem_group(
     post_msg = card.get("post_msg")
     sample_messages = card.get("sample_messages")
     if isinstance(post_msg, str) and isinstance(sample_messages, list):
+        pid = str(current.get("today", "") or "")
+        prerendered_png = await _load_problem_card_cache(rt, db, pid)
         mid = await send_problem_card(
             rt.sender, group_openid,
             post_msg=post_msg,
@@ -60,9 +84,9 @@ async def resend_current_problem_group(
             snake_enabled=bool(card.get("snake_enabled", True)),
             msg_id=message_id or None,
             browser=rt.browser,
+            prerendered_png=prerendered_png,
         )
         if mid:
-            pid = str(current.get("today", "") or "")
             ref_idx = rt.sender.ref_idx_for(mid)
             if ref_idx and pid:
                 await posts.record_message_ref(db, group_openid, ref_idx, pid, mid)
@@ -71,7 +95,7 @@ async def resend_current_problem_group(
                 await rt.sender.send_group_text(group_openid, notice)
             if pid and await state.is_problem_solved(db, group_openid, pid):
                 await rt.sender.send_group_text(
-                    group_openid, "这题已经通过啦，可以发 /newproblem 挑战下一题～",
+                    group_openid, "这题已经通过啦，可以发 /np 挑战下一题～",
                 )
             return
 
@@ -115,9 +139,16 @@ async def handle_scoreboard(ctx: Ctx) -> None:
 
     lines = [
         f"📊 累计解题排行榜（共 {len(ranked)} 人）",
-        "计分公式：2000=1 分，每 +300 分翻倍（2^((rating-2000)/300)）",
-        "",
+        "计分：2000 分 = 1 分，每 +300 分翻倍",
     ]
+    migration_note = (
+        "数据正在迁移中，排名可能不完整。"
+        if legacy_migration.is_migration_group(ctx.group_openid)
+        else ""
+    )
+    if migration_note:
+        lines.append(migration_note)
+    lines.append("")
     for entry in ranked:
         lines.append(
             f"#{entry['rank']} {entry['nickname']} — "
@@ -127,7 +158,11 @@ async def handle_scoreboard(ctx: Ctx) -> None:
 
     rt = get_runtime()
     bot_name = rt.sender.bot_name or "算法助手"
-    nodes = [{"nickname": bot_name, "content_html": text_to_html(text), "content_text": text}]
+    nodes = [{
+        "nickname": bot_name,
+        "content_html": build_scoreboard_html(ranked, migration_note=migration_note),
+        "content_text": text,
+    }]
     await send_forward_card(
         rt.sender, ctx.group_openid, nodes, title="排行榜",
         msg_id=ctx.message_id, text_fallback=text, browser=rt.browser,
@@ -138,17 +173,27 @@ async def handle_scoreboard(ctx: Ctx) -> None:
 
 async def handle_status(ctx: Ctx) -> None:
     from .newproblem import get_newproblem_status
-    from .submit import get_group_lock_status
+    from .submit import get_group_active_requests
+    from ..context import display_name
 
-    status = get_newproblem_status(ctx.group_openid) or get_group_lock_status(ctx.group_openid)
-    if status is None:
+    entries = get_group_active_requests(ctx.group_openid)
+    np_status = get_newproblem_status(ctx.group_openid)
+    if np_status:
+        entries.append({
+            "nickname": display_name(
+                str(np_status.get("user_openid", "") or ""),
+                str(np_status.get("nickname", "") or ""),
+            ),
+            "command": str(np_status.get("command", "newproblem") or "newproblem"),
+        })
+    if not entries:
         await ctx.sender.send_group_text(
             ctx.group_openid, "🟢 bot 当前空闲，没有在处理请求～", msg_id=ctx.message_id,
         )
         return
-    cmd = status["command"]
+    listing = "、".join(f"@{e['nickname']} 的 {e['command']}" for e in entries)
     await ctx.sender.send_group_text(
-        ctx.group_openid, f"🔴 bot 当前有 {cmd} 请求还在处理中～", msg_id=ctx.message_id,
+        ctx.group_openid, f"🔴 目前正在处理的请求有：{listing}～", msg_id=ctx.message_id,
     )
 
 

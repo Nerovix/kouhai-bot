@@ -20,7 +20,6 @@ from .render.forward_card import send_forward_card
 from .render.html import text_to_html
 from .tutorials import (
     MIN_EDITORIAL_LEN,
-    OfficialEditorial,
     get_verified_official_editorial,
     has_cached_editorial_zh,
     is_no_official_editorial,
@@ -216,7 +215,7 @@ async def run_post_solve_editorial_followup(group_openid: str, pid: str) -> None
     try:
         editorial = await get_verified_official_editorial(pid)
         if editorial:
-            if await deliver_official_tutorial(group_openid, pid, editorial):
+            if await deliver_official_tutorial(group_openid, pid):
                 logger.info(
                     "[group_%s] editorial delivered from cache for %s in %.1fs",
                     group_openid, pid, time.monotonic() - started,
@@ -235,7 +234,7 @@ async def run_post_solve_editorial_followup(group_openid: str, pid: str) -> None
                 group_openid, pid,
             )
             return
-        if await deliver_official_tutorial(group_openid, pid, editorial):
+        if await deliver_official_tutorial(group_openid, pid):
             logger.info(
                 "[group_%s] editorial delivered for %s in %.1fs",
                 group_openid, pid, time.monotonic() - started,
@@ -247,21 +246,17 @@ async def run_post_solve_editorial_followup(group_openid: str, pid: str) -> None
         )
 
 
-async def _editorial_payload(pid: str, editorial: OfficialEditorial) -> str | None:
+async def _editorial_payload(pid: str) -> str | None:
     zh_text = await load_cached_editorial_zh(pid)
     if len(zh_text) < MIN_EDITORIAL_LEN:
         return None
     header = f"📖 {pid} 官方题解"
-    if editorial.tutorial_url:
-        header = f"{header}\n来源: {editorial.tutorial_url}"
     return f"{header}\n\n{zh_text}"
 
 
-async def deliver_official_tutorial(
-    group_openid: str, pid: str, editorial: OfficialEditorial
-) -> bool:
+async def deliver_official_tutorial(group_openid: str, pid: str) -> bool:
     """Deliver one verified, cached Chinese editorial as a long-image card."""
-    payload = await _editorial_payload(pid, editorial)
+    payload = await _editorial_payload(pid)
     if payload is None:
         logger.warning(
             "[group_%s] tutorial delivery skipped for %s (missing translation)",

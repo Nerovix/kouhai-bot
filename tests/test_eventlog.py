@@ -2,7 +2,8 @@
 
 The new dispatcher is group-only and multi-group: it accepts normalized
 official events (group_openid/user_openid/message_id/content/author), ignores
-C2C/private/notice events, canonicalizes alias/case/leading-junk command text,
+C2C/private/notice events, requires an @bot (``at_bot`` or ``mentions`` is_you)
+before a command triggers, canonicalizes alias/case/leading-junk command text,
 enforces per-(group, user, command) cooldowns with silent drops, and either
 spawns the handler as a task or awaits it inline.
 """
@@ -36,6 +37,7 @@ class FakeRest:
     def __init__(self):
         self.sent = []
         self.uploads = []
+        self.acks = []
 
     async def send_group_message(self, group_openid, payload):
         self.sent.append((group_openid, payload))
@@ -44,6 +46,10 @@ class FakeRest:
     async def upload_group_media(self, group_openid, payload):
         self.uploads.append((group_openid, payload))
         return {"file_info": "FI", "file_uuid": "u", "ttl": 300}
+
+    async def respond_interaction(self, interaction_id, *, code=0):
+        self.acks.append((interaction_id, code))
+        return True
 
 
 @pytest.fixture(autouse=True)
@@ -73,7 +79,15 @@ def _event(
     nickname: str = "Alice",
     message_type: str = "group",
     type_: str = "message",
+    mentions: list | None = None,
+    at_bot: bool = False,
 ) -> dict:
+    # Commands require an @bot. Default to the full-message/chip form: a
+    # structured ``mentions`` entry marking us (``is_you``), ``at_bot`` false.
+    # Placeholder openid only — never real ids. Override ``mentions``/``at_bot``
+    # to exercise un-addressed or @-message (GROUP_AT_MESSAGE_CREATE) forms.
+    if mentions is None:
+        mentions = [{"member_openid": "BOT_PLACEHOLDER", "bot": True, "is_you": True}]
     return {
         "type": type_,
         "message_type": message_type,
@@ -86,6 +100,8 @@ def _event(
             "username": nickname,
             "member_nickname": nickname,
         },
+        "mentions": mentions,
+        "at_bot": at_bot,
     }
 
 
@@ -94,6 +110,32 @@ def _register(name, handler, *, aliases=(), cooldown=0):
         name=name, aliases=list(aliases), description=name,
         handler=handler, cooldown=cooldown,
     ))
+
+
+def _interaction(
+    button_data: str = "/dispatchtest hello",
+    *,
+    group: str = GROUP,
+    user: str = USER,
+    iid: str | None = None,
+    interaction_type: int = 11,
+    scene: str = "group",
+) -> dict:
+    # Normalized INTERACTION_CREATE (inline-keyboard callback). Placeholder
+    # openids only — never real ids. button_data is the command the button carries.
+    return {
+        "type": "interaction",
+        "group_openid": group,
+        "user_openid": user,
+        "interaction_id": iid if iid is not None else f"INT_{next(_msg_seq)}",
+        "interaction_type": interaction_type,
+        "scene": scene,
+        "button_data": button_data,
+        "button_id": "btn",
+        "data": {"type": interaction_type,
+                 "resolved": {"button_data": button_data, "button_id": "btn"}},
+        "raw": {},
+    }
 
 
 async def test_process_event_spawns_handler_task():
@@ -156,7 +198,7 @@ async def test_command_case_canonicalized_before_handler():
         seen.append(ctx.raw_text)
 
     _register("dispatchcase", _handler, aliases=["dc"])
-    await process_event(_event("/DISPATCHCASE hello"), spawn_handlers=False)
+    await process_event(_event("/DC hello"), spawn_handlers=False)
     await process_event(_event("/DC hi", user="USER_2"), spawn_handlers=False)
     assert seen == ["/dispatchcase hello", "/dispatchcase hi"]
 
@@ -207,14 +249,14 @@ async def test_leading_bot_mention_stripped_before_command():
     # Quoting a bot card auto-inserts @bot (official form has no '!'); the
     # command must still dispatch. Placeholder openid only — never real ids.
     await process_event(
-        _event("<@ABCDEF0123456789> /dispatchat hello"), spawn_handlers=False
+        _event("<@ABCDEF0123456789> /dat hello"), spawn_handlers=False
     )
     await process_event(
         _event("<@ABCDEF0123456789> /dat hi", user="USER_2"), spawn_handlers=False
     )
     # Legacy '!' form is tolerated too.
     await process_event(
-        _event("<@!ABCDEF0123456789> /dispatchat x", user="USER_3"),
+        _event("<@!ABCDEF0123456789> /dat x", user="USER_3"),
         spawn_handlers=False,
     )
     assert seen == [
@@ -222,6 +264,96 @@ async def test_leading_bot_mention_stripped_before_command():
         ("/dispatchat hi", "hi"),
         ("/dispatchat x", "x"),
     ]
+
+
+async def test_command_addressed_to_other_bot_ignored():
+    seen: list[str] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append(ctx.raw_text)
+
+    _register("dispatchat", _handler, aliases=["dat"])
+    # Placeholder hex openids only — never real ids.
+    other_bot = {"member_openid": "BBBBBBBBBBBBBBBB", "bot": True, "is_you": False}
+    us = {"member_openid": "AAAAAAAAAAAAAAAA", "bot": True, "is_you": True}
+    human = {"member_openid": "CCCCCCCCCCCCCCCC", "bot": False}
+
+    # @ another bot only → not addressed to us; ignore entirely.
+    event = _event("<@BBBBBBBBBBBBBBBB> /dat hello", mentions=["junk", other_bot])
+    assert await process_event(event, spawn_handlers=False) is None
+    assert seen == []
+
+    # @ us → dispatch.
+    await process_event(
+        _event("<@AAAAAAAAAAAAAAAA> /dat hi", user="USER_2", mentions=[us]),
+        spawn_handlers=False,
+    )
+
+    # @ us AND another bot → we were addressed too; dispatch.
+    await process_event(
+        _event(
+            "<@BBBBBBBBBBBBBBBB> <@AAAAAAAAAAAAAAAA> /dat yo",
+            user="USER_3", mentions=[other_bot, us],
+        ),
+        spawn_handlers=False,
+    )
+
+    # @ a human AND us → the human mention does not block us; dispatch.
+    await process_event(
+        _event(
+            "<@CCCCCCCCCCCCCCCC> <@AAAAAAAAAAAAAAAA> /dat hey",
+            user="USER_4", mentions=[human, us],
+        ),
+        spawn_handlers=False,
+    )
+
+    # @ a human only (not us) → require-@ gate drops it.
+    event = _event("<@CCCCCCCCCCCCCCCC> /dat nope", user="USER_5", mentions=[human])
+    assert await process_event(event, spawn_handlers=False) is None
+
+    assert seen == ["/dispatchat hi", "/dispatchat yo", "/dispatchat hey"]
+
+
+async def test_commands_require_at_bot():
+    seen: list[str] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append(ctx.raw_text)
+
+    _register("dispatchgate", _handler, aliases=["dg"])
+    us = {"member_openid": "AAAAAAAAAAAAAAAA", "bot": True, "is_you": True}
+
+    # Bare command, no @bot → ignored.
+    assert await process_event(
+        _event("/dg bare", mentions=[]), spawn_handlers=False
+    ) is None
+
+    # @-message form (GROUP_AT_MESSAGE_CREATE → at_bot), no structured mentions.
+    await process_event(
+        _event("/dg atmsg", user="USER_2", mentions=[], at_bot=True),
+        spawn_handlers=False,
+    )
+
+    # Full-message/chip form: mentions marks us, at_bot false.
+    await process_event(
+        _event("/dg chip", user="USER_3", mentions=[us]),
+        spawn_handlers=False,
+    )
+
+    # Quoting a bot card auto-inserts @bot markup + is_you mention → dispatch.
+    await process_event(
+        _event("<@AAAAAAAAAAAAAAAA> /dg quoted", user="USER_4", mentions=[us]),
+        spawn_handlers=False,
+    )
+
+    # mentions present but none is us → ignored.
+    assert await process_event(
+        _event("/dg other", user="USER_5",
+               mentions=[{"member_openid": "BBBBBBBBBBBBBBBB", "bot": True, "is_you": False}]),
+        spawn_handlers=False,
+    ) is None
+
+    assert seen == ["/dispatchgate atmsg", "/dispatchgate chip", "/dispatchgate quoted"]
 
 
 async def test_ctx_carries_event_identity():
@@ -389,3 +521,154 @@ async def test_duplicate_drop_does_not_consume_cooldown():
     # Redelivery of the same id is dropped before cooldown is even consulted.
     await process_event(_event("/dispatchdupcd a", mid="DUP_3"), spawn_handlers=False)
     assert seen == ["/dispatchdupcd a"]
+
+
+# ── inline-keyboard callback (INTERACTION_CREATE) ≡ typed command ─────────
+
+
+async def test_interaction_callback_dispatches_and_acks(rest):
+    seen: list[tuple[str, str]] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append((ctx.raw_text, ctx.args))
+
+    _register("dispatchint", _handler)
+    ev = _interaction("/dispatchint hello world", iid="INT_A")
+    await process_event(ev, spawn_handlers=False)
+    # The callback runs the command exactly like a typed @bot message.
+    assert seen == [("/dispatchint hello world", "hello world")]
+    # And the interaction is acked (PUT code=0) so the clicker stops loading.
+    assert rest.acks == [("INT_A", 0)]
+
+
+async def test_interaction_callback_needs_no_at_mention():
+    seen: list[str] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append(ctx.raw_text)
+
+    _register("dispatchintat", _handler)
+    # Synthesized callback carries at_bot=True and no mentions; the require-@
+    # gate must still let it through (a button click is inherently addressed).
+    await process_event(_interaction("/dispatchintat x"), spawn_handlers=False)
+    assert seen == ["/dispatchintat x"]
+
+
+async def test_interaction_callback_alias_canonicalized():
+    seen: list[tuple[str, str]] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append((ctx.raw_text, ctx.args))
+
+    _register("dispatchintalias", _handler, aliases=["dia"])
+    await process_event(_interaction("/dia hello"), spawn_handlers=False)
+    assert seen == [("/dispatchintalias hello", "hello")]
+
+
+async def test_interaction_callback_shares_typed_cooldown(rest):
+    seen: list[str] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append(ctx.raw_text)
+
+    _register("dispatchintcd", _handler, cooldown=60)
+    # Typed command first, then a button callback for the same command: the
+    # callback must be dropped by the SAME per-(group,user,command) cooldown.
+    await process_event(_event("/dispatchintcd a"), spawn_handlers=False)
+    await process_event(_interaction("/dispatchintcd b"), spawn_handlers=False)
+    assert seen == ["/dispatchintcd a"]
+    # The callback is still acked even though the command was cooldown-dropped.
+    assert len(rest.acks) == 1
+
+
+async def test_interaction_callback_cooldown_between_clicks():
+    seen: list[str] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append(ctx.raw_text)
+
+    _register("dispatchintcd2", _handler, cooldown=60)
+    await process_event(_interaction("/dispatchintcd2 a"), spawn_handlers=False)
+    await process_event(_interaction("/dispatchintcd2 b"), spawn_handlers=False)
+    assert seen == ["/dispatchintcd2 a"]
+
+
+async def test_interaction_callback_zero_cooldown_repeats():
+    seen: list[str] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append(ctx.raw_text)
+
+    _register("dispatchintfree", _handler, cooldown=0)
+    for _ in range(3):
+        await process_event(_interaction("/dispatchintfree x"), spawn_handlers=False)
+    assert len(seen) == 3
+
+
+async def test_interaction_dedup_by_interaction_id(rest):
+    seen: list[str] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append(ctx.raw_text)
+
+    _register("dispatchintdup", _handler)
+    await process_event(_interaction("/dispatchintdup x", iid="INT_DUP"), spawn_handlers=False)
+    await process_event(_interaction("/dispatchintdup x", iid="INT_DUP"), spawn_handlers=False)
+    assert seen == ["/dispatchintdup x"]
+    assert rest.acks == [("INT_DUP", 0)]  # redelivery neither runs nor re-acks
+
+
+async def test_interaction_non_keyboard_type_ignored(rest):
+    seen: list[str] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append(ctx.raw_text)
+
+    _register("dispatchint", _handler)
+    # type=12 (menu) and other interaction types are not inline-keyboard clicks.
+    assert await process_event(
+        _interaction("/dispatchint x", interaction_type=12), spawn_handlers=False
+    ) is None
+    assert seen == []
+    assert rest.acks == []
+
+
+async def test_interaction_non_group_scene_ignored(rest):
+    seen: list[str] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append(ctx.raw_text)
+
+    _register("dispatchint", _handler)
+    assert await process_event(
+        _interaction("/dispatchint x", scene="c2c"), spawn_handlers=False
+    ) is None
+    assert seen == []
+    assert rest.acks == []
+
+
+async def test_interaction_non_slash_button_data_ignored(rest):
+    seen: list[str] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append(ctx.raw_text)
+
+    _register("dispatchint", _handler)
+    assert await process_event(
+        _interaction("just text"), spawn_handlers=False
+    ) is None
+    assert seen == []
+    assert rest.acks == []
+
+
+async def test_interaction_missing_identity_ignored(rest):
+    seen: list[str] = []
+
+    async def _handler(ctx: Ctx):
+        seen.append(ctx.raw_text)
+
+    _register("dispatchint", _handler)
+    assert await process_event(_interaction("/dispatchint x", group=""), spawn_handlers=False) is None
+    assert await process_event(_interaction("/dispatchint x", user=""), spawn_handlers=False) is None
+    assert seen == []
+    assert rest.acks == []

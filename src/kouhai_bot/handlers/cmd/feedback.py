@@ -25,7 +25,7 @@ async def handle(ctx: Ctx) -> None:
     match = re.fullmatch(r"/feedback(?:\s+(.+))?", ctx.raw_text.strip(), re.DOTALL)
     if match is None:
         await ctx.sender.send_group_at(
-            ctx.group_openid, ctx.user_openid, "用法：/feedback [简短备注]～",
+            ctx.group_openid, ctx.user_openid, "用法：/fb [简短备注]～",
             msg_id=ctx.message_id,
         )
         return
@@ -38,8 +38,8 @@ async def handle(ctx: Ctx) -> None:
         if not isinstance(record, dict):
             await ctx.sender.send_group_at(
                 ctx.group_openid, ctx.user_openid,
-                "这边还没有可以标注的 AI 回复哦～先 /submit、/clarify 或 /review 一次，"
-                "收到回复后再来 /feedback 吧。",
+                "这边还没有可以标注的 AI 回复哦～先 /sbm、/clrf 或 /rv 一次，"
+                "收到回复后再来 /fb 吧。",
                 msg_id=ctx.message_id,
             )
             return
@@ -67,7 +67,9 @@ async def handle(ctx: Ctx) -> None:
         )
         return
 
-    await ctx.sender.react(ctx.group_openid, "👌", msg_id=ctx.message_id)
+    await ctx.sender.react(
+        ctx.group_openid, "👌", msg_id=ctx.message_id, user_openid=ctx.user_openid
+    )
 
 
 def register() -> None:

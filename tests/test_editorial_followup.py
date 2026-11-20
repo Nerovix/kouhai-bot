@@ -20,7 +20,6 @@ from kouhai_bot.handlers.runtime import Runtime, set_runtime
 from kouhai_bot.official.budget import ReplyBudget
 from kouhai_bot.official.sender import OfficialSender
 from kouhai_bot.problem_content import statement_fingerprint
-from kouhai_bot.tutorials import OfficialEditorial
 
 GROUP = "G1"
 PID = "1000A"
@@ -236,7 +235,8 @@ async def test_warm_cache_delivers_immediately_without_prefetch_wait(bound_db, c
     assert nodes[0]["nickname"] == "测试Bot"
     assert kwargs["title"] == f"📖 {PID} 官方题解"
     payload = kwargs["text_fallback"]
-    assert payload.startswith(f"📖 {PID} 官方题解\n来源: {URL}\n\n")
+    assert payload.startswith(f"📖 {PID} 官方题解\n\n")
+    assert "来源" not in payload and URL not in payload
     assert LONG_ZH in payload
 
 
@@ -283,8 +283,7 @@ async def test_delivery_awaits_inflight_prefetch_then_delivers(bound_db, cfg, re
 
 async def test_deliver_returns_false_for_short_translation(bound_db, cfg, rest):
     await _seed_verified(bound_db, zh="太短")
-    editorial = OfficialEditorial(text=LONG_EN, tutorial_url=URL, tutorial_title="Editorial")
-    delivered = await ef.deliver_official_tutorial(GROUP, PID, editorial)
+    delivered = await ef.deliver_official_tutorial(GROUP, PID)
     assert delivered is False
     assert rest.sent == []
 
@@ -294,9 +293,8 @@ async def test_deliver_chunks_long_payload(bound_db, cfg, rest, monkeypatch):
     await _seed_verified(bound_db, zh=zh)
     card = AsyncMock(return_value="mid")
     monkeypatch.setattr(ef, "send_forward_card", card)
-    editorial = OfficialEditorial(text=LONG_EN, tutorial_url=URL, tutorial_title="Editorial")
 
-    assert await ef.deliver_official_tutorial(GROUP, PID, editorial) is True
+    assert await ef.deliver_official_tutorial(GROUP, PID) is True
     nodes = card.await_args.args[2]
     payload = card.await_args.kwargs["text_fallback"]
     assert len(nodes) == (len(payload) + 4999) // 5000
@@ -310,9 +308,8 @@ async def test_render_failure_falls_back_to_plain_text(bound_db, cfg, rest, monk
         "kouhai_bot.render.forward_card.render_card_png",
         AsyncMock(side_effect=RuntimeError("no chromium")),
     )
-    editorial = OfficialEditorial(text=LONG_EN, tutorial_url=URL, tutorial_title="Editorial")
 
-    assert await ef.deliver_official_tutorial(GROUP, PID, editorial) is True
+    assert await ef.deliver_official_tutorial(GROUP, PID) is True
     assert rest.uploads == []
     assert len(rest.sent) == 1
     gid, payload = rest.sent[0]
@@ -328,9 +325,8 @@ async def test_render_success_sends_media_message(bound_db, cfg, rest, monkeypat
         "kouhai_bot.render.forward_card.render_card_png",
         AsyncMock(return_value=b"png-bytes"),
     )
-    editorial = OfficialEditorial(text=LONG_EN, tutorial_url=URL, tutorial_title="Editorial")
 
-    assert await ef.deliver_official_tutorial(GROUP, PID, editorial) is True
+    assert await ef.deliver_official_tutorial(GROUP, PID) is True
     assert len(rest.uploads) == 1
     assert rest.uploads[0][1]["file_type"] == 1
     assert len(rest.sent) == 1

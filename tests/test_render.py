@@ -12,6 +12,7 @@ from kouhai_bot.official.media import MediaCache, content_key
 from kouhai_bot.official.rest import OfficialApiError
 from kouhai_bot.render import (
     build_forward_card_html,
+    build_scoreboard_html,
     nodes_to_text,
     pre_block,
     render_card_png,
@@ -137,6 +138,60 @@ def test_build_card_html_escapes_nickname():
     assert "&lt;script&gt;" in html
 
 
+def test_build_scoreboard_html_medals_formula_and_rows():
+    ranked = [
+        {"rank": 1, "nickname": "Bob", "solved": 3, "score": 12.0},
+        {"rank": 2, "nickname": "Alice", "solved": 2, "score": 6.5},
+        {"rank": 3, "nickname": "Carol", "solved": 1, "score": 2.0},
+        {"rank": 4, "nickname": "Dave", "solved": 1, "score": 1.0},
+    ]
+    html = build_scoreboard_html(ranked)
+    assert "🥇" in html and "🥈" in html and "🥉" in html
+    assert "#4" in html
+    # formula uses a real superscript, not a raw 2^ caret
+    assert "2<sup>(rating−2000)/300</sup>" in html
+    assert "2^" not in html
+    assert "共 4 人" in html
+    # /help-style light list: bold nickname + plain "— N 题 / X 分", no poster styling
+    assert "<strong>Bob</strong> — 3 题 / 12 分" in html
+    assert "<strong>Alice</strong> — 2 题 / 6.5 分" in html
+    assert "<h3>" in html and "<ul>" in html and "<li>" in html
+    assert "sb-score" not in html and "sb-gold" not in html
+
+
+def test_build_scoreboard_html_tied_ranks_share_medal():
+    ranked = [
+        {"rank": 1, "nickname": "A", "solved": 1, "score": 2.0},
+        {"rank": 1, "nickname": "B", "solved": 1, "score": 2.0},
+    ]
+    html = build_scoreboard_html(ranked)
+    assert html.count("🥇") == 2
+    assert "#1" not in html
+
+
+def test_build_scoreboard_html_escapes_nickname():
+    html = build_scoreboard_html(
+        [{"rank": 1, "nickname": "<b>x</b>", "solved": 1, "score": 1.0}]
+    )
+    assert "<b>x</b>" not in html
+    assert "&lt;b&gt;x&lt;/b&gt;" in html
+
+
+def test_build_scoreboard_html_migration_note():
+    ranked = [{"rank": 1, "nickname": "A", "solved": 1, "score": 2.0}]
+    # absent by default
+    assert "数据正在迁移中" not in build_scoreboard_html(ranked)
+    # present, muted, and placed under the formula before the rows
+    html = build_scoreboard_html(ranked, migration_note="数据正在迁移中，排名可能不完整。")
+    assert '<div class="muted">数据正在迁移中，排名可能不完整。</div>' in html
+    assert html.index("数据正在迁移中") < html.index("<ul>")
+    assert html.index("2<sup>") < html.index("数据正在迁移中")
+    # note content is escaped
+    inj = build_scoreboard_html(ranked, migration_note="<script>x</script>")
+    assert "<script>x</script>" not in inj
+    assert "&lt;script&gt;" in inj
+
+
 def test_nodes_to_text_fallback():
     nodes = [
         {"nickname": "A", "content_html": "line1<br>line2"},
@@ -230,6 +285,7 @@ async def test_send_forward_card_uses_image(browser):
     assert mid is not None
     assert rest.uploads  # uploaded an image
     assert rest.sent[-1][1]["msg_type"] == 7
+    assert "content" not in rest.sent[-1][1]  # no caption repeating the header title
 
 
 async def test_send_forward_card_text_fallback_on_render_error():

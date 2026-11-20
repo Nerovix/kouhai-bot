@@ -38,9 +38,9 @@ def _block_real_http(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _reset_global_runtime():
-    """Clear process-global runtime/database/echo/cooldown state between tests."""
+    """Clear process-global runtime/database/cooldown state between tests."""
     yield
-    from kouhai_bot import echo
+    from kouhai_bot import legacy_migration
     from kouhai_bot.db import set_database
     from kouhai_bot.handlers import (
         reset_cooldowns_for_tests,
@@ -50,6 +50,6 @@ def _reset_global_runtime():
 
     set_runtime(None)
     set_database(None)
-    echo.reset_echo_for_tests()
+    legacy_migration.reset_for_tests()
     reset_cooldowns_for_tests()
     reset_message_dedup_for_tests()

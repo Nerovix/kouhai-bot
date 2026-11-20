@@ -93,10 +93,22 @@ def test_aliases_resolve_to_canonical_definitions():
         cmd = get(alias)
         assert cmd is not None, f"alias /{alias} does not resolve"
         assert cmd.name == canonical
-        assert get(canonical) is cmd
-    # Exactly the six approved aliases exist beyond the canonical names.
+        assert cmd.trigger == alias
+        # Alias-only interface: the canonical full name is NOT a usable trigger.
+        assert get(canonical) is None, f"/{canonical} should not be a trigger"
+    # Exactly the six approved aliases exist beyond the alias-less command names.
     alias_keys = set(registry._registry) - EXPECTED_COMMANDS
     assert alias_keys == set(EXPECTED_ALIASES)
+
+
+def test_aliasless_commands_register_their_name():
+    discover_commands()
+    for name in EXPECTED_COMMANDS - set(EXPECTED_ALIASES.values()):
+        cmd = get(name)
+        assert cmd is not None, f"/{name} should resolve by its own name"
+        assert cmd.name == name
+        assert cmd.aliases == []
+        assert cmd.trigger == name
 
 
 def test_removed_commands_and_old_aliases_absent():
@@ -133,7 +145,7 @@ def test_register_lookup_and_dedup():
         handler=_handler,
     )
     register(cmd)
-    assert get("regtest") is cmd
+    assert get("regtest") is None  # aliased command: full name is not a trigger
     assert get("rt") is cmd
     assert all_commands() == [cmd]
 
@@ -144,7 +156,7 @@ def test_register_lookup_and_dedup():
         handler=_handler,
     )
     register(replacement)
-    assert get("regtest") is replacement
+    assert get("regtest") is None
     assert get("rt") is replacement
     assert all_commands() == [replacement]
 
@@ -155,8 +167,9 @@ def test_all_commands_dedups_alias_entries():
 
     register(CommandDef(name="aaa", aliases=["a1", "a2"], handler=_handler))
     register(CommandDef(name="bbb", aliases=["b1"], handler=_handler))
-    # 5 registry keys but only 2 unique commands.
-    assert len(registry._registry) == 5
+    # Only the 3 alias triggers are registered (full names are not triggers),
+    # but all_commands still yields exactly 2 unique commands.
+    assert len(registry._registry) == 3
     assert [c.name for c in all_commands()] == ["aaa", "bbb"]
 
 

@@ -206,4 +206,27 @@ CREATE TABLE IF NOT EXISTS message_refs (
 );
 CREATE INDEX IF NOT EXISTS idx_message_refs_group_pid
     ON message_refs (group_openid, pid);
+
+-- Legacy hot-migration identity map (old service group only). One row per
+-- (group, openid) once that member's old group data has been migrated; the
+-- row is the idempotency marker so a member is migrated exactly once.
+CREATE TABLE IF NOT EXISTS legacy_migration_map (
+    group_openid TEXT NOT NULL,
+    user_openid  TEXT NOT NULL,
+    old_user_id  TEXT NOT NULL,
+    nickname     TEXT NOT NULL DEFAULT '',
+    migrated_at  TEXT NOT NULL,
+    PRIMARY KEY (group_openid, user_openid)
+);
+
+-- Per-group order_num floor for hot-migration. Migrated solves keep their old
+-- global order (1..N); native solves must number strictly above the OLD max so
+-- they never collide with a legacy order that has not been migrated yet (a
+-- member who never speaks never migrates, so the window never closes on its
+-- own). record_solve uses max(current_max, floor)+1. Absent for non-migration
+-- groups, where it degrades to a plain monotonic max+1 counter.
+CREATE TABLE IF NOT EXISTS group_order_floor (
+    group_openid TEXT PRIMARY KEY,
+    floor        INTEGER NOT NULL
+);
 """

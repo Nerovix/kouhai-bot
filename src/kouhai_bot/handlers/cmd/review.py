@@ -60,7 +60,7 @@ async def handle(ctx: Ctx) -> None:
     match = re.match(r'/review\s+', stripped)
     if not match:
         await ctx.sender.send_group_at(
-            ctx.group_openid, ctx.user_openid, "用法：/review 你的问题～",
+            ctx.group_openid, ctx.user_openid, "用法：/rv 你的问题～",
             msg_id=ctx.message_id,
         )
         return
@@ -68,7 +68,7 @@ async def handle(ctx: Ctx) -> None:
     if not question:
         await ctx.sender.send_group_at(
             ctx.group_openid, ctx.user_openid,
-            "/review 后面要写你的问题呀，想聊什么直接说～",
+            "/rv 后面要写你的问题呀，想聊什么直接说～",
             msg_id=ctx.message_id,
         )
         return

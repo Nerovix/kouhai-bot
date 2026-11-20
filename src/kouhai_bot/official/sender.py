@@ -150,9 +150,12 @@ class OfficialSender:
         text: str,
         *,
         msg_id: str | None = None,
+        keyboard: dict | None = None,
     ) -> str | None:
         markdown = f"{at_user_tag(user_openid)} {text}"
-        return await self.send_group_markdown(group_openid, markdown, msg_id=msg_id)
+        return await self.send_group_markdown(
+            group_openid, markdown, msg_id=msg_id, keyboard=keyboard
+        )
 
     async def send_group_media(
         self,
@@ -239,11 +242,52 @@ class OfficialSender:
             group_openid, file_info, msg_id=msg_id, content=content
         )
 
+    async def upload_markdown_image(
+        self, image_bytes: bytes, *, file_name: str = "card.png"
+    ) -> tuple[str, str] | None:
+        """Upload PNG to the media library → (qqbot-media:// url, image_id).
+
+        Returns None on any failure so the caller can degrade to text. The
+        source image should be deleted after a successful send (the platform
+        keeps a copy for the delivered message) to free the 100/bot quota.
+        """
+        try:
+            up = await self._rest.upload_media_image(image_bytes, file_name=file_name)
+        except OfficialApiError as e:
+            logger.error("markdown image upload failed: %s", e)
+            return None
+        url = str(up.get("url", "") or "")
+        image_id = str(up.get("image_id", "") or "")
+        if not url:
+            logger.error("markdown image upload returned no url: %s", up)
+            return None
+        return url, image_id
+
+    async def delete_markdown_image(self, image_id: str) -> None:
+        if image_id:
+            await self._rest.delete_media_image(image_id)
+
     async def react(
-        self, group_openid: str, emoji: str, *, msg_id: str | None = None
+        self,
+        group_openid: str,
+        emoji: str,
+        *,
+        msg_id: str | None = None,
+        user_openid: str = "",
     ) -> str | None:
-        """No official reaction API → a tiny emoji-character group message."""
+        """No official reaction API → a tiny emoji group message.
+
+        With ``user_openid`` the emoji @-mentions that user (markdown-only), so
+        the ack notifies the person it concerns; without it, plain emoji text.
+        """
+        if user_openid:
+            return await self.send_group_markdown(
+                group_openid, f"{at_user_tag(user_openid)} {emoji}", msg_id=msg_id
+            )
         return await self.send_group_text(group_openid, emoji, msg_id=msg_id)
 
     async def recall(self, group_openid: str, message_id: str) -> bool:
         return await self._rest.recall_group_message(group_openid, message_id)
+
+    async def ack_interaction(self, interaction_id: str) -> bool:
+        return await self._rest.respond_interaction(interaction_id)

@@ -1666,6 +1666,42 @@ def test_provider_payload_options_control_thinking_temperature_and_extra_body():
     assert "stream" not in calls[0]
 
 
+def test_provider_send_response_format_false_suppresses_json_mode():
+    # deepseek-flash degenerates to whitespace-only content under json_object
+    # mode; send_response_format=False drops the field (prompt still asks JSON).
+    provider = LlmProviderConfig(
+        name="deepseek",
+        api_key="sk-test",
+        base_url="https://api.deepseek.com/v1",
+        model="deepseek-flash",
+        send_response_format=False,
+    )
+    cfg = _openai_cfg(llm_general_providers=[provider])
+    calls = []
+
+    async def fake_once(session, **kwargs):
+        calls.append(kwargs["payload"].copy())
+        return _ChatCompletionAttempt(
+            text="{\"reply\":\"hi\",\"reaction\":\"\"}",
+            retryable=False,
+            retry_after_sec=None,
+        )
+
+    with patch("kouhai_bot.llm.get_config", return_value=cfg), \
+            patch("kouhai_bot.llm.aiohttp.ClientSession", _DummySession), \
+            patch("kouhai_bot.llm._post_chat_completion_once", side_effect=fake_once):
+        result = asyncio.run(call_chat_completion_result(
+            [{"role": "user", "content": "Reply with JSON."}],
+            task="clarify",
+            response_format={"type": "json_object"},
+            thinking={"type": "enabled"},
+        ))
+
+    assert result.text == "{\"reply\":\"hi\",\"reaction\":\"\"}"
+    assert "response_format" not in calls[0]
+    assert calls[0]["thinking"] == {"type": "enabled"}
+
+
 def test_zenmux_grok45free_payload_uses_xhigh_reasoning_and_tag():
     provider = LlmProviderConfig(
         name="grok45free",

@@ -1286,6 +1286,62 @@ async def test_unsolved_np_rejection_carries_view_problem_callback(env):
     assert env.rest.acks == [("INT_PB", 0)]
 
 
+# ── /np cooldown reminder: round up + friendly duration ─────────────────
+
+
+def test_format_wait_friendly_duration():
+    from kouhai_bot.handlers.cmd.newproblem import _format_wait
+
+    assert _format_wait(1) == "1 秒"
+    assert _format_wait(10) == "10 秒"
+    assert _format_wait(59) == "59 秒"
+    assert _format_wait(60) == "1 分钟"
+    assert _format_wait(90) == "1 分 30 秒"
+    assert _format_wait(299) == "4 分 59 秒"
+    assert _format_wait(300) == "5 分钟"
+
+
+async def test_np_cooldown_reminder_never_shows_zero_seconds(env, monkeypatch):
+    import time
+
+    from kouhai_bot.handlers.cmd import newproblem as np_cmd
+
+    registry.discover_commands()
+    grp = "G_NP_CD_ZERO"
+    monkeypatch.setattr(env.cfg, "newproblem_cooldown", 10)
+    # 0.3s left on a 10s cooldown — the old int() truncation rendered "等 0 秒".
+    np_cmd._cooldowns[grp] = time.monotonic() - 9.7
+    try:
+        await process_event(
+            group_event("/np", group=grp, msg_id="EVCD0"), spawn_handlers=False
+        )
+        texts = sent_texts(env.rest)
+        assert texts == [f"{at_tag()} 刷新太频繁啦，等 1 秒再试哦～"]
+        assert "0 秒" not in texts[0]
+    finally:
+        np_cmd._cooldowns.pop(grp, None)
+
+
+async def test_np_cooldown_reminder_formats_minutes(env):
+    import time
+
+    from kouhai_bot.handlers.cmd import newproblem as np_cmd
+
+    registry.discover_commands()
+    grp = "G_NP_CD_MIN"
+    # Just posted on the production 300s cooldown → "5 分钟", not "300 秒".
+    np_cmd._cooldowns[grp] = time.monotonic() - 0.3
+    try:
+        await process_event(
+            group_event("/np", group=grp, msg_id="EVCDM"), spawn_handlers=False
+        )
+        assert sent_texts(env.rest) == [
+            f"{at_tag()} 刷新太频繁啦，等 5 分钟再试哦～"
+        ]
+    finally:
+        np_cmd._cooldowns.pop(grp, None)
+
+
 # ── /np --force skip notice: markdown + 跳转原题 button ─────────────────
 
 

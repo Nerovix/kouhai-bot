@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
@@ -124,6 +125,20 @@ async def _send_forced_skip_followup(group_openid: str, problem: object) -> bool
     return True
 
 
+def _format_wait(seconds: int) -> str:
+    """Human-friendly Chinese duration for the cooldown reminder.
+
+    ``seconds`` is always >= 1 (the caller rounds up), so this never renders
+    "0 秒". Whole minutes drop the seconds part (300 → "5 分钟").
+    """
+    if seconds >= 60:
+        minutes, secs = divmod(seconds, 60)
+        if secs == 0:
+            return f"{minutes} 分钟"
+        return f"{minutes} 分 {secs} 秒"
+    return f"{seconds} 秒"
+
+
 async def enqueue_new_problem(
     group_openid: str,
     *,
@@ -155,10 +170,10 @@ async def enqueue_new_problem(
             elapsed = (time.time() - float(posted_at)) if posted_at else float("inf")
         if elapsed < cfg.newproblem_cooldown:
             if not quiet:
-                remaining = int(cfg.newproblem_cooldown - elapsed)
+                remaining = math.ceil(cfg.newproblem_cooldown - elapsed)
                 await _notify(
                     group_openid, user_openid, message_id,
-                    f"刷新太频繁啦，等 {remaining} 秒再试哦～",
+                    f"刷新太频繁啦，等 {_format_wait(remaining)}再试哦～",
                 )
             return False
 

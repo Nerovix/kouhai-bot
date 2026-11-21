@@ -14,7 +14,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,9 +32,13 @@ from scrape_cf_tutorial import extract_blog_body_html
 from scrape_cf_tutorial import extract_page_title
 from scrape_cf_tutorial import extract_problem_title
 from scrape_cf_tutorial import fetch_dynamic_editorial
+from scrape_cf_tutorial import fetch_dynamic_editorial_with_figures
 from scrape_cf_tutorial import fetch_html
 from scrape_cf_tutorial import html_to_markdownish
+from scrape_cf_tutorial import html_to_markdownish_with_figures
+from scrape_cf_tutorial import localize_figure_markers
 from scrape_cf_tutorial import parse_pid
+from scrape_cf_tutorial import renumber_figure_markers
 
 logger = logging.getLogger("cf_tutorial_agent")
 
@@ -86,6 +90,7 @@ class BlogDocument:
     tutorial_url: str
     tutorial_title: str
     body: str
+    figure_srcs: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -256,7 +261,9 @@ def _fetch_problemset(cache_path: Path) -> list[dict]:
     return problems
 
 
-def _section_from_text(label: str, title: str, text: str) -> Section:
+def _section_from_text(
+    label: str, title: str, text: str, images: list[str] | None = None
+) -> Section:
     code_blocks = [
         code.strip()
         for code in re.findall(r"```(?:[^\n`]*)\n([\s\S]*?)\n```", text)
@@ -272,6 +279,7 @@ def _section_from_text(label: str, title: str, text: str) -> Section:
         solution=text_without_code,
         code_blocks=code_blocks,
         raw_text=text.strip(),
+        images=list(images or []),
     )
 
 
@@ -325,14 +333,22 @@ def collect_blog_documents(
                 continue
             tutorial_title = extract_page_title(tutorial_html)
             body_html = extract_blog_body_html(tutorial_html)
-            body = html_to_markdownish(body_html)
-            dynamic_title, dynamic_text = fetch_dynamic_editorial(
-                tutorial_url=blog_url,
-                tutorial_html=tutorial_html,
-                problem_code=pid,
+            body, figure_srcs = html_to_markdownish_with_figures(
+                body_html, base_url=blog_url
+            )
+            dynamic_title, dynamic_text, dynamic_srcs = (
+                fetch_dynamic_editorial_with_figures(
+                    tutorial_url=blog_url,
+                    tutorial_html=tutorial_html,
+                    problem_code=pid,
+                )
             )
             if dynamic_text.strip():
                 title = dynamic_title or problem_title or pid
+                dynamic_text = renumber_figure_markers(
+                    dynamic_text, len(figure_srcs)
+                )
+                figure_srcs = list(figure_srcs) + list(dynamic_srcs)
                 body = (
                     f"{body.strip()}\n\n"
                     f"[Codeforces dynamic tutorial fragment for {pid} - {title}]\n"
@@ -348,6 +364,7 @@ def collect_blog_documents(
                     tutorial_url=blog_url,
                     tutorial_title=tutorial_title,
                     body=body,
+                    figure_srcs=list(figure_srcs),
                 )
             )
 
@@ -493,6 +510,10 @@ async def extract_editorial_from_blog(
     if len(editorial_text) < MIN_EDITORIAL_LEN:
         raise AgentIncomplete("extractor_span_not_found_or_too_short")
 
+    editorial_text, selected_images = localize_figure_markers(
+        editorial_text, blog.figure_srcs
+    )
+
     try:
         confidence = float(parsed.get("confidence"))
     except (TypeError, ValueError):
@@ -507,7 +528,9 @@ async def extract_editorial_from_blog(
         source_kind="llm_blog_extract",
         label=target_index.upper(),
         title=section_title,
-        section=_section_from_text(target_index.upper(), section_title, editorial_text),
+        section=_section_from_text(
+            target_index.upper(), section_title, editorial_text, selected_images
+        ),
     )
     return candidate, confidence, reason
 

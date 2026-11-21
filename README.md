@@ -48,7 +48,7 @@ cp config.example.yaml config.yaml
 official:
   app_id: "1900000000"
   app_secret: "your-app-secret"
-  bot_name: "算法助手"
+  bot_name: "KouhaiBot"
 ```
 
 凭证也可用环境变量 `KOUHAI_APP_ID` / `KOUHAI_APP_SECRET` 提供。`sandbox: true` 走沙箱域名调试。

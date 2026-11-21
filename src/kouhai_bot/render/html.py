@@ -48,6 +48,17 @@ img.avatar { object-fit: cover; display: block; }
   word-break: break-all; line-height: 1.45;
 }
 .bubble img { max-width: 100%; border-radius: 8px; display: block; margin: 8px 0; }
+.bubble .figcap { color: #8a8a8a; font-size: 22px; margin: 14px 0 4px; }
+.bubble .figgrid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  margin: 12px 0 6px; align-items: start;
+}
+.bubble .figgrid.single { grid-template-columns: 1fr; }
+.bubble .figgrid figure { margin: 0; }
+.bubble .figgrid img { margin: 0; width: 100%; }
+.bubble .figgrid figcaption {
+  color: #8a8a8a; font-size: 22px; text-align: center; margin-top: 6px;
+}
 .bubble .muted { color: #8a8a8a; font-size: 24px; }
 .bubble h3 { font-size: 28px; margin: 6px 0; }
 .bubble ul { margin: 8px 0 4px; padding-left: 26px; }

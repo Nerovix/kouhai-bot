@@ -194,7 +194,9 @@ async def _initial_bundle(pid: str) -> dict | None:
 
 
 def format_editorial_for_review(editorial: OfficialEditorial) -> str:
-    body = editorial.text
+    from .render.figures import strip_figure_markers
+
+    body = strip_figure_markers(editorial.text)
     if len(body) > _REVIEW_EDITORIAL_MAX_LEN:
         body = body[:_REVIEW_EDITORIAL_MAX_LEN] + "\n...(题解已截断)"
     lines = [

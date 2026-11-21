@@ -1899,6 +1899,98 @@ async def summarize_problem(
     return repaired, repaired_tag
 
 
+_FIGURE_MARKER_RE = re.compile(r"\[\[FIG_(\d+)\]\]")
+
+_FIGURE_TRANSLATION_RULES = (
+    "输出约束（严格执行）：\n"
+    "1) 只输出纯文本正文，不要标题或前言。\n"
+    "2) 保留原文段落结构；逐句翻译，不要压缩成概述。"
+    "不要使用 Markdown 标题、代码块、反引号、粗体、列表语法。\n"
+    "3) 原文中的配图占位符（形如 [[FIG_n]]）必须原样保留：数量、顺序、位置都不得改变，"
+    "每个占位符单独成行。\n"
+    "4) 原文中的 Figure 1 / Figure 2 等一律译为 图 1 / 图 2。\n"
+    "5) LaTeX 是最后手段：普通数组下标和幂次优先用 Unicode 角标，如 aᵢ、a₁、a₂、aₙ；"
+    "不要输出 a_i、dp_i_j 这类下划线写法。"
+    f"{_SUMMARY_UNICODE_NOTATION_GUIDE}"
+    "6) 简单关系和运算直接使用可读字符：→、<、>、≤、≥、≠、×、÷、⊕、mod；"
+    "不要出现 \\( \\)、$$、代码围栏。\n\n"
+)
+
+
+def _figure_marker_numbers(text: str) -> list[int]:
+    return [int(m.group(1)) for m in _FIGURE_MARKER_RE.finditer(text or "")]
+
+
+async def _translate_figure_segments(text: str) -> str | None:
+    """Marker-free fallback: translate each prose run between figure markers."""
+    cfg = get_config()
+    from ..render.figures import split_figure_markers
+
+    pieces: list[str] = []
+    for kind, value in split_figure_markers(text):
+        if kind == "figure":
+            pieces.append(f"[[FIG_{value}]]")
+            continue
+        segment = value.strip()
+        if not segment:
+            continue
+        result = await call_chat_completion_result(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是算法竞赛选手。把下面这段题面说明文字忠实翻译成中文，"
+                        "只做翻译，不要总结或补充；输出纯文本，不要 Markdown。"
+                    ),
+                },
+                {"role": "user", "content": _FIGURE_TRANSLATION_RULES + segment},
+            ],
+            task="summary",
+            timeout=cfg.summary_timeout_sec,
+        )
+        translated = (result.text or "").strip()
+        if not translated:
+            return None
+        pieces.append(translated)
+    joined = "\n\n".join(piece for piece in pieces if piece.strip())
+    return joined or None
+
+
+async def translate_figure_passage(passage_text: str) -> tuple[str | None, str]:
+    """Translate the statement excerpt that explains its figures.
+
+    ``[[FIG_n]]`` placeholders must survive translation so the card can put
+    each image next to the sentence that refers to it.
+    """
+    content = (passage_text or "").strip()
+    if not content:
+        return None, ""
+    cfg = get_config()
+    result = await call_chat_completion_result(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "你是算法竞赛选手。下面这段题面文字用于解释题目配图，"
+                    "请忠实翻译为自然、准确的中文；只做翻译，不要总结、点评或补充原文没有的信息。"
+                    "必须原样保留形如 [[FIG_n]] 的配图占位符。"
+                ),
+            },
+            {"role": "user", "content": _FIGURE_TRANSLATION_RULES + content},
+        ],
+        task="summary",
+        timeout=cfg.summary_timeout_sec,
+    )
+    translated = (result.text or "").strip()
+    if translated and (
+        _figure_marker_numbers(translated) == _figure_marker_numbers(content)
+    ):
+        return translated, result.model_tag
+    logger.warning("figure passage translation lost its markers; retrying per segment")
+    translated = await _translate_figure_segments(content)
+    return (translated, result.model_tag) if translated else (None, "")
+
+
 async def translate_sample_notes(
     notes_text: str,
     images: list[dict] | None = None,
@@ -1924,7 +2016,9 @@ async def translate_sample_notes(
         "\\{a,b\\} 写成集合 {a,b}，O(n^2) 写成 O(n²) 或 O(n^2)。\n"
         "6) 禁止不必要的 LaTeX 命令，不要出现 \\( \\)、$$、代码围栏，"
         "不要把简单的 \\lt、\\gt、\\leq、\\geq、\\times、\\oplus 原样留下；"
-        "只有复杂求和、递推、分式、多重下标、精确定义用中文或 Unicode 会失真时，才保留最少必要 LaTeX。\n\n"
+        "只有复杂求和、递推、分式、多重下标、精确定义用中文或 Unicode 会失真时，才保留最少必要 LaTeX。\n"
+        "7) 原文中的配图占位符（形如 [[FIG_n]]）必须原样保留：数量、顺序、位置都不得改变，"
+        "每个占位符单独成行；原文中的 Figure 1、Fig. 2 等一律译为 图 1、图 2。\n\n"
         f"{content}"
     )
     result = await call_chat_completion_result(
@@ -1942,7 +2036,17 @@ async def translate_sample_notes(
         task="multimodal_summary" if image_items else "summary",
         timeout=cfg.summary_timeout_sec,
     )
-    return result.text, result.model_tag
+    translated = (result.text or "").strip()
+    source_numbers = _figure_marker_numbers(content)
+    if not source_numbers:
+        return result.text, result.model_tag
+    if translated and _figure_marker_numbers(translated) == source_numbers:
+        return translated, result.model_tag
+    logger.warning("sample notes translation lost figure markers; retrying per segment")
+    fallback = await _translate_figure_segments(content)
+    if fallback and _figure_marker_numbers(fallback) == source_numbers:
+        return fallback, result.model_tag
+    return None, ""
 
 
 async def translate_editorial_to_zh(
@@ -1997,6 +2101,8 @@ async def translate_editorial_to_zh(
                     "不要增删关键算法步骤，不要添加原文没有的内容。"
                     "result 输出连贯纯文本，尽量保留当前题章节的自然段；不要 Markdown 标题、列表语法、代码围栏，"
                     "不要写「以下是翻译」「总结」等套话。"
+                    "原文中的配图占位符（形如 [[FIG_n]]）必须原样保留：数量、顺序、相对位置都不得改变，"
+                    "每个占位符单独成行；原文中的 Figure 1、Fig. 2 等一律译为 图 1、图 2。"
                     "LaTeX/公式处理（重要）：默认不要用 LaTeX，不要输出 \\( \\)、$$ 或 $$$。"
                     "普通数组下标和幂次优先用 Unicode 角标，如 aᵢ、aⱼ、a₁、a₂、aₙ、aᵢ₊₁、x²、2ᵏ、10¹⁸、10⁹+7。"
                     "不要输出普通下划线下标，如 a_i、dp_i_j、inc_i、pref_i；改写成 aᵢ、dpᵢⱼ、incᵢ、prefᵢ，或用自然语言。"
@@ -2029,6 +2135,15 @@ async def translate_editorial_to_zh(
     translated = str(parsed.get("result", "") or "").strip()
     if not translated:
         return None, "", None
+    source_markers = _figure_marker_numbers(body)
+    if source_markers and _figure_marker_numbers(translated) != source_markers:
+        logger.warning("editorial translation lost figure markers; retrying per segment")
+        fallback = await _translate_figure_segments(body)
+        if fallback and _figure_marker_numbers(fallback) == source_markers:
+            translated = fallback
+        else:
+            from ..render.figures import strip_figure_markers
+            translated = strip_figure_markers(translated)
     return translated, repair_tag or result.model_tag, True
 
 

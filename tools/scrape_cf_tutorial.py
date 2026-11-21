@@ -15,7 +15,7 @@ import random
 import re
 import string
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -50,6 +50,7 @@ class Section:
     solution: str
     code_blocks: list[str]
     raw_text: str
+    images: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -59,6 +60,7 @@ class Section:
             "solution": self.solution,
             "code_blocks": self.code_blocks,
             "raw_text": self.raw_text,
+            "images": list(self.images),
         }
 
 
@@ -244,17 +246,27 @@ def _post_problem_tutorial_json(
 def fetch_dynamic_editorial(
     tutorial_url: str, tutorial_html: str, problem_code: str
 ) -> tuple[str, str]:
+    title, text, _srcs = fetch_dynamic_editorial_with_figures(
+        tutorial_url, tutorial_html, problem_code
+    )
+    return title, text
+
+
+def fetch_dynamic_editorial_with_figures(
+    tutorial_url: str, tutorial_html: str, problem_code: str
+) -> tuple[str, str, list[str]]:
     data = _post_problem_tutorial_json(tutorial_url, tutorial_html, problem_code)
     if not data:
-        return "", ""
+        return "", "", []
     if str(data.get("success", "")).lower() != "true":
-        return "", ""
+        return "", "", []
     html_fragment = str(data.get("html", "")).strip()
     if not html_fragment:
-        return "", ""
+        return "", "", []
 
-    # Convert returned HTML fragment into plain markdown-ish text and strip heading line.
-    text = html_to_markdownish(html_fragment)
+    # Convert returned HTML fragment into markdown-ish text (figures become
+    # [[CFIMG_n]] markers) and strip the heading line.
+    text, srcs = html_to_markdownish_with_figures(html_fragment, base_url=tutorial_url)
     lines = [ln for ln in text.split("\n") if ln.strip()]
     section_title = ""
     if lines and re.fullmatch(
@@ -270,7 +282,7 @@ def fetch_dynamic_editorial(
         if m:
             section_title = m.group(1).strip()
         lines = lines[1:]
-    return section_title, "\n".join(lines).strip()
+    return section_title, "\n".join(lines).strip(), srcs
 
 
 
@@ -376,6 +388,94 @@ def html_to_markdownish(body_html: str) -> str:
         out.append(ln.strip())
         prev_blank = False
     return "\n".join(out).strip()
+
+
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.I)
+_IMG_SRC_RE = re.compile(r'src\s*=\s*["\']([^"\']+)["\']', re.I)
+_IMG_CLASS_RE = re.compile(r'class\s*=\s*["\']([^"\']*)["\']', re.I)
+_FIGURE_MARKER_RE = re.compile(r"\[\[CFIMG_(\d+)\]\]")
+
+
+def _is_editorial_figure(src: str, cls: str) -> bool:
+    if "tex-formula" in cls or "icon" in cls.lower():
+        return False
+    return bool(src)
+
+
+def html_to_markdownish_with_figures(
+    body_html: str, *, base_url: str = CF_ROOT
+) -> tuple[str, list[str]]:
+    """Like ``html_to_markdownish`` but keeps figures as ``[[CFIMG_n]]`` markers.
+
+    Returns ``(text, figure_srcs)`` where ``figure_srcs[i]`` is the absolute URL
+    rendered at marker ``[[CFIMG_i]]``. Inline math formula images are dropped;
+    only diagrams are kept so the editorial card can render them.
+    """
+    srcs: list[str] = []
+
+    def repl(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        src_m = _IMG_SRC_RE.search(tag)
+        cls_m = _IMG_CLASS_RE.search(tag)
+        raw_src = src_m.group(1).strip() if src_m else ""
+        if not raw_src:
+            return ""
+        src = urljoin(base_url, raw_src)
+        if not _is_editorial_figure(src, cls_m.group(1) if cls_m else ""):
+            return ""
+        index = len(srcs)
+        srcs.append(src)
+        return f"\n[[CFIMG_{index}]]\n"
+
+    marked = _IMG_TAG_RE.sub(repl, body_html)
+    return html_to_markdownish(marked), srcs
+
+
+def renumber_figure_markers(text: str, offset: int) -> str:
+    if not offset:
+        return text
+    return _FIGURE_MARKER_RE.sub(
+        lambda m: f"[[CFIMG_{int(m.group(1)) + offset}]]", text
+    )
+
+
+def take_figure_markers(text: str) -> tuple[str, list[int]]:
+    """Strip ``[[CFIMG_n]]`` markers from text; return (clean_text, indices)."""
+    indices = [int(m.group(1)) for m in _FIGURE_MARKER_RE.finditer(text)]
+    cleaned = _FIGURE_MARKER_RE.sub("", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, indices
+
+
+def localize_figure_markers(
+    text: str, figure_srcs: list[str]
+) -> tuple[str, list[str]]:
+    """Rewrite ``[[CFIMG_k]]`` (blog-indexed) to ``[[FIG_n]]`` (1-based, deduped).
+
+    Returns ``(localized_text, images)`` where ``images[n-1]`` is the source
+    rendered at ``[[FIG_n]]``. Unknown or empty sources drop the marker instead
+    of leaving a dangling number.
+    """
+    images: list[str] = []
+    number_by_src: dict[str, int] = {}
+
+    def repl(match: re.Match[str]) -> str:
+        index = int(match.group(1))
+        if not 0 <= index < len(figure_srcs):
+            return ""
+        src = figure_srcs[index]
+        if not src:
+            return ""
+        number = number_by_src.get(src)
+        if number is None:
+            images.append(src)
+            number = len(images)
+            number_by_src[src] = number
+        return f"[[FIG_{number}]]"
+
+    localized = _FIGURE_MARKER_RE.sub(repl, text)
+    localized = re.sub(r"\n{3,}", "\n\n", localized).strip()
+    return localized, images
 
 
 def _extract_text_between(lines: list[str], start: int, end: int) -> str:

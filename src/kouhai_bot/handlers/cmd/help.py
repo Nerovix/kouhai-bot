@@ -35,7 +35,7 @@ def _section_nodes() -> tuple[list[dict], str]:
     by_name = {cmd.name: cmd for cmd in all_commands()}
     nodes: list[dict] = []
     text_sections: list[str] = []
-    bot_name = get_runtime().sender.bot_name or "算法助手"
+    bot_name = get_runtime().sender.bot_name or "KouhaiBot"
     for title, names in _SECTIONS:
         cmds = [by_name[n] for n in names if n in by_name]
         if not cmds:

@@ -27,7 +27,7 @@ import sys
 import urllib.request
 from html.parser import HTMLParser
 from io import BytesIO
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from PIL import Image
 
@@ -135,35 +135,202 @@ def normalize_image_src(src: str) -> str:
     return urljoin("https://codeforces.com", value)
 
 
+_STATEMENT_IMAGE_HOSTS = ("espresso.codeforces.com", "codeforces.com")
+
+
+def _is_plain_figure(src: str, cls: str) -> bool:
+    """Whether a non-tex ``<img>`` is a statement figure worth rendering.
+
+    Codeforces hosts both formulas and diagrams on ``espresso.codeforces.com``;
+    the ``tex-formula``/``tex-graphics`` classes distinguish them. Some template
+    variants emit ordinary ``<img>`` tags (no tex class) for board/diagram
+    figures, so treat CF-hosted images without the formula class as figures.
+    Icons and UI chrome on other hosts are ignored.
+    """
+    if "tex-formula" in cls:
+        return False
+    if "icon" in cls.lower():
+        return False
+    host = urlparse(src).netloc.lower()
+    return any(host == h or host.endswith("." + h) for h in _STATEMENT_IMAGE_HOSTS)
+
+
+_TABLE_RE = re.compile(r"<table\b[^>]*>([\s\S]*?)</table>", re.I)
+_TABLE_ROW_RE = re.compile(r"<tr\b[^>]*>([\s\S]*?)</tr>", re.I)
+_TABLE_CELL_RE = re.compile(r"<td\b[^>]*>([\s\S]*?)</td>", re.I)
+_CAPTION_TEXT_RE = re.compile(r"^(?:Figure|Fig\.?)\s*\d+[A-Za-z]?$", re.I)
+_CAPTION_CELL_RE = re.compile(
+    r"<td\b[^>]*>\s*(?:Figure|Fig\.?)\s*\d+[A-Za-z]?\s*</td>", re.I
+)
+# Block-level elements that carry the description prose/figures.
+_DESCRIPTION_BLOCK_RE = re.compile(
+    r"<(p|center|ul|ol)\b[^>]*>[\s\S]*?</\1\s*>", re.I
+)
+_DESCRIPTION_END_RE = re.compile(r'<div class="input-specification"', re.I)
+_FIGURE_REFERENCE_RE = re.compile(r"\bFig(?:ure)?s?\.?\s*\d", re.I)
+_FIGURE_PLACEHOLDER = "[[FIG_{}]]"
+
+
+def figure_captions(ps_html: str) -> dict[str, str]:
+    """Map figure image URL → its statement caption ("Figure 1").
+
+    Codeforces renders labelled figure grids as a two-row table: images in
+    one row, labels in the same columns of the next row.
+    """
+    captions: dict[str, str] = {}
+    for table in _TABLE_RE.finditer(ps_html):
+        rows = [
+            [cell.group(1) for cell in _TABLE_CELL_RE.finditer(row.group(1))]
+            for row in _TABLE_ROW_RE.finditer(table.group(1))
+        ]
+        for cells, label_cells in zip(rows, rows[1:]):
+            if len(cells) != len(label_cells):
+                continue
+            for cell, label_cell in zip(cells, label_cells):
+                img = re.search(r'<img\b[^>]*\bsrc="([^"]+)"', cell, re.I)
+                if not img:
+                    continue
+                label = html_to_text(label_cell)
+                if not _CAPTION_TEXT_RE.fullmatch(label):
+                    continue
+                src = normalize_image_src(img.group(1))
+                if src:
+                    captions[src] = label
+    return captions
+
+
+def extract_figure_passage(ps_html: str) -> str:
+    """Description prose that explains the statement figures, in reading order.
+
+    Figures are meaningless on their own: CF introduces them in the
+    surrounding paragraph(s) ("... as shown in Figure 1") and often ties them
+    to the samples afterwards. This returns that contiguous block run with
+    ``[[FIG_n]]`` placeholders (n = figure position, matching the graphics
+    order used by the card) so the card can render each figure inline where
+    it is referenced. Returns "" when the statement has no figures or no
+    prose around them.
+    """
+    _formulas, graphics = find_all_tex_images(ps_html)
+    if not graphics:
+        return ""
+    figure_numbers = {
+        item["src"]: index for index, item in enumerate(graphics, 1)
+    }
+    end_match = _DESCRIPTION_END_RE.search(ps_html)
+    region = ps_html[: end_match.start()] if end_match else ps_html
+
+    blocks: list[tuple[str, bool]] = []
+    for match in _DESCRIPTION_BLOCK_RE.finditer(region):
+        html_block = match.group(0)
+        has_figure = False
+
+        def replace_img(img_match: re.Match[str]) -> str:
+            nonlocal has_figure
+            tag = img_match.group(0)
+            src_match = re.search(r'\bsrc="([^"]+)"', tag, re.I)
+            if not src_match:
+                return ""
+            src = normalize_image_src(src_match.group(1))
+            number = figure_numbers.get(src)
+            if number is None:
+                # Inline formula image: keep the explanation text readable.
+                return ""
+            has_figure = True
+            return f" {_FIGURE_PLACEHOLDER.format(number)} "
+
+        html_block = _CAPTION_CELL_RE.sub("", html_block)
+        html_block = re.sub(r"<img\b[^>]*>", replace_img, html_block, flags=re.I)
+        text = html_to_text(html_block)
+        if text:
+            blocks.append((text, has_figure))
+
+    if not any(has_figure for _text, has_figure in blocks):
+        return ""
+    first = next(i for i, (_text, has) in enumerate(blocks) if has)
+    stop = max(i for i, (_text, has) in enumerate(blocks) if has) + 1
+    while first > 0 and _FIGURE_REFERENCE_RE.search(blocks[first - 1][0]):
+        first -= 1
+    while stop < len(blocks) and _FIGURE_REFERENCE_RE.search(blocks[stop][0]):
+        stop += 1
+    return "\n\n".join(text for text, _has in blocks[first:stop]).strip()
+
+
+def extract_figure_notes(ps_html: str) -> str:
+    """Note-section prose with ``[[FIG_n]]`` markers where its figures appear.
+
+    Sample explanations often embed diagrams ("The tree in the first test:
+    <img> "). The plain ``notes`` field strips every tag, which silently drops
+    those figures; keeping positional markers lets the card render each one
+    inside the explanation that refers to it.
+    """
+    _formulas, graphics = find_all_tex_images(ps_html)
+    if not graphics:
+        return ""
+    figure_numbers = {
+        item["src"]: index for index, item in enumerate(graphics, 1)
+    }
+    note_match = re.search(
+        r'<div class="section-title">Note</div>([\s\S]*?)(?=<div class="section-title"|$)',
+        ps_html,
+        re.DOTALL,
+    )
+    if not note_match:
+        return ""
+    note_html = _CAPTION_CELL_RE.sub("", note_match.group(1))
+    has_figure = False
+
+    def replace_img(img_match: re.Match[str]) -> str:
+        nonlocal has_figure
+        src_match = re.search(r'\bsrc="([^"]+)"', img_match.group(0), re.I)
+        if not src_match:
+            return ""
+        number = figure_numbers.get(normalize_image_src(src_match.group(1)))
+        if number is None:
+            return ""
+        has_figure = True
+        return f" {_FIGURE_PLACEHOLDER.format(number)} "
+
+    note_html = re.sub(r"<img\b[^>]*>", replace_img, note_html, flags=re.I)
+    if not has_figure:
+        return ""
+    blocks = [
+        html_to_text(block.group(0))
+        for block in _DESCRIPTION_BLOCK_RE.finditer(note_html)
+    ]
+    blocks = [block for block in blocks if block]
+    return "\n\n".join(blocks) if blocks else html_to_text(note_html)
+
+
 def find_all_tex_images(ps_html: str) -> tuple[list[dict], list[dict]]:
-    """Find all tex-formula and tex-graphics images.
+    """Find all statement images, split into formulas and figures.
+
     Returns (formulas, graphics) — each a list of {tag, src, class, start, end}.
-    tex-formula = math formula images.
-    tex-graphics = diagrams/charts/drawings.
+    formula = ``tex-formula`` math images.
+    graphic = ``tex-graphics`` diagrams plus ordinary CF-hosted ``<img>`` figures.
     """
     formulas = []
     graphics = []
-    for m in re.finditer(
-        r'<img[^>]*class="[^"]*\b(tex-formula|tex-graphics)\b[^"]*"[^>]*>',
-        ps_html,
-    ):
+    for m in re.finditer(r'<img\b[^>]*>', ps_html, re.I):
         tag = m.group(0)
-        src_m = re.search(r'src="([^"]+)"', tag)
-        cls_m = re.search(r'class="([^"]+)"', tag)
-        alt_m = re.search(r'alt="([^"]*)"', tag)
+        src_m = re.search(r'src="([^"]+)"', tag, re.I)
+        cls_m = re.search(r'class="([^"]*)"', tag, re.I)
+        alt_m = re.search(r'alt="([^"]*)"', tag, re.I)
         cls = cls_m.group(1) if cls_m else ""
+        src = normalize_image_src(src_m.group(1) if src_m else "")
+        if not src:
+            continue
         entry = {
             "tag": tag,
-            "src": normalize_image_src(src_m.group(1) if src_m else ""),
+            "src": src,
             "class": cls,
             "alt": html_lib.unescape(alt_m.group(1)).strip() if alt_m else "",
             "start": m.start(),
             "end": m.end(),
         }
-        if "tex-graphics" in cls:
-            graphics.append(entry)
-        else:
+        if "tex-formula" in cls:
             formulas.append(entry)
+        elif "tex-graphics" in cls or _is_plain_figure(src, cls):
+            graphics.append(entry)
     return formulas, graphics
 
 
@@ -576,6 +743,7 @@ def process_problem(
     # align each image with its exact location in the statement text.
     result_html = ps_html
     ordered_images = sorted(formulas + graphics, key=lambda x: x["start"])
+    caption_by_src = figure_captions(ps_html)
     image_entries: list[dict] = []
     for i, item in enumerate(ordered_images, 1):
         kind = "formula" if item in formulas else "graphic"
@@ -593,6 +761,10 @@ def process_problem(
             "start": item["start"],
             "end": item["end"],
         })
+        if kind == "graphic":
+            caption = caption_by_src.get(item["src"], "")
+            if caption:
+                image_entries[-1]["caption"] = caption
 
     for img_entry in sorted(image_entries, key=lambda x: x["start"], reverse=True):
         replacement = (
@@ -619,6 +791,7 @@ def process_problem(
             {k: v for k, v in item.items() if k not in {"start", "end"}}
             for item in image_entries
         ],
+        "figure_passage": extract_figure_passage(ps_html),
         "text": plain_text,
         "text_length": len(plain_text),
     }

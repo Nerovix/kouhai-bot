@@ -173,3 +173,70 @@ def test_html_to_markdownish_plain_markup_unchanged():
     html = "<p>cost is $$$10$$$ per item, at most $$$9$$$ times</p>"
     text = scrape_cf_tutorial.html_to_markdownish(html)
     assert text == "cost is $$$10$$$ per item, at most $$$9$$$ times"
+
+
+# ── editorial figures: markdownish markers ─────────────────────────────
+
+
+def test_html_to_markdownish_with_figures_keeps_diagrams_as_markers():
+    html = (
+        "<p>Before</p>"
+        '<img src="/predownloaded/aa/bb/fig.png">'
+        '<img class="tex-formula" src="https://espresso.codeforces.com/f.png">'
+        '<img class="icon" src="/icons/x.png">'
+        "<p>After</p>"
+    )
+    text, srcs = scrape_cf_tutorial.html_to_markdownish_with_figures(
+        html, base_url="https://codeforces.com/blog/entry/1"
+    )
+    assert srcs == ["https://codeforces.com/predownloaded/aa/bb/fig.png"]
+    assert "[[CFIMG_0]]" in text
+    assert "espresso.codeforces.com" not in text
+    assert "/icons/x.png" not in text
+
+
+def test_html_to_markdownish_with_figures_dedupe_is_not_applied():
+    """Two identical sources stay two markers: the extractor maps by position."""
+    html = (
+        '<p>a</p><img src="https://codeforces.com/p/x.png">'
+        '<p>b</p><img src="https://codeforces.com/p/x.png">'
+    )
+    text, srcs = scrape_cf_tutorial.html_to_markdownish_with_figures(html)
+    assert srcs == ["https://codeforces.com/p/x.png", "https://codeforces.com/p/x.png"]
+    assert "[[CFIMG_0]]" in text and "[[CFIMG_1]]" in text
+
+
+def test_take_figure_markers_strips_and_reports_indices():
+    text, indices = scrape_cf_tutorial.take_figure_markers(
+        "line\n\n[[CFIMG_0]]\n\n\n\nmiddle [[CFIMG_2]] end"
+    )
+    assert indices == [0, 2]
+    assert "CFIMG" not in text
+    assert "\n\n\n" not in text
+    assert text.startswith("line")
+
+
+def test_renumber_figure_markers_offsets_all_markers():
+    text = scrape_cf_tutorial.renumber_figure_markers(
+        "a [[CFIMG_0]] b [[CFIMG_1]]", 3
+    )
+    assert text == "a [[CFIMG_3]] b [[CFIMG_4]]"
+    assert scrape_cf_tutorial.renumber_figure_markers("x [[CFIMG_0]]", 0) == "x [[CFIMG_0]]"
+
+
+def test_localize_figure_markers_renumbers_and_dedupes():
+    text = "前文\n\n[[CFIMG_0]]\n\n[[CFIMG_2]]\n[[CFIMG_0]]\n\n后文"
+    localized, images = scrape_cf_tutorial.localize_figure_markers(
+        text,
+        ["https://x/a.png", "https://x/unused.png", "https://x/b.png"],
+    )
+    assert localized == "前文\n\n[[FIG_1]]\n\n[[FIG_2]]\n[[FIG_1]]\n\n后文"
+    assert images == ["https://x/a.png", "https://x/b.png"]
+
+
+def test_localize_figure_markers_drops_unknown_indices():
+    localized, images = scrape_cf_tutorial.localize_figure_markers(
+        "a\n[[CFIMG_5]]\nb", ["https://x/a.png"],
+    )
+    assert localized == "a\n\nb"
+    assert images == []

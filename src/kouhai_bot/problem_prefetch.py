@@ -225,7 +225,10 @@ class NextProblemPrefetcher:
                 model_tag=prepared.model_tag,
                 sample_messages=prepared.sample_messages,
                 notes_message=prepared.notes_message,
-                bot_name=rt.sender.bot_name or "算法助手",
+                figure_srcs=prepared.figure_srcs,
+                figure_captions=prepared.figure_captions,
+                figure_passage=prepared.figure_passage,
+                bot_name=rt.sender.bot_name or "KouhaiBot",
                 bot_avatar_url=rt.sender.bot_avatar_url,
                 browser=rt.browser,
             )

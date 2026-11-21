@@ -188,6 +188,64 @@ async def test_notes_translation_failure_skips_notes_node(bound_db, cfg, stateme
     assert prepared.summary_status is SummaryPreparationStatus.READY
 
 
+async def test_figure_payload_prepared_and_translated(bound_db, cfg, statement_file, mock_llm, monkeypatch):
+    statement = dict(
+        STATEMENT,
+        images=[{"src": "https://x/g1.png", "kind": "graphic", "caption": "Figure 1"}],
+        figure_passage="See Figure 1.\n\n[[FIG_1]]",
+    )
+    statement_file.write_text(json.dumps(statement), encoding="utf-8")
+    translate_passage = AsyncMock(return_value=("见图 1。\n\n[[FIG_1]]", ""))
+    monkeypatch.setattr(pp, "translate_figure_passage", translate_passage)
+    monkeypatch.setattr(pp, "figure_data_uris", AsyncMock(return_value=[(1, "data:image/png;base64,AAA")]))
+    _mock_picker(monkeypatch, dict(PICKED_STATE))
+
+    prepared = await pp.prepare_problem(GROUP)
+
+    translate_passage.assert_awaited_once_with("See Figure 1.\n\n[[FIG_1]]")
+    assert prepared.figure_srcs == ("https://x/g1.png",)
+    assert prepared.figure_captions == ("Figure 1",)
+    assert prepared.figure_passage == "见图 1。\n\n[[FIG_1]]"
+    restored = pp.PreparedProblem.from_json(prepared.to_json())
+    assert restored == prepared
+
+
+async def test_figure_passage_translation_failure_keeps_source(bound_db, cfg, statement_file, mock_llm, monkeypatch):
+    statement = dict(
+        STATEMENT,
+        images=[{"src": "https://x/g1.png", "kind": "graphic", "caption": "Figure 1"}],
+        figure_passage="See Figure 1.",
+    )
+    statement_file.write_text(json.dumps(statement), encoding="utf-8")
+    monkeypatch.setattr(pp, "translate_figure_passage", AsyncMock(return_value=(None, "")))
+    monkeypatch.setattr(pp, "figure_data_uris", AsyncMock(return_value=[(1, "data:image/png;base64,AAA")]))
+    _mock_picker(monkeypatch, dict(PICKED_STATE))
+
+    prepared = await pp.prepare_problem(GROUP)
+
+    assert prepared.figure_passage == "See Figure 1."
+
+
+async def test_notes_figure_markers_survive_into_card_payload(bound_db, cfg, statement_file, mock_llm, monkeypatch):
+    _, translate = mock_llm
+    translate.return_value = ("第一个测试的树：\n\n[[FIG_1]]\n\n第三个测试的树。", "『M』")
+    statement = dict(
+        STATEMENT,
+        notes="The tree in the first test:\n\n[[FIG_1]]\n\nThe tree in the third test.",
+        images=[{"src": "https://x/n1.png", "kind": "graphic"}],
+    )
+    statement_file.write_text(json.dumps(statement), encoding="utf-8")
+    monkeypatch.setattr(pp, "figure_data_uris", AsyncMock(return_value=[(1, "data:image/png;base64,AAA")]))
+    _mock_picker(monkeypatch, dict(PICKED_STATE))
+
+    prepared = await pp.prepare_problem(GROUP)
+
+    assert prepared.notes_message == (
+        "样例解释：\n第一个测试的树：\n\n[[FIG_1]]\n\n第三个测试的树。"
+    )
+    assert prepared.figure_srcs == ("https://x/n1.png",)
+
+
 # --- picker subprocess boundary -------------------------------------------
 
 

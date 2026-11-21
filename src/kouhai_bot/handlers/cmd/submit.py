@@ -910,7 +910,7 @@ class GroupCoordinator:
 
         if len(display_reply) > _REVIEW_FORWARD_THRESHOLD:
             rt = get_runtime()
-            bot_name = rt.sender.bot_name or "算法助手"
+            bot_name = rt.sender.bot_name or "KouhaiBot"
             chunks = _chunk_text(display_reply, _REVIEW_CARD_CHUNK_SIZE)
             nodes = [
                 {"nickname": bot_name, "content_html": text_to_html(c), "content_text": c}

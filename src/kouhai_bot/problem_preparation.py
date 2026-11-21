@@ -28,15 +28,19 @@ from .db.database import get_database
 from .db.repos import posts, problems, users
 from .handlers.shared import (
     summarize_problem,
+    translate_figure_passage,
     translate_sample_notes,
 )
 from .problem_content import (
     build_notes_message as build_shared_notes_message,
     build_sample_messages,
     load_statement_json,
+    statement_figure_passage,
+    statement_figures,
     statement_fingerprint,
     statement_images,
 )
+from .render.figures import figure_data_uris
 from .problem_summary import (
     SummaryPreparationStatus,
     prepare_problem_summary,
@@ -63,6 +67,9 @@ class PreparedProblem:
     min_rating: int
     max_rating: int
     prepared_at: int
+    figure_srcs: tuple[str, ...] = ()
+    figure_captions: tuple[str, ...] = ()
+    figure_passage: str = ""
 
     @property
     def pid(self) -> str:
@@ -80,6 +87,9 @@ class PreparedProblem:
             "min_rating": self.min_rating,
             "max_rating": self.max_rating,
             "prepared_at": self.prepared_at,
+            "figure_srcs": list(self.figure_srcs),
+            "figure_captions": list(self.figure_captions),
+            "figure_passage": self.figure_passage,
         }
 
     @classmethod
@@ -92,6 +102,16 @@ class PreparedProblem:
             return None
         if not all(isinstance(item, str) for item in samples):
             return None
+        figure_srcs = value.get("figure_srcs") or []
+        if not isinstance(figure_srcs, list) or not all(
+            isinstance(item, str) for item in figure_srcs
+        ):
+            figure_srcs = []
+        figure_captions = value.get("figure_captions") or []
+        if not isinstance(figure_captions, list) or not all(
+            isinstance(item, str) for item in figure_captions
+        ):
+            figure_captions = []
         try:
             summary = str(value.get("summary", "") or "")
             model_tag = str(value.get("model_tag", "") or "")
@@ -107,6 +127,9 @@ class PreparedProblem:
                 min_rating=int(value["min_rating"]),
                 max_rating=int(value["max_rating"]),
                 prepared_at=int(value["prepared_at"]),
+                figure_srcs=tuple(figure_srcs),
+                figure_captions=tuple(figure_captions),
+                figure_passage=str(value.get("figure_passage", "") or ""),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -327,6 +350,10 @@ def _rating_value(value: object) -> int | None:
         return None
 
 
+async def _no_passage() -> tuple[str | None, str]:
+    return None, ""
+
+
 async def prepare_problem(group_openid: str) -> PreparedProblem:
     """Run the blocking group-card preparation pipeline ahead of time."""
     db = get_database()
@@ -375,9 +402,26 @@ async def prepare_problem(group_openid: str) -> PreparedProblem:
 
     sample_messages = build_sample_messages(statement, include_explicit_empty=True)
     notes_message = await build_notes_message(statement)
-    summary_result = await prepare_problem_summary(
-        statement, generate=summarize_problem, attempts=2,
+    figures = statement_figures(statement)
+    figure_srcs = [figure["src"] for figure in figures]
+    figure_captions = [figure["caption"] for figure in figures]
+    source_passage = statement_figure_passage(statement)
+    if figure_srcs:
+        # Warm the on-disk figure cache during background preparation so the
+        # publication render embeds data URIs without waiting on the network.
+        await figure_data_uris(figure_srcs)
+    summary_result, passage_result = await asyncio.gather(
+        prepare_problem_summary(statement, generate=summarize_problem, attempts=2),
+        translate_figure_passage(source_passage) if source_passage else _no_passage(),
     )
+    figure_passage = source_passage
+    if passage_result[0]:
+        figure_passage = passage_result[0]
+    else:
+        logger.warning(
+            "[group_%s] Figure passage translation unavailable; using source text",
+            group_openid,
+        )
     if (
         summary_result.status is SummaryPreparationStatus.READY
         and summary_result.prepared is not None
@@ -403,4 +447,7 @@ async def prepare_problem(group_openid: str) -> PreparedProblem:
         min_rating=min_rating,
         max_rating=max_rating,
         prepared_at=int(time.time()),
+        figure_srcs=tuple(figure_srcs),
+        figure_captions=tuple(figure_captions),
+        figure_passage=figure_passage,
     )

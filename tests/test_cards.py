@@ -206,6 +206,103 @@ def test_problem_card_text_fallback_joins_with_blank_lines():
     assert text == "题面\n\n样例1\n\n样例2\n\n解释"
 
 
+def test_problem_card_nodes_inline_figure_passage():
+    nodes = build_problem_card_nodes(
+        post_msg="题面",
+        sample_messages=["样例"],
+        notes_message="",
+        snake_enabled=False,
+        bot_name=BOT_NAME,
+        figure_data=[(1, "data:image/png;base64,AAA"), (2, "data:image/png;base64,BBB")],
+        figure_captions=["Figure 1", "Figure 2"],
+        figure_passage="如 图 1 所示，棋盘如下。\n\n[[FIG_1]]\n[[FIG_2]]\n\n随后给出答案。",
+    )
+    assert [n["content_text"] for n in nodes] == [
+        "题面",
+        "如 图 1 所示，棋盘如下。",
+        "配图：图 1、图 2",
+        "随后给出答案。",
+        "样例",
+    ]
+    figure_node = nodes[2]
+    assert '<div class="figgrid">' in figure_node["content_html"]
+    assert '<figcaption>图 1</figcaption>' in figure_node["content_html"]
+    assert '<figcaption>图 2</figcaption>' in figure_node["content_html"]
+    assert "[[FIG_1]]" not in figure_node["content_html"]
+
+
+def test_problem_card_text_uses_stripped_figure_passage():
+    text = problem_card_text(
+        post_msg="题面",
+        sample_messages=["样例"],
+        figure_passage="如 图 1 所示。\n\n[[FIG_1]]",
+        figure_count=1,
+    )
+    assert text == "题面\n\n如 图 1 所示。\n\n（图 1）\n\n样例"
+
+
+def test_problem_card_nodes_inline_figures_in_notes():
+    nodes = build_problem_card_nodes(
+        post_msg="题面",
+        sample_messages=["样例"],
+        notes_message="样例解释：\n第一个测试的树：\n\n[[FIG_1]]\n\n第三个测试的树：",
+        snake_enabled=False,
+        bot_name=BOT_NAME,
+        figure_data=[(1, "data:image/png;base64,NNN")],
+    )
+    assert [n["content_text"] for n in nodes] == [
+        "题面",
+        "样例",
+        "样例解释：\n第一个测试的树：",
+        "配图：图 1",
+        "第三个测试的树：",
+    ]
+    assert '<div class="figgrid single">' in nodes[3]["content_html"]
+    assert '<img src="data:image/png;base64,NNN"' in nodes[3]["content_html"]
+
+
+def test_problem_card_text_strips_notes_figure_markers():
+    text = problem_card_text(
+        post_msg="题面",
+        sample_messages=[],
+        notes_message="样例解释：\n见图。\n\n[[FIG_1]]",
+    )
+    assert text == "题面\n\n样例解释：\n见图。\n\n（图 1）"
+
+
+def test_problem_card_nodes_insert_figure_gallery_after_post_msg():
+    nodes = build_problem_card_nodes(
+        post_msg="题面", sample_messages=["样例"], snake_enabled=False, bot_name=BOT_NAME,
+        figure_data=[(1, "data:image/png;base64,AAA"), (2, "data:image/png;base64,BBB")],
+    )
+    assert [n["content_text"] for n in nodes] == [
+        "题面",
+        "题目配图（2 张，见卡片长图）",
+        "样例",
+    ]
+    assert nodes[1]["content_html"] == (
+        '<h3>题目配图</h3>'
+        '<div class="figcap">图 1</div><img src="data:image/png;base64,AAA" alt="图 1">'
+        '<div class="figcap">图 2</div><img src="data:image/png;base64,BBB" alt="图 2">'
+    )
+    assert nodes[1]["nickname"] == BOT_NAME
+
+
+def test_problem_card_nodes_without_figures_unchanged():
+    nodes = build_problem_card_nodes(
+        post_msg="题面", sample_messages=["样例"], snake_enabled=False, figure_data=[],
+    )
+    assert [n["content_text"] for n in nodes] == ["题面", "样例"]
+
+
+def test_problem_card_text_mentions_figure_count():
+    text = problem_card_text(
+        post_msg="题面", sample_messages=["样例"], figure_count=3,
+    )
+    assert text == "题面\n\n（本题含 3 张配图，请在题目卡片长图中查看）\n\n样例"
+    assert problem_card_text(post_msg="题面", sample_messages=["样例"]) == "题面\n\n样例"
+
+
 # ── delivery: render → upload → media, text fallback ────────────────────
 
 
@@ -455,6 +552,67 @@ async def test_send_problem_card_prerendered_skips_render(sender, monkeypatch):
     assert sender._rest.md_uploads == [(b"CACHED", "problem_card.png")]
     assert sender._rest.uploads == []
     assert sender._rest.sent[0][1]["msg_type"] == 2
+
+
+async def test_send_problem_card_resolves_figures_into_gallery(sender, fake_render, monkeypatch):
+    async def _figs(srcs):
+        assert list(srcs) == ["https://x/f1.png"]
+        return [(1, "data:image/png;base64,AAA")]
+
+    monkeypatch.setattr("kouhai_bot.handlers.cards.figure_data_uris", _figs)
+    mid = await send_problem_card(
+        sender, G,
+        post_msg="题面", sample_messages=["样例"], snake_enabled=False,
+        figure_srcs=["https://x/f1.png"],
+    )
+    assert mid == "M1"
+    nodes = fake_render[0]["nodes"]
+    assert [n["content_text"] for n in nodes] == [
+        "题面", "题目配图（1 张，见卡片长图）", "样例",
+    ]
+
+
+async def test_send_problem_card_text_fallback_mentions_figures(sender, no_render, monkeypatch):
+    async def _figs(srcs):
+        return [(1, "data:image/png;base64,AAA"), (2, "data:image/png;base64,BBB")]
+
+    monkeypatch.setattr("kouhai_bot.handlers.cards.figure_data_uris", _figs)
+    mid = await send_problem_card(
+        sender, G, post_msg="题面", sample_messages=["样例"],
+        figure_srcs=["https://x/f1.png", "https://x/f2.png"],
+    )
+    assert mid == "M1"
+    payload = sender._rest.sent[0][1]
+    assert payload["content"] == (
+        "题面\n\n（本题含 2 张配图，请在题目卡片长图中查看）\n\n样例"
+    )
+
+
+async def test_prerender_embeds_figures(cache_cfg, monkeypatch):
+    captured: list[dict] = []
+
+    async def _png(nodes, **kwargs):
+        captured.append(nodes)
+        return b"PNGDATA"
+
+    async def _figs(srcs):
+        assert list(srcs) == ["https://x/f1.png"]
+        return [(1, "data:image/png;base64,AAA")]
+
+    monkeypatch.setattr("kouhai_bot.handlers.cards.render_card_png", _png)
+    monkeypatch.setattr("kouhai_bot.handlers.cards.snake_replace", lambda t: t)
+    monkeypatch.setattr("kouhai_bot.handlers.cards.figure_data_uris", _figs)
+
+    ok = await prerender_problem_card(
+        pid="542D", statement_sha256="b" * 64, summary="题意", model_tag="",
+        sample_messages=["样例"], notes_message="", snake_enabled=False,
+        figure_srcs=["https://x/f1.png"],
+        bot_name=BOT_NAME, bot_avatar_url="",
+    )
+    assert ok is True
+    assert [n["content_text"] for n in captured[0]] == [
+        "题意", "题目配图（1 张，见卡片长图）", "样例",
+    ]
 
 
 def test_problem_card_nodes_skip_empty_post_msg():

@@ -49,6 +49,39 @@ def statement_images(statement: object) -> list[dict]:
     ]
 
 
+def statement_figures(statement: object) -> list[dict[str, str]]:
+    """Non-formula statement figures (diagrams) with their captions, in order."""
+    figures: list[dict[str, str]] = []
+    for image in statement_images(statement):
+        if str(image.get("kind") or "") != "graphic":
+            continue
+        src = str(image.get("src") or "").strip()
+        if not src:
+            continue
+        figures.append({
+            "src": src,
+            "caption": str(image.get("caption") or "").strip(),
+        })
+    return figures
+
+
+def statement_figure_srcs(statement: object) -> list[str]:
+    """Non-formula statement figures (diagrams), in document order.
+
+    Formulas are inline math images and are intentionally excluded: the card
+    renders summary text, so only diagrams that the samples/notes refer to
+    ("Figure N") are worth embedding.
+    """
+    return [figure["src"] for figure in statement_figures(statement)]
+
+
+def statement_figure_passage(statement: object) -> str:
+    """Statement prose that explains the figures, with ``[[FIG_n]]`` markers."""
+    if not isinstance(statement, dict) or not statement_figure_srcs(statement):
+        return ""
+    return str(statement.get("figure_passage") or "").strip()
+
+
 def format_problem_statement_for_llm(statement: object) -> str:
     """Format one cached statement as stable LLM grounding text."""
     if not isinstance(statement, dict):

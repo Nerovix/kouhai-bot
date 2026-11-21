@@ -248,6 +248,9 @@ async def _post_new_problem_locked(
         model_tag = prepared.model_tag
         sample_messages = list(prepared.sample_messages)
         notes_message = prepared.notes_message
+        figure_srcs = list(prepared.figure_srcs)
+        figure_captions = list(prepared.figure_captions)
+        figure_passage = prepared.figure_passage
 
         try:
             schedule_prefetch_editorial(pid)
@@ -257,7 +260,7 @@ async def _post_new_problem_locked(
                 group_openid, pid, exc,
             )
 
-        bot_name = rt.sender.bot_name or "算法助手"
+        bot_name = rt.sender.bot_name or "KouhaiBot"
         cached = load_prerendered_problem_card(
             pid, prepared.statement_sha256,
             bot_name=bot_name, bot_avatar_url=rt.sender.bot_avatar_url,
@@ -280,6 +283,9 @@ async def _post_new_problem_locked(
             sample_messages=sample_messages,
             notes_message=notes_message,
             snake_enabled=True,
+            figure_srcs=figure_srcs,
+            figure_captions=figure_captions,
+            figure_passage=figure_passage,
             msg_id=message_id or None,
             browser=rt.browser,
             prerendered_png=prerendered_png,
@@ -300,6 +306,9 @@ async def _post_new_problem_locked(
             "sample_messages": sample_messages,
             "notes_message": notes_message,
             "snake_enabled": True,
+            "figure_srcs": figure_srcs,
+            "figure_captions": figure_captions,
+            "figure_passage": figure_passage,
         }, ensure_ascii=False)
         await posts.post_problem(
             db, group_openid, pid,

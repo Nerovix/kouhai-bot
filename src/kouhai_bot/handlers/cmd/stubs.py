@@ -13,6 +13,12 @@ from ..cards import load_prerendered_problem_card, send_problem_card
 from ..shared import format_points, high_difficulty_notice
 from ... import legacy_migration
 from ...db.repos import posts, problems
+from ...config import get_config
+from ...problem_content import (
+    load_statement_json,
+    statement_figure_passage,
+    statement_figures,
+)
 from ...render.forward_card import send_forward_card
 from ...render.html import build_scoreboard_html
 
@@ -50,10 +56,48 @@ async def _load_problem_card_cache(rt, db, pid: str) -> bytes | None:
         return None
     cached = load_prerendered_problem_card(
         pid, sha,
-        bot_name=rt.sender.bot_name or "算法助手",
+        bot_name=rt.sender.bot_name or "KouhaiBot",
         bot_avatar_url=rt.sender.bot_avatar_url,
     )
     return cached[0] if cached is not None else None
+
+
+async def _card_figure_payload(
+    db, pid: str, card: dict,
+) -> tuple[list[str], list[str], str]:
+    """Card figures + explanatory passage, falling back to the statement.
+
+    Cards posted before the figure fix have no persisted figure payload; the
+    statement catalog still carries the sources, captions, and the passage, so
+    /pb can render the same inline figures.
+    """
+    srcs = [str(s) for s in (card.get("figure_srcs") or []) if str(s).strip()]
+    captions = [str(s) for s in (card.get("figure_captions") or [])]
+    passage = str(card.get("figure_passage", "") or "")
+    if srcs or not pid:
+        return srcs, captions, passage
+    problem = await problems.get_problem(db, pid)
+    statement = load_statement_json(
+        pid,
+        data_dir=get_config().data_dir,
+        include_legacy_fallback=True,
+        log_context="cmd_stubs",
+    ) or (problem.get("statement") if problem else {})
+    figures = statement_figures(statement)
+    source_passage = statement_figure_passage(statement)
+    if source_passage:
+        from ...problem_preparation import translate_figure_passage
+        try:
+            translated, _tag = await translate_figure_passage(source_passage)
+            passage = translated or source_passage
+        except Exception as exc:
+            logger.warning("figure passage translation failed for %s: %s", pid, exc)
+            passage = source_passage
+    return (
+        [figure["src"] for figure in figures],
+        [figure["caption"] for figure in figures],
+        passage,
+    )
 
 
 async def resend_current_problem_group(
@@ -76,12 +120,18 @@ async def resend_current_problem_group(
     if isinstance(post_msg, str) and isinstance(sample_messages, list):
         pid = str(current.get("today", "") or "")
         prerendered_png = await _load_problem_card_cache(rt, db, pid)
+        figure_srcs, figure_captions, figure_passage = await _card_figure_payload(
+            db, pid, card,
+        )
         mid = await send_problem_card(
             rt.sender, group_openid,
             post_msg=post_msg,
             sample_messages=[str(s) for s in sample_messages],
             notes_message=str(card.get("notes_message", "") or ""),
             snake_enabled=bool(card.get("snake_enabled", True)),
+            figure_srcs=figure_srcs,
+            figure_captions=figure_captions,
+            figure_passage=figure_passage,
             msg_id=message_id or None,
             browser=rt.browser,
             prerendered_png=prerendered_png,
@@ -157,7 +207,7 @@ async def handle_scoreboard(ctx: Ctx) -> None:
     text = "\n".join(lines)
 
     rt = get_runtime()
-    bot_name = rt.sender.bot_name or "算法助手"
+    bot_name = rt.sender.bot_name or "KouhaiBot"
     nodes = [{
         "nickname": bot_name,
         "content_html": build_scoreboard_html(ranked, migration_note=migration_note),

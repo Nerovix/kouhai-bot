@@ -22,6 +22,14 @@ from ..config import get_config
 from ..official.keyboard import problem_action_keyboard
 from ..official.sender import OfficialSender
 from ..render.browser import RenderBrowser
+from ..render.figures import (
+    figure_data_uris,
+    figure_label,
+    figure_rows_html,
+    figures_html,
+    split_figure_markers,
+    strip_figure_markers,
+)
 from ..render.forward_card import render_card_png, send_forward_card
 from ..render.html import text_to_html
 from .shared import append_model_tag, record_kind, snake_replace, strip_model_tags
@@ -32,7 +40,7 @@ _SNAKE_PATH = Path(__file__).resolve().parents[3] / "snake_trio.jpg"
 
 # Bump when the card template/render pipeline changes so stale cached PNGs
 # (keyed below) are ignored and rebuilt instead of served forever.
-_PROBLEM_CARD_RENDER_VERSION = "1"
+_PROBLEM_CARD_RENDER_VERSION = "4"
 _PROBLEM_CARD_TITLE = "题目"
 
 # The card is sent as ONE markdown message: a small inline thumbnail of the
@@ -119,6 +127,9 @@ async def prerender_problem_card(
     bot_name: str,
     bot_avatar_url: str,
     snake_enabled: bool = True,
+    figure_srcs: list[str] | tuple[str, ...] | None = None,
+    figure_captions: list[str] | tuple[str, ...] | None = None,
+    figure_passage: str = "",
     browser: RenderBrowser | None = None,
 ) -> bool:
     """Render the problem card long image ahead of time and cache it.
@@ -128,12 +139,16 @@ async def prerender_problem_card(
     Returns True when a cache entry was written.
     """
     post_msg = build_problem_post_msg(summary, model_tag)
+    figure_data = await figure_data_uris(list(figure_srcs or ()))
     nodes = build_problem_card_nodes(
         post_msg=post_msg,
         sample_messages=list(sample_messages),
         notes_message=notes_message,
         snake_enabled=snake_enabled,
         bot_name=bot_name,
+        figure_data=figure_data,
+        figure_captions=figure_captions,
+        figure_passage=figure_passage,
     )
     if not nodes:
         return False
@@ -183,18 +198,95 @@ def _snake_node(bot_name: str) -> dict | None:
     }
 
 
+def _figure_passage_nodes(
+    *,
+    passage: str,
+    figure_data: list[tuple[int, str]],
+    captions: dict[int, str],
+    bot_name: str,
+) -> list[dict]:
+    """Interleave figure images with the prose that refers to them.
+
+    A standalone gallery forced readers to scroll between the explanation and
+    the pictures; here each run of ``[[FIG_n]]`` markers renders exactly where
+    the statement mentions the figure.
+    """
+    available = dict(figure_data)
+    nodes: list[dict] = []
+    pending: list[tuple[int, str]] = []
+
+    def flush_figures() -> None:
+        if not pending:
+            return
+        labels = "、".join(
+            figure_label(captions.get(number, ""), number) for number, _uri in pending
+        )
+        nodes.append({
+            "nickname": bot_name,
+            "content_html": figure_rows_html(list(pending), captions),
+            "content_text": f"配图：{labels}" if labels else "配图",
+        })
+        pending.clear()
+
+    for kind, value in split_figure_markers(passage):
+        if kind == "text":
+            text = value.strip()
+            if text:
+                flush_figures()
+                nodes.append(
+                    {"nickname": bot_name, "content_html": text_to_html(text), "content_text": text}
+                )
+            continue
+        number = int(value)
+        if number in available:
+            pending.append((number, available[number]))
+    flush_figures()
+    return nodes
+
+
 def build_problem_card_nodes(
     *,
     post_msg: str,
     sample_messages: list[str],
     notes_message: str = "",
     snake_enabled: bool = True,
-    bot_name: str = "算法助手",
+    bot_name: str = "KouhaiBot",
+    figure_data: list[tuple[int, str]] | tuple[tuple[int, str], ...] | None = None,
+    figure_captions: list[str] | tuple[str, ...] | None = None,
+    figure_passage: str = "",
 ) -> list[dict]:
     nodes = []
     if post_msg.strip():
         nodes.append(
             {"nickname": bot_name, "content_html": text_to_html(post_msg), "content_text": post_msg}
+        )
+    figure_data = list(figure_data or [])
+    captions = {
+        index: str(caption)
+        for index, caption in enumerate(list(figure_captions or ()), 1)
+        if str(caption).strip()
+    }
+    notes_has_figures = bool(figure_data) and any(
+        kind == "figure" for kind, _value in split_figure_markers(notes_message)
+    )
+    if figure_data and figure_passage.strip():
+        nodes.extend(
+            _figure_passage_nodes(
+                passage=figure_passage,
+                figure_data=figure_data,
+                captions=captions,
+                bot_name=bot_name,
+            )
+        )
+    elif figure_data and not notes_has_figures:
+        # Legacy fallback: figures without a placeable passage cannot sit next
+        # to their context, so keep them in one trailing block.
+        nodes.append(
+            {
+                "nickname": bot_name,
+                "content_html": "<h3>题目配图</h3>" + figures_html(figure_data),
+                "content_text": f"题目配图（{len(figure_data)} 张，见卡片长图）",
+            }
         )
     for sample in sample_messages:
         text = str(sample)
@@ -202,9 +294,21 @@ def build_problem_card_nodes(
             {"nickname": bot_name, "content_html": text_to_html(text), "content_text": text}
         )
     if notes_message:
-        nodes.append(
-            {"nickname": bot_name, "content_html": text_to_html(notes_message), "content_text": notes_message}
-        )
+        if notes_has_figures:
+            # Sample explanations can embed their own figures ("The tree in
+            # the first test: <img>"); render them where the text says so.
+            nodes.extend(
+                _figure_passage_nodes(
+                    passage=notes_message,
+                    figure_data=figure_data,
+                    captions=captions,
+                    bot_name=bot_name,
+                )
+            )
+        else:
+            nodes.append(
+                {"nickname": bot_name, "content_html": text_to_html(notes_message), "content_text": notes_message}
+            )
     if snake_enabled:
         snake = _snake_node(bot_name)
         if snake is not None:
@@ -214,10 +318,21 @@ def build_problem_card_nodes(
 
 def problem_card_text(
     *, post_msg: str, sample_messages: list[str], notes_message: str = "",
+    figure_count: int = 0, figure_passage: str = "",
 ) -> str:
-    parts = [post_msg, *[str(s) for s in sample_messages]]
+    parts = [post_msg]
+    notes_marked = any(
+        kind == "figure" for kind, _value in split_figure_markers(notes_message)
+    )
+    if figure_passage.strip():
+        parts.append(strip_figure_markers(figure_passage))
+    elif figure_count > 0 and not notes_marked:
+        parts.append(f"（本题含 {figure_count} 张配图，请在题目卡片长图中查看）")
+    parts.extend(str(s) for s in sample_messages)
     if notes_message:
-        parts.append(notes_message)
+        notes_text = strip_figure_markers(notes_message)
+        if notes_text.strip():
+            parts.append(notes_text)
     return "\n\n".join(p for p in parts if p.strip())
 
 
@@ -233,20 +348,29 @@ async def send_problem_card(
     sample_messages: list[str],
     notes_message: str = "",
     snake_enabled: bool = True,
+    figure_srcs: list[str] | tuple[str, ...] | None = None,
+    figure_captions: list[str] | tuple[str, ...] | None = None,
+    figure_passage: str = "",
     msg_id: str | None = None,
     browser: RenderBrowser | None = None,
     prerendered_png: bytes | None = None,
 ) -> str | None:
-    bot_name = sender.bot_name or "算法助手"
+    bot_name = sender.bot_name or "KouhaiBot"
+    figure_data = await figure_data_uris(list(figure_srcs or ()))
     nodes = build_problem_card_nodes(
         post_msg=post_msg,
         sample_messages=list(sample_messages),
         notes_message=notes_message,
         snake_enabled=snake_enabled,
         bot_name=bot_name,
+        figure_data=figure_data,
+        figure_captions=figure_captions,
+        figure_passage=figure_passage,
     )
     fallback = problem_card_text(
-        post_msg=post_msg, sample_messages=list(sample_messages), notes_message=notes_message,
+        post_msg=post_msg, sample_messages=list(sample_messages),
+        notes_message=notes_message, figure_count=len(figure_data),
+        figure_passage=figure_passage,
     )
     png = prerendered_png
     if png is None:
@@ -354,7 +478,7 @@ async def send_history_card(
     msg_id: str | None = None,
     browser: RenderBrowser | None = None,
 ) -> str | None:
-    bot_name = sender.bot_name or "算法助手"
+    bot_name = sender.bot_name or "KouhaiBot"
     nodes = build_history_card_nodes(
         records, user_name=user_name, bot_name=bot_name, user_avatar_url=user_avatar_url,
     )

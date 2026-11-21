@@ -113,8 +113,8 @@ def test_collect_blog_documents_does_not_refetch_rejected_url():
         return pages[url]
 
     with patch("cf_tutorial_agent.fetch_html", side_effect=fake_fetch), patch(
-        "cf_tutorial_agent.fetch_dynamic_editorial",
-        return_value=("", ""),
+        "cf_tutorial_agent.fetch_dynamic_editorial_with_figures",
+        return_value=("", "", []),
     ):
         _, _, blogs, incomplete = agent.collect_blog_documents(
             pid="1000B",
@@ -151,8 +151,8 @@ def test_collect_filters_rejected_urls_before_applying_candidate_limit():
         return _blog_page("<p>Remaining candidate body.</p>")
 
     with patch("cf_tutorial_agent.fetch_html", side_effect=fake_fetch), patch(
-        "cf_tutorial_agent.fetch_dynamic_editorial",
-        return_value=("", ""),
+        "cf_tutorial_agent.fetch_dynamic_editorial_with_figures",
+        return_value=("", "", []),
     ):
         _, _, blogs, incomplete = agent.collect_blog_documents(
             pid="1000B",
@@ -180,8 +180,8 @@ def test_collect_marks_bounded_candidate_search_incomplete():
         "cf_tutorial_agent.fetch_html",
         side_effect=lambda url, **_kwargs: pages[url],
     ), patch(
-        "cf_tutorial_agent.fetch_dynamic_editorial",
-        return_value=("", ""),
+        "cf_tutorial_agent.fetch_dynamic_editorial_with_figures",
+        return_value=("", "", []),
     ):
         _, _, blogs, incomplete = agent.collect_blog_documents(
             pid="1000B",
@@ -314,7 +314,7 @@ def test_agent_keeps_placeholder_retryable_without_dynamic_fetch_or_llm(tmp_path
         return pages[url]
 
     with patch("cf_tutorial_agent.fetch_html", side_effect=fake_fetch), \
-            patch("cf_tutorial_agent.fetch_dynamic_editorial") as dynamic_fetch, \
+            patch("cf_tutorial_agent.fetch_dynamic_editorial_with_figures") as dynamic_fetch, \
             patch("cf_tutorial_agent.chat_completion") as llm_call:
         with pytest.raises(agent.AgentIncomplete, match="invalid_blog_content"):
             asyncio.run(
@@ -367,7 +367,7 @@ def test_agent_skips_placeholder_and_sends_only_valid_blog_to_llm(tmp_path):
         )
 
     with patch("cf_tutorial_agent.fetch_html", side_effect=fake_fetch), \
-            patch("cf_tutorial_agent.fetch_dynamic_editorial", return_value=("", "")), \
+            patch("cf_tutorial_agent.fetch_dynamic_editorial_with_figures", return_value=("", "", [])), \
             patch("cf_tutorial_agent.chat_completion", side_effect=fake_chat_completion):
         result = asyncio.run(
             agent.run_agent_for_pid(
@@ -688,3 +688,103 @@ def test_extractor_messages_default_empty_sibling_codes():
     )
     payload = json.loads(messages[1]["content"])
     assert payload["problem_sibling_codes"] == []
+
+
+# ── editorial figures: extractor span → images ──────────────────────────
+
+
+async def test_extract_editorial_maps_selected_figure_markers(monkeypatch):
+    filler = "The solution uses a parity argument over columns. " * 6
+    body = (
+        f"### B. Target Problem\n{filler}\n\n"
+        "[[CFIMG_2]]\n\n"
+        "Middle explanation.\n\n"
+        "[[CFIMG_0]]\n\n"
+        "Then the answer follows.\n"
+        "Also see the last figure.\n"
+    )
+    blog = agent.BlogDocument(
+        blog_id="b1",
+        tutorial_url="https://codeforces.com/blog/entry/9",
+        tutorial_title="Editorial",
+        body=body,
+        figure_srcs=["https://x/s0.png", "https://x/s1.png", "https://x/s2.png"],
+    )
+
+    async def fake_chat_completion(messages, **kwargs):
+        return ChatCompletionResult(text='{"match": true}')
+
+    async def fake_parse(text, **kwargs):
+        return (
+            {
+                "match": True,
+                "section_title": "B. Target Problem",
+                "start_text": "The solution uses a parity argument",
+                "end_text": "Then the answer follows.",
+                "confidence": 0.9,
+                "reason": "",
+            },
+            "",
+        )
+
+    monkeypatch.setattr(agent, "chat_completion", fake_chat_completion)
+    monkeypatch.setattr(agent, "parse_json_with_llm_repair", fake_parse)
+
+    candidate, confidence, _reason = await agent.extract_editorial_from_blog(
+        pid="1000B",
+        problem_title="Target Problem",
+        problem_text="statement",
+        blog=blog,
+        timeout=5,
+        llm_text_limit=10000,
+    )
+
+    assert confidence == 0.9
+    assert candidate.section.images == ["https://x/s2.png", "https://x/s0.png"]
+    assert "CFIMG" not in candidate.section.solution
+    assert "CFIMG" not in candidate.section.raw_text
+
+
+async def test_extract_editorial_ignores_markers_after_span(monkeypatch):
+    filler = "The solution uses a parity argument over columns. " * 6
+    body = (
+        f"### B. Target Problem\n{filler}\n\n"
+        "Then the answer follows.\n\n"
+        "[[CFIMG_1]]\n"
+    )
+    blog = agent.BlogDocument(
+        blog_id="b1",
+        tutorial_url="https://codeforces.com/blog/entry/9",
+        tutorial_title="Editorial",
+        body=body,
+        figure_srcs=["https://x/s0.png", "https://x/s1.png"],
+    )
+
+    async def fake_chat_completion(messages, **kwargs):
+        return ChatCompletionResult(text='{"match": true}')
+
+    async def fake_parse(text, **kwargs):
+        return (
+            {
+                "match": True,
+                "section_title": "B. Target Problem",
+                "start_text": "The solution uses a parity argument",
+                "end_text": "Then the answer follows.",
+                "confidence": 0.9,
+                "reason": "",
+            },
+            "",
+        )
+
+    monkeypatch.setattr(agent, "chat_completion", fake_chat_completion)
+    monkeypatch.setattr(agent, "parse_json_with_llm_repair", fake_parse)
+
+    candidate, _confidence, _reason = await agent.extract_editorial_from_blog(
+        pid="1000B",
+        problem_title="Target Problem",
+        problem_text="statement",
+        blog=blog,
+        timeout=5,
+        llm_text_limit=10000,
+    )
+    assert candidate.section.images == []

@@ -401,3 +401,86 @@ def test_chunk_text_edges():
     assert ef._chunk_text("", 10) == [""]
     assert ef._chunk_text("abc", 0) == ["abc"]
     assert ef._chunk_text("abcde", 2) == ["ab", "cd", "e"]
+
+async def test_deliver_appends_figure_gallery(bound_db, cfg, rest, monkeypatch):
+    sha = await _seed_problem(bound_db)
+    await problems.upsert_editorial_source(
+        bound_db, PID,
+        tutorial_url=URL,
+        tutorial_title="Editorial",
+        sections_json=json.dumps(
+            [{"solution": LONG_EN, "images": ["https://codeforces.com/predownloaded/aa.png"]}]
+        ),
+        source_sha256="e" * 64,
+        statement_sha256=sha,
+    )
+    await problems.set_editorial_translation(bound_db, PID, LONG_ZH, "verified")
+
+    async def _figs(srcs):
+        assert list(srcs) == ["https://codeforces.com/predownloaded/aa.png"]
+        return [(1, "data:image/png;base64,AAA")]
+
+    monkeypatch.setattr(ef, "figure_data_uris", _figs)
+    card = AsyncMock(return_value="mid")
+    monkeypatch.setattr(ef, "send_forward_card", card)
+
+    assert await ef.deliver_official_tutorial(GROUP, PID) is True
+    nodes = card.await_args.args[2]
+    gallery = nodes[-1]
+    assert gallery["content_html"] == (
+        '<h3>题解配图</h3><div class="figgrid single">'
+        '<figure><img src="data:image/png;base64,AAA" alt="图 1">'
+        "<figcaption>图 1</figcaption></figure></div>"
+    )
+    assert gallery["content_text"] == "题解配图（1 张，见题解长图）"
+    payload = card.await_args.kwargs["text_fallback"]
+    assert payload.endswith("（本题解含 1 张配图，请在题解长图中查看）")
+    assert LONG_ZH in payload
+
+
+async def test_deliver_inlines_marked_figures(bound_db, cfg, rest, monkeypatch):
+    sha = await _seed_problem(bound_db)
+    await problems.upsert_editorial_source(
+        bound_db, PID,
+        tutorial_url=URL,
+        tutorial_title="Editorial",
+        sections_json=json.dumps(
+            [{"solution": LONG_EN, "images": ["https://codeforces.com/predownloaded/aa.png"]}]
+        ),
+        source_sha256="e" * 64,
+        statement_sha256=sha,
+    )
+    marked_zh = "先看图 1：\n\n[[FIG_1]]\n\n然后继续讨论做法。" + LONG_ZH
+    await problems.set_editorial_translation(bound_db, PID, marked_zh, "verified")
+
+    async def _figs(srcs):
+        return [(1, "data:image/png;base64,AAA")]
+
+    monkeypatch.setattr(ef, "figure_data_uris", _figs)
+    card = AsyncMock(return_value="mid")
+    monkeypatch.setattr(ef, "send_forward_card", card)
+
+    assert await ef.deliver_official_tutorial(GROUP, PID) is True
+    nodes = card.await_args.args[2]
+    texts = [node["content_text"] for node in nodes]
+    assert any(text.endswith("先看图 1：") for text in texts)
+    figure_index = next(
+        i for i, node in enumerate(nodes) if "figgrid" in node["content_html"]
+    )
+    assert nodes[figure_index]["content_text"] == "图 1"
+    assert "然后继续讨论做法" in texts[figure_index + 1]
+    assert all("题解配图" not in text for text in texts)
+    payload = card.await_args.kwargs["text_fallback"]
+    assert "[[FIG_1]]" not in payload
+    assert "（图 1）" in payload
+
+
+async def test_deliver_without_images_has_no_gallery(bound_db, cfg, rest, monkeypatch):
+    await _seed_verified(bound_db)
+    card = AsyncMock(return_value="mid")
+    monkeypatch.setattr(ef, "send_forward_card", card)
+
+    assert await ef.deliver_official_tutorial(GROUP, PID) is True
+    nodes = card.await_args.args[2]
+    assert all("题解配图" not in node["content_text"] for node in nodes)
+    assert "配图" not in card.await_args.kwargs["text_fallback"]

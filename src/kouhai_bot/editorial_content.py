@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 MIN_EDITORIAL_LEN = 80
@@ -26,6 +26,7 @@ class OfficialEditorial:
     text: str
     tutorial_url: str
     tutorial_title: str
+    images: list[str] = field(default_factory=list)
 
 
 def is_placeholder(text: str) -> bool:
@@ -96,10 +97,17 @@ def editorial_from_bundle(bundle: object) -> OfficialEditorial | None:
     text = extract_editorial(sections[0])
     if len(text) < MIN_EDITORIAL_LEN:
         return None
+    raw_images = sections[0].get("images") or []
+    images = [
+        str(src).strip()
+        for src in raw_images
+        if isinstance(src, str) and str(src).strip()
+    ]
     return OfficialEditorial(
         text=text,
         tutorial_url=(bundle.get("tutorial_url") or "").strip(),
         tutorial_title=(bundle.get("tutorial_title") or "").strip(),
+        images=images,
     )
 
 

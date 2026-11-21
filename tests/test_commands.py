@@ -1126,6 +1126,23 @@ async def test_problem_reuses_prerendered_cache(env, monkeypatch):
     assert env.rest.md_deletes == ["IMG1"]
 
 
+async def test_problem_resend_ignores_statement_figures(env):
+    statement = statement_payload("Test Problem")
+    statement["images"] = [
+        {"src": "https://x/g1.png", "kind": "graphic"},
+        {"src": "https://x/f1.png", "kind": "formula"},
+    ]
+    await seed_problem(env.db, statement=statement, card={
+        "post_msg": "题意简述正文",
+        "sample_messages": ["样例一"],
+        "snake_enabled": False,
+    })
+    await stubs.handle_problem(make_ctx("/problem"))
+    # Statement figures feed the explanation LLM only; the card stays
+    # summary + samples + generated pure-text explanation.
+    assert sent_texts(env.rest) == ["题意简述正文\n\n样例一"]
+
+
 # ── /help ───────────────────────────────────────────────────────────────
 
 

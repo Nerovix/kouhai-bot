@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
 from .. import registry
 from ..registry import CommandDef
 from ..context import Ctx
@@ -15,8 +13,6 @@ from ... import legacy_migration
 from ...db.repos import posts, problems
 from ...render.forward_card import send_forward_card
 from ...render.html import build_scoreboard_html
-
-logger = logging.getLogger("kouhai-bot.cmd.stubs")
 
 
 async def _notify(group_openid: str, user_openid: str, message_id: str, text: str) -> None:
@@ -50,7 +46,7 @@ async def _load_problem_card_cache(rt, db, pid: str) -> bytes | None:
         return None
     cached = load_prerendered_problem_card(
         pid, sha,
-        bot_name=rt.sender.bot_name or "算法助手",
+        bot_name=rt.sender.bot_name or "KouhaiBot",
         bot_avatar_url=rt.sender.bot_avatar_url,
     )
     return cached[0] if cached is not None else None
@@ -157,7 +153,7 @@ async def handle_scoreboard(ctx: Ctx) -> None:
     text = "\n".join(lines)
 
     rt = get_runtime()
-    bot_name = rt.sender.bot_name or "算法助手"
+    bot_name = rt.sender.bot_name or "KouhaiBot"
     nodes = [{
         "nickname": bot_name,
         "content_html": build_scoreboard_html(ranked, migration_note=migration_note),

@@ -16,6 +16,12 @@ from contextlib import suppress
 from .db.database import get_database
 from .db.repos import posts
 from .handlers.runtime import get_runtime
+from .render.figures import (
+    figure_data_uris,
+    figure_rows_html,
+    strip_figure_markers,
+    split_figure_markers,
+)
 from .render.forward_card import send_forward_card
 from .render.html import text_to_html
 from .tutorials import (
@@ -254,6 +260,45 @@ async def _editorial_payload(pid: str) -> str | None:
     return f"{header}\n\n{zh_text}"
 
 
+def _text_nodes(text: str, bot_name: str) -> list[dict]:
+    return [
+        {"nickname": bot_name, "content_html": text_to_html(chunk), "content_text": chunk}
+        for chunk in _chunk_text(text, _TUTORIAL_CARD_CHUNK_SIZE)
+        if chunk.strip()
+    ]
+
+
+def _inline_figure_nodes(text: str, figure_data: list[tuple[int, str]], bot_name: str) -> list[dict]:
+    """Interleave editorial figures with the prose that refers to them."""
+    available = dict(figure_data)
+    captions = {number: f"图 {number}" for number, _uri in figure_data}
+    nodes: list[dict] = []
+    pending: list[tuple[int, str]] = []
+
+    def flush_figures() -> None:
+        if not pending:
+            return
+        nodes.append({
+            "nickname": bot_name,
+            "content_html": figure_rows_html(list(pending), captions),
+            "content_text": "、".join(f"图 {number}" for number, _uri in pending),
+        })
+        pending.clear()
+
+    for kind, value in split_figure_markers(text):
+        if kind == "text":
+            prose = value.strip()
+            if prose:
+                flush_figures()
+                nodes.extend(_text_nodes(prose, bot_name))
+            continue
+        number = int(value)
+        if number in available:
+            pending.append((number, available[number]))
+    flush_figures()
+    return nodes
+
+
 async def deliver_official_tutorial(group_openid: str, pid: str) -> bool:
     """Deliver one verified, cached Chinese editorial as a long-image card."""
     payload = await _editorial_payload(pid)
@@ -264,11 +309,25 @@ async def deliver_official_tutorial(group_openid: str, pid: str) -> bool:
         )
         return False
     rt = get_runtime()
-    bot_name = rt.sender.bot_name or "算法助手"
-    nodes = [
-        {"nickname": bot_name, "content_html": text_to_html(chunk), "content_text": chunk}
-        for chunk in _chunk_text(payload, _TUTORIAL_CARD_CHUNK_SIZE)
-    ]
+    bot_name = rt.sender.bot_name or "KouhaiBot"
+    editorial = await get_verified_official_editorial(pid)
+    figure_data = await figure_data_uris(editorial.images if editorial else [])
+    marked = any(kind == "figure" for kind, _value in split_figure_markers(payload))
+    if marked and figure_data:
+        nodes = _inline_figure_nodes(payload, figure_data, bot_name)
+        payload = strip_figure_markers(payload)
+    else:
+        nodes = _text_nodes(payload, bot_name)
+        if marked:
+            payload = strip_figure_markers(payload)
+        if figure_data:
+            captions = {number: f"图 {number}" for number, _uri in figure_data}
+            nodes.append({
+                "nickname": bot_name,
+                "content_html": "<h3>题解配图</h3>" + figure_rows_html(figure_data, captions),
+                "content_text": f"题解配图（{len(figure_data)} 张，见题解长图）",
+            })
+            payload = f"{payload}\n\n（本题解含 {len(figure_data)} 张配图，请在题解长图中查看）"
     mid = await send_forward_card(
         rt.sender,
         group_openid,

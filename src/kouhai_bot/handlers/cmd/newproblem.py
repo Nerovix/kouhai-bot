@@ -257,7 +257,7 @@ async def _post_new_problem_locked(
                 group_openid, pid, exc,
             )
 
-        bot_name = rt.sender.bot_name or "算法助手"
+        bot_name = rt.sender.bot_name or "KouhaiBot"
         cached = load_prerendered_problem_card(
             pid, prepared.statement_sha256,
             bot_name=bot_name, bot_avatar_url=rt.sender.bot_avatar_url,

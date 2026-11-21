@@ -1899,50 +1899,211 @@ async def summarize_problem(
     return repaired, repaired_tag
 
 
-async def translate_sample_notes(
-    notes_text: str,
+_FIGURE_MARKER_RE = re.compile(r"\[\[FIG_(\d+)\]\]")
+
+
+def _figure_marker_numbers(text: str) -> list[int]:
+    return [int(m.group(1)) for m in _FIGURE_MARKER_RE.finditer(text or "")]
+
+
+_EDITORIAL_SEGMENT_RULES = (
+    "输出约束（严格执行）：\n"
+    "1) 只输出纯文本正文，不要标题或前言。\n"
+    "2) 逐句忠实翻译，不要压缩成概述；不要使用 Markdown、代码块、反引号、粗体或列表语法。\n"
+    "3) LaTeX 是最后手段：普通数组下标和幂次优先用 Unicode 角标，"
+    "不要输出 a_i、dp_i_j 这类下划线写法。"
+    f"{_SUMMARY_UNICODE_NOTATION_GUIDE}"
+    "4) 简单关系和运算直接使用可读字符：→、<、>、≤、≥、≠、×、÷、⊕、mod。\n\n"
+)
+
+
+async def _translate_figure_segments(text: str) -> str | None:
+    """Marker-free fallback: translate each prose run between figure markers."""
+    cfg = get_config()
+    from ..render.figures import split_figure_markers
+
+    pieces: list[str] = []
+    for kind, value in split_figure_markers(text):
+        if kind == "figure":
+            pieces.append(f"[[FIG_{value}]]")
+            continue
+        segment = value.strip()
+        if not segment:
+            continue
+        result = await call_chat_completion_result(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是算法竞赛选手。把下面这段官方题解文字忠实翻译成中文，"
+                        "只做翻译，不要总结或补充；输出纯文本，不要 Markdown。"
+                    ),
+                },
+                {"role": "user", "content": _EDITORIAL_SEGMENT_RULES + segment},
+            ],
+            task="summary",
+            timeout=cfg.summary_timeout_sec,
+        )
+        translated = (result.text or "").strip()
+        if not translated:
+            return None
+        pieces.append(translated)
+    joined = "\n\n".join(piece for piece in pieces if piece.strip())
+    return joined or None
+
+
+def _notes_source_payload(
+    *,
+    statement_text: str,
+    input_text: str,
+    limits_text: str,
+    samples: list[dict],
+    notes: str,
+    summary: str,
+    images: list[dict],
+) -> dict:
+    sample_items: list[dict] = []
+    for index, sample in enumerate(samples, 1):
+        if not isinstance(sample, dict):
+            continue
+        sample_items.append({
+            "index": index,
+            "input": str(sample.get("input", "") or ""),
+            "output": str(sample.get("output", "") or ""),
+        })
+    image_items: list[dict] = []
+    for index, image in enumerate(images, 1):
+        entry = {
+            "index": index,
+            "marker": str(image.get("marker") or f"IMAGE_{index}"),
+            "kind": str(image.get("kind") or ""),
+        }
+        caption = str(image.get("caption") or "").strip()
+        if caption:
+            entry["caption"] = caption
+        image_items.append(entry)
+    return {
+        "statement": statement_text or "",
+        "input": input_text or "",
+        "limits": limits_text or "",
+        "samples": sample_items,
+        "original_notes": notes or "",
+        "summary": summary or "",
+        "images": image_items,
+    }
+
+
+def _sample_explanation_target_chars(notes: str) -> int:
+    # Chinese is denser than the English source; 1.5× keeps the card short
+    # while leaving room to describe note figures in words.
+    return max(300, int(len(notes) * 1.5))
+
+
+def _build_sample_explanation_prompt(payload: dict, target_chars: int) -> str:
+    return (
+        "下面是 Codeforces 题目的完整素材：题面、题面配图（已随消息附上，题面里的 "
+        "[[IMAGE_n: kind]] 占位符对应第 n 张图）、全部样例、原题自带的样例解释 Notes、"
+        "已经写好的题意简述，以及配图清单（编号与附件顺序一致，caption 是原题图注）。\n\n"
+        "请写一段中文的样例解释，帮助群友理解这些样例。\n\n"
+        "硬性要求：\n"
+        "1. 只解释样例：为什么这个输入会得到这个输出、过程中发生了什么。不要写题解、算法、做法、复杂度，"
+        "不要给出原题样例解释里没有的结论或推广。\n"
+        "2. 原题样例解释依赖配图时，必须把图中关键内容用文字描述清楚（树的节点/边、棋盘/网格布局、"
+        "棋子位置、箭头和操作过程等），让读者不看图也能理解；直接描述图里发生了什么，"
+        "不要写“见图 1”“如图 1 所示”“题面配图”这类指路语，"
+        "不要输出 [[FIG_n]]、[[IMAGE_n]] 占位符或任何图片语法。\n"
+        f"3. 篇幅与原题样例解释基本相当（中文字数不超过约 {target_chars} 字），宁可精简，"
+        "不要逐句扩写成长篇推导；样例较多时按样例分成 2~4 个自然段，不要写成一个超长段落，"
+        "也不要标题、列表或编号。\n"
+        "4. 保留原题样例解释里列出的具体枚举、集合、操作序列、答案数值，不得省略，"
+        "不得用“等”“若干”代替。\n"
+        "5. 只输出纯文本正文：不要标题、列表、代码块、Markdown、LaTeX 公式环境。"
+        "普通数组下标和幂次优先用 Unicode 角标，也可写“第 i 个/标号为 i 的元素”；"
+        f"{_SUMMARY_UNICODE_NOTATION_GUIDE}"
+        "简单关系和运算直接用可读字符：→、<、>、≤、≥、≠、×、÷、⊕、mod。\n"
+        "6. 如果原题样例解释只有占位或几乎没有信息，用一句话说明样例即可。\n"
+        "7. 不要出现“原题”“原文”“样例解释”“题面”这类来源或元话语，也不要复述题意、算法或复杂度；"
+        "直接讲样例本身。\n"
+        "8. 以 original_notes 为主线：它详细解释了哪几组测试、按什么顺序，就按同样的顺序逐组讲清楚，"
+        "不得漏掉它展开的测试点；题面里的示例和配图只能用来补足细节，不要取代 Notes 的主体。\n\n"
+        "题面素材 JSON：\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+async def generate_sample_explanation(
+    *,
+    statement_text: str,
+    input_text: str,
+    limits_text: str,
+    samples: list[dict],
+    notes: str,
+    summary: str,
     images: list[dict] | None = None,
 ) -> tuple[str | None, str]:
-    """Translate sample notes/explanations into concise Chinese plain text."""
-    content = (notes_text or "").strip()
+    """Write a pure-text Chinese explanation for the original Notes.
+
+    One request carries everything the model needs to replace a figure:
+    the full statement text, every statement image (multimodal), all samples,
+    the original Notes, and the already-generated summary. When the Notes
+    depend on a figure, the model must describe it in words, so the card never
+    re-renders statement/notes figures. Returns ``(text, model_tag)``, or
+    ``(None, "")`` when the LLM fails.
+    """
+    content = (notes or "").strip()
     if not content:
         return None, ""
     cfg = get_config()
     image_items = _usable_statement_images(images)
-    prompt = (
-        "下面是题目中与样例相关的解释（Notes）。\n"
-        "请把它忠实翻译为自然、准确的中文；只做翻译，不要总结、点评、补充解释、改写成题解，"
-        "也不要加入原文没有的结论。\n"
-        "输出约束（严格执行）：\n"
-        "1) 只输出纯文本正文，不要标题或前言。\n"
-        "2) 保留原文段落结构；逐句翻译，不要把多句样例解释压成一句概述。不要使用 Markdown 标题、代码块、反引号、粗体、列表语法。\n"
-        "3) 样例中的枚举、集合、操作序列、答案数值必须完整保留；不要写省略号，不要用“等”“若干”代替原文列出的对象，不要中途截断。\n"
-        "4) LaTeX 是最后手段：普通数组下标和幂次优先用 Unicode 角标，如 aᵢ、a₁、a₂、aₙ、10¹⁸、10⁹+7；"
-        "不要输出普通下划线下标，如 a_i、dp_i_j、inc_i、pref_i；改写成 aᵢ、dpᵢⱼ、incᵢ、prefᵢ，或用自然语言。"
-        f"{_SUMMARY_UNICODE_NOTATION_GUIDE}"
-        "5) 简单关系和运算直接使用可读字符：→、<、>、≤、≥、≠、×、÷、⊕、mod 等；"
-        "\\{a,b\\} 写成集合 {a,b}，O(n^2) 写成 O(n²) 或 O(n^2)。\n"
-        "6) 禁止不必要的 LaTeX 命令，不要出现 \\( \\)、$$、代码围栏，"
-        "不要把简单的 \\lt、\\gt、\\leq、\\geq、\\times、\\oplus 原样留下；"
-        "只有复杂求和、递推、分式、多重下标、精确定义用中文或 Unicode 会失真时，才保留最少必要 LaTeX。\n\n"
-        f"{content}"
+    target_chars = _sample_explanation_target_chars(content)
+    payload = _notes_source_payload(
+        statement_text=statement_text,
+        input_text=input_text,
+        limits_text=limits_text,
+        samples=samples,
+        notes=content,
+        summary=summary,
+        images=image_items,
     )
-    result = await call_chat_completion_result(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "你是算法竞赛选手。你要把题目样例解释忠实翻译成中文，"
-                    "要求简洁、可读，且不得编造信息。只做翻译，不做总结；长枚举和操作序列也必须完整翻译，不得截断。"
-                    "你必须输出纯文本；LaTeX 只在不用会失真时保留，普通下标和幂次优先使用 Unicode 角标。"
-                ),
-            },
-            {"role": "user", "content": await _multimodal_content_or_text(prompt, image_items)},
-        ],
-        task="multimodal_summary" if image_items else "summary",
-        timeout=cfg.summary_timeout_sec,
+    prompt = _build_sample_explanation_prompt(payload, target_chars)
+    system = (
+        "你是算法竞赛选手，在 QQ 群里用中文给群友解释题目样例。"
+        "只写样例解释，不写题解、算法或做法；不得编造原题没有的信息。"
+        "必须输出纯文本；普通下标和幂次优先使用 Unicode 角标。"
     )
-    return result.text, result.model_tag
+
+    async def _request(user_prompt: str):
+        return await call_chat_completion_result(
+            [
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": await _multimodal_content_or_text(user_prompt, image_items),
+                },
+            ],
+            task="multimodal_summary" if image_items else "summary",
+            temperature=0.3,
+            timeout=cfg.summary_timeout_sec,
+        )
+
+    result = await _request(prompt)
+    text = (result.text or "").strip()
+    if not text:
+        return None, ""
+    if len(text) > target_chars * 2:
+        logger.info(
+            "sample explanation too long (%s chars, target %s); asking for a shorter version",
+            len(text), target_chars,
+        )
+        shortened = await _request(
+            prompt
+            + f"\n\n注意：上一次输出约 {len(text)} 字，太长了。请重新输出，"
+            f"压缩到 {target_chars} 字以内，同时保留全部具体数值和关键推理。"
+        )
+        shorter_text = (shortened.text or "").strip()
+        if shorter_text:
+            return shorter_text, shortened.model_tag
+    return text, result.model_tag
 
 
 async def translate_editorial_to_zh(
@@ -1997,6 +2158,8 @@ async def translate_editorial_to_zh(
                     "不要增删关键算法步骤，不要添加原文没有的内容。"
                     "result 输出连贯纯文本，尽量保留当前题章节的自然段；不要 Markdown 标题、列表语法、代码围栏，"
                     "不要写「以下是翻译」「总结」等套话。"
+                    "原文中的配图占位符（形如 [[FIG_n]]）必须原样保留：数量、顺序、相对位置都不得改变，"
+                    "每个占位符单独成行；原文中的 Figure 1、Fig. 2 等一律译为 图 1、图 2。"
                     "LaTeX/公式处理（重要）：默认不要用 LaTeX，不要输出 \\( \\)、$$ 或 $$$。"
                     "普通数组下标和幂次优先用 Unicode 角标，如 aᵢ、aⱼ、a₁、a₂、aₙ、aᵢ₊₁、x²、2ᵏ、10¹⁸、10⁹+7。"
                     "不要输出普通下划线下标，如 a_i、dp_i_j、inc_i、pref_i；改写成 aᵢ、dpᵢⱼ、incᵢ、prefᵢ，或用自然语言。"
@@ -2029,6 +2192,15 @@ async def translate_editorial_to_zh(
     translated = str(parsed.get("result", "") or "").strip()
     if not translated:
         return None, "", None
+    source_markers = _figure_marker_numbers(body)
+    if source_markers and _figure_marker_numbers(translated) != source_markers:
+        logger.warning("editorial translation lost figure markers; retrying per segment")
+        fallback = await _translate_figure_segments(body)
+        if fallback and _figure_marker_numbers(fallback) == source_markers:
+            translated = fallback
+        else:
+            from ..render.figures import strip_figure_markers
+            translated = strip_figure_markers(translated)
     return translated, repair_tag or result.model_tag, True
 
 

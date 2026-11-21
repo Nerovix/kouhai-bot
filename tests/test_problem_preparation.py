@@ -61,10 +61,10 @@ def statement_file(cfg):
 @pytest.fixture
 def mock_llm(monkeypatch):
     summarize = AsyncMock(return_value=("中文摘要", "『M』"))
-    translate = AsyncMock(return_value=("第一个样例把两个数相加。", "『M』"))
+    explain = AsyncMock(return_value=("第一个样例把两个数相加。", "『M』"))
     monkeypatch.setattr(pp, "summarize_problem", summarize)
-    monkeypatch.setattr(pp, "translate_sample_notes", translate)
-    return summarize, translate
+    monkeypatch.setattr(pp, "generate_sample_explanation", explain)
+    return summarize, explain
 
 
 def _mock_picker(monkeypatch, result=None, *, side_effect=None):
@@ -177,15 +177,55 @@ async def test_missing_statement_cache_is_terminal(bound_db, cfg, mock_llm, monk
     assert await posts.get_excluded_pids(bound_db, GROUP) == set()
 
 
-async def test_notes_translation_failure_skips_notes_node(bound_db, cfg, statement_file, mock_llm, monkeypatch):
-    _, translate = mock_llm
-    translate.side_effect = RuntimeError("llm down")
+async def test_notes_explanation_failure_skips_notes_node(bound_db, cfg, statement_file, mock_llm, monkeypatch):
+    _, explain = mock_llm
+    explain.side_effect = RuntimeError("llm down")
     _mock_picker(monkeypatch, dict(PICKED_STATE))
 
     prepared = await pp.prepare_problem(GROUP)
 
+    assert explain.await_count == pp.NOTES_ATTEMPTS
     assert prepared.notes_message == ""
     assert prepared.summary_status is SummaryPreparationStatus.READY
+
+
+async def test_notes_explanation_receives_source_material(bound_db, cfg, statement_file, mock_llm, monkeypatch):
+    _, explain = mock_llm
+    statement = dict(
+        STATEMENT,
+        description="Full statement [[IMAGE_1: graphic]]",
+        images=[
+            {"src": "https://x/g1.png", "kind": "graphic", "caption": "Figure 1"},
+            {"src": "https://x/f1.png", "kind": "formula"},
+        ],
+        notes="The tree in the first test:\n\n[[FIG_1]]",
+    )
+    statement_file.write_text(json.dumps(statement), encoding="utf-8")
+    _mock_picker(monkeypatch, dict(PICKED_STATE))
+
+    prepared = await pp.prepare_problem(GROUP)
+
+    kwargs = explain.await_args.kwargs
+    assert kwargs["statement_text"] == "Full statement [[IMAGE_1: graphic]]"
+    assert kwargs["samples"] == statement["samples"]
+    assert kwargs["notes"] == "The tree in the first test:"  # legacy marker stripped
+    assert kwargs["summary"] == "中文摘要"
+    assert [img["src"] for img in kwargs["images"]] == [
+        "https://x/g1.png", "https://x/f1.png",
+    ]
+    assert prepared.notes_message == "样例解释：\n第一个样例把两个数相加。"
+
+
+async def test_no_original_notes_skips_generation(bound_db, cfg, statement_file, mock_llm, monkeypatch):
+    _, explain = mock_llm
+    statement = dict(STATEMENT, notes="")
+    statement_file.write_text(json.dumps(statement), encoding="utf-8")
+    _mock_picker(monkeypatch, dict(PICKED_STATE))
+
+    prepared = await pp.prepare_problem(GROUP)
+
+    explain.assert_not_awaited()
+    assert prepared.notes_message == ""
 
 
 # --- picker subprocess boundary -------------------------------------------

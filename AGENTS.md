@@ -120,6 +120,26 @@ Transport: official/ (tokens/rest/gateway/sender/budget/media/keyboard)
   `thirdqq.qlogo.cn` JPEG) to base64 data URI (parallel, LRU+TTL, 60s negative cache);
   failure → letter-color circle. Bot avatar built-in `render/assets/bot_avatar.jpg` (READY
   `username` authoritative, no avatar field). Builders `handlers/cards.py`.
+- **Figures (题面/题解配图)**: problem cards never render statement or Notes figures
+  (owner rejected the "summary → long figure paragraph → explanation" shape). Statement
+  images (`statement["images"]`, formula + graphic, with captions and `[[IMAGE_n]]`
+  markers) are multimodal INPUT only: the summary request and the sample-explanation
+  request attach every statement image, and the model must express anything the
+  original Notes show in a figure as plain words — never "见图 N", never `[[FIG_n]]`.
+  The card is summary → samples → generated notes node → snake. A notes node exists
+  only when the original problem ships Notes (`problem_preparation.build_notes_message`;
+  no Notes ⇒ no generation, no node). Generation is one `shared.generate_sample_explanation`
+  request carrying full statement text, images, all samples, original Notes, and the
+  finished summary; it aims for roughly the original Notes length (hard ceiling ≈1.5×
+  source chars, one shortening retry), preserves enumerated values, emits plain text
+  with the summary's Unicode sub/superscript whitelist, and retries twice before the
+  node is skipped. Legacy cached Notes may still carry `[[FIG_n]]`; they are stripped
+  before generation and labeled `（图 N）` at card render as a last-resort sanitiser.
+  Editorial figures are unchanged: `tools/scrape_cf_tutorial.py` keeps blog `<img>` as
+  `[[CFIMG_n]]`, `localize_figure_markers` rewrites them to deduped 1-based `[[FIG_n]]`,
+  and delivery interleaves text + figure nodes (`render/figures.py:figure_rows_html`,
+  data-URI downloads cached under `{data_dir}/render_cache/statement_images/`). A
+  gallery is only a fallback when an editorial has images but no markers.
 - **Multi-group (D7/D15)**: dispatch serves any group sending an event (no `current_group`
   filter; membership is the gate). Worker keeps `group_openid → GroupServices` lazily **and
   seeds known groups from `group_posts` at startup** (prefetch/editorial resume). C2C/private
@@ -367,8 +387,9 @@ command, user_openid}), `has_active_problem_request`, `get_newproblem_status`.
   Classification `shared.record_kind`.
 - **`/newproblem`**: post lock; busy → reminder not queued. Cooldown starts after delivery
   (fallback `posted_at`). Claims READY slot (or awaits cold build); previous-problem reveal;
-  image card (summary+samples+optional notes+snake); commits `group_posts`+verified summary
-  only after delivery; releases slot, wakes refill. Plain unsolved → reject (exact
+  image card (summary + inline figure passage + samples + optional notes + snake); commits
+  `group_posts`+verified summary only after delivery; releases slot, wakes refill. Plain
+  unsolved → reject (exact
   `--force`, [查看当前题目] callback). Forced refresh announces skipped problem + cached
   editorial card. No 👀 (prefetched → fast). **No greeting** (lead = summary+tag+snake).
   **Pre-render**: prefetch renders long image once →

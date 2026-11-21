@@ -22,6 +22,7 @@ from ..config import get_config
 from ..official.keyboard import problem_action_keyboard
 from ..official.sender import OfficialSender
 from ..render.browser import RenderBrowser
+from ..render.figures import strip_figure_markers
 from ..render.forward_card import render_card_png, send_forward_card
 from ..render.html import text_to_html
 from .shared import append_model_tag, record_kind, snake_replace, strip_model_tags
@@ -32,7 +33,7 @@ _SNAKE_PATH = Path(__file__).resolve().parents[3] / "snake_trio.jpg"
 
 # Bump when the card template/render pipeline changes so stale cached PNGs
 # (keyed below) are ignored and rebuilt instead of served forever.
-_PROBLEM_CARD_RENDER_VERSION = "1"
+_PROBLEM_CARD_RENDER_VERSION = "5"
 _PROBLEM_CARD_TITLE = "题目"
 
 # The card is sent as ONE markdown message: a small inline thumbnail of the
@@ -189,7 +190,7 @@ def build_problem_card_nodes(
     sample_messages: list[str],
     notes_message: str = "",
     snake_enabled: bool = True,
-    bot_name: str = "算法助手",
+    bot_name: str = "KouhaiBot",
 ) -> list[dict]:
     nodes = []
     if post_msg.strip():
@@ -201,9 +202,12 @@ def build_problem_card_nodes(
         nodes.append(
             {"nickname": bot_name, "content_html": text_to_html(text), "content_text": text}
         )
-    if notes_message:
+    # Cards prepared before the note-explanation rewrite may still carry
+    # [[FIG_n]] markers; they must never leak into user-visible text.
+    notes_text = strip_figure_markers(notes_message)
+    if notes_text:
         nodes.append(
-            {"nickname": bot_name, "content_html": text_to_html(notes_message), "content_text": notes_message}
+            {"nickname": bot_name, "content_html": text_to_html(notes_text), "content_text": notes_text}
         )
     if snake_enabled:
         snake = _snake_node(bot_name)
@@ -215,9 +219,11 @@ def build_problem_card_nodes(
 def problem_card_text(
     *, post_msg: str, sample_messages: list[str], notes_message: str = "",
 ) -> str:
-    parts = [post_msg, *[str(s) for s in sample_messages]]
-    if notes_message:
-        parts.append(notes_message)
+    parts = [post_msg]
+    parts.extend(str(s) for s in sample_messages)
+    notes_text = strip_figure_markers(notes_message)
+    if notes_text.strip():
+        parts.append(notes_text)
     return "\n\n".join(p for p in parts if p.strip())
 
 
@@ -237,7 +243,7 @@ async def send_problem_card(
     browser: RenderBrowser | None = None,
     prerendered_png: bytes | None = None,
 ) -> str | None:
-    bot_name = sender.bot_name or "算法助手"
+    bot_name = sender.bot_name or "KouhaiBot"
     nodes = build_problem_card_nodes(
         post_msg=post_msg,
         sample_messages=list(sample_messages),
@@ -246,7 +252,8 @@ async def send_problem_card(
         bot_name=bot_name,
     )
     fallback = problem_card_text(
-        post_msg=post_msg, sample_messages=list(sample_messages), notes_message=notes_message,
+        post_msg=post_msg, sample_messages=list(sample_messages),
+        notes_message=notes_message,
     )
     png = prerendered_png
     if png is None:
@@ -354,7 +361,7 @@ async def send_history_card(
     msg_id: str | None = None,
     browser: RenderBrowser | None = None,
 ) -> str | None:
-    bot_name = sender.bot_name or "算法助手"
+    bot_name = sender.bot_name or "KouhaiBot"
     nodes = build_history_card_nodes(
         records, user_name=user_name, bot_name=bot_name, user_avatar_url=user_avatar_url,
     )

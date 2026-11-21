@@ -206,6 +206,33 @@ def test_problem_card_text_fallback_joins_with_blank_lines():
     assert text == "题面\n\n样例1\n\n样例2\n\n解释"
 
 
+def test_problem_card_nodes_strips_legacy_figure_markers():
+    # READY slots prepared before the note-explanation rewrite can still carry
+    # [[FIG_n]] markers; they must never leak into user-visible text.
+    nodes = build_problem_card_nodes(
+        post_msg="题面",
+        sample_messages=["样例"],
+        notes_message="样例解释：\n第一个测试的树：\n\n[[FIG_1]]\n\n第三个测试的树：",
+        snake_enabled=False,
+        bot_name=BOT_NAME,
+    )
+    assert [n["content_text"] for n in nodes] == [
+        "题面",
+        "样例",
+        "样例解释：\n第一个测试的树：\n\n（图 1）\n\n第三个测试的树：",
+    ]
+    assert "[[FIG_1]]" not in nodes[-1]["content_html"]
+
+
+def test_problem_card_text_strips_notes_figure_markers():
+    text = problem_card_text(
+        post_msg="题面",
+        sample_messages=[],
+        notes_message="样例解释：\n见图。\n\n[[FIG_1]]",
+    )
+    assert text == "题面\n\n样例解释：\n见图。\n\n（图 1）"
+
+
 # ── delivery: render → upload → media, text fallback ────────────────────
 
 
@@ -455,6 +482,20 @@ async def test_send_problem_card_prerendered_skips_render(sender, monkeypatch):
     assert sender._rest.md_uploads == [(b"CACHED", "problem_card.png")]
     assert sender._rest.uploads == []
     assert sender._rest.sent[0][1]["msg_type"] == 2
+
+
+async def test_send_problem_card_renders_note_explanation_node(sender, fake_render):
+    mid = await send_problem_card(
+        sender, G,
+        post_msg="题面", sample_messages=["样例"],
+        notes_message="样例解释：\n树是一个根连着两个叶子。",
+        snake_enabled=False,
+    )
+    assert mid == "M1"
+    nodes = fake_render[0]["nodes"]
+    assert [n["content_text"] for n in nodes] == [
+        "题面", "样例", "样例解释：\n树是一个根连着两个叶子。",
+    ]
 
 
 def test_problem_card_nodes_skip_empty_post_msg():

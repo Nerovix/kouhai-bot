@@ -5,12 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from .config import get_config
-from .llm import strip_leaked_thinking
 from .problems.content import normalize_sample_block
 
 logger = logging.getLogger("kouhai-bot.problem_content")
@@ -160,37 +158,3 @@ def build_sample_messages(
             f"Output:\n{normalized_output}"
         )
     return tuple(messages)
-
-
-async def build_notes_message(
-    statement: dict[str, Any],
-    *,
-    translate_notes: Callable[
-        [str, list[dict]],
-        Awaitable[tuple[str | None, str]],
-    ],
-    images: list[dict],
-    on_translate_exception: Literal["skip", "source"],
-    log_context: str = "",
-) -> str:
-    """Build the canonical Notes node while preserving caller fallback policy."""
-    normalized_notes = normalize_sample_block(statement.get("notes"))
-    if not normalized_notes:
-        return ""
-    try:
-        translated_notes, _model_tag = await translate_notes(
-            normalized_notes,
-            images,
-        )
-    except Exception as exc:
-        if on_translate_exception == "skip":
-            logger.warning(
-                "%sNotes translation failed, skipping notes node: %s",
-                f"{log_context}: " if log_context else "",
-                exc,
-            )
-            return ""
-        translated_notes = None
-
-    final_notes = strip_leaked_thinking(translated_notes or normalized_notes)
-    return f"样例解释：\n{final_notes}" if final_notes else ""

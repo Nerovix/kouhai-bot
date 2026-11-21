@@ -5,12 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from .config import get_config
-from .llm import strip_leaked_thinking
 from .problems.content import normalize_sample_block
 
 logger = logging.getLogger("kouhai-bot.problem_content")
@@ -47,39 +45,6 @@ def statement_images(statement: object) -> list[dict]:
         for item in images
         if isinstance(item, dict) and item.get("src")
     ]
-
-
-def statement_figures(statement: object) -> list[dict[str, str]]:
-    """Non-formula statement figures (diagrams) with their captions, in order."""
-    figures: list[dict[str, str]] = []
-    for image in statement_images(statement):
-        if str(image.get("kind") or "") != "graphic":
-            continue
-        src = str(image.get("src") or "").strip()
-        if not src:
-            continue
-        figures.append({
-            "src": src,
-            "caption": str(image.get("caption") or "").strip(),
-        })
-    return figures
-
-
-def statement_figure_srcs(statement: object) -> list[str]:
-    """Non-formula statement figures (diagrams), in document order.
-
-    Formulas are inline math images and are intentionally excluded: the card
-    renders summary text, so only diagrams that the samples/notes refer to
-    ("Figure N") are worth embedding.
-    """
-    return [figure["src"] for figure in statement_figures(statement)]
-
-
-def statement_figure_passage(statement: object) -> str:
-    """Statement prose that explains the figures, with ``[[FIG_n]]`` markers."""
-    if not isinstance(statement, dict) or not statement_figure_srcs(statement):
-        return ""
-    return str(statement.get("figure_passage") or "").strip()
 
 
 def format_problem_statement_for_llm(statement: object) -> str:
@@ -193,37 +158,3 @@ def build_sample_messages(
             f"Output:\n{normalized_output}"
         )
     return tuple(messages)
-
-
-async def build_notes_message(
-    statement: dict[str, Any],
-    *,
-    translate_notes: Callable[
-        [str, list[dict]],
-        Awaitable[tuple[str | None, str]],
-    ],
-    images: list[dict],
-    on_translate_exception: Literal["skip", "source"],
-    log_context: str = "",
-) -> str:
-    """Build the canonical Notes node while preserving caller fallback policy."""
-    normalized_notes = normalize_sample_block(statement.get("notes"))
-    if not normalized_notes:
-        return ""
-    try:
-        translated_notes, _model_tag = await translate_notes(
-            normalized_notes,
-            images,
-        )
-    except Exception as exc:
-        if on_translate_exception == "skip":
-            logger.warning(
-                "%sNotes translation failed, skipping notes node: %s",
-                f"{log_context}: " if log_context else "",
-                exc,
-            )
-            return ""
-        translated_notes = None
-
-    final_notes = strip_leaked_thinking(translated_notes or normalized_notes)
-    return f"样例解释：\n{final_notes}" if final_notes else ""

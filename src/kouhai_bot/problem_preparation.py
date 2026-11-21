@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -26,21 +27,15 @@ from typing import Any
 from .config import get_config
 from .db.database import get_database
 from .db.repos import posts, problems, users
-from .handlers.shared import (
-    summarize_problem,
-    translate_figure_passage,
-    translate_sample_notes,
-)
+from .handlers.shared import generate_sample_explanation, summarize_problem
+from .llm import strip_leaked_thinking
 from .problem_content import (
-    build_notes_message as build_shared_notes_message,
     build_sample_messages,
     load_statement_json,
-    statement_figure_passage,
-    statement_figures,
     statement_fingerprint,
     statement_images,
 )
-from .render.figures import figure_data_uris
+from .problems.content import normalize_sample_block
 from .problem_summary import (
     SummaryPreparationStatus,
     prepare_problem_summary,
@@ -51,6 +46,7 @@ logger = logging.getLogger("kouhai-bot.problem_preparation")
 PICKER_PATH = Path(__file__).resolve().parent / "problems" / "picker.py"
 PICK_ATTEMPTS = 3
 PICK_TIMEOUT_SEC = 120
+NOTES_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -67,9 +63,6 @@ class PreparedProblem:
     min_rating: int
     max_rating: int
     prepared_at: int
-    figure_srcs: tuple[str, ...] = ()
-    figure_captions: tuple[str, ...] = ()
-    figure_passage: str = ""
 
     @property
     def pid(self) -> str:
@@ -87,9 +80,6 @@ class PreparedProblem:
             "min_rating": self.min_rating,
             "max_rating": self.max_rating,
             "prepared_at": self.prepared_at,
-            "figure_srcs": list(self.figure_srcs),
-            "figure_captions": list(self.figure_captions),
-            "figure_passage": self.figure_passage,
         }
 
     @classmethod
@@ -102,16 +92,6 @@ class PreparedProblem:
             return None
         if not all(isinstance(item, str) for item in samples):
             return None
-        figure_srcs = value.get("figure_srcs") or []
-        if not isinstance(figure_srcs, list) or not all(
-            isinstance(item, str) for item in figure_srcs
-        ):
-            figure_srcs = []
-        figure_captions = value.get("figure_captions") or []
-        if not isinstance(figure_captions, list) or not all(
-            isinstance(item, str) for item in figure_captions
-        ):
-            figure_captions = []
         try:
             summary = str(value.get("summary", "") or "")
             model_tag = str(value.get("model_tag", "") or "")
@@ -127,9 +107,6 @@ class PreparedProblem:
                 min_rating=int(value["min_rating"]),
                 max_rating=int(value["max_rating"]),
                 prepared_at=int(value["prepared_at"]),
-                figure_srcs=tuple(figure_srcs),
-                figure_captions=tuple(figure_captions),
-                figure_passage=str(value.get("figure_passage", "") or ""),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -221,15 +198,49 @@ def classify_pick_error(stderr_text: str) -> str:
     return "题目选取失败，稍后再试"
 
 
-async def build_notes_message(statement: dict[str, Any]) -> str:
-    """Translate Notes with the existing group-post fallback behavior."""
-    return await build_shared_notes_message(
-        statement,
-        translate_notes=translate_sample_notes,
-        images=statement_images(statement),
-        on_translate_exception="skip",
-        log_context="group problem preparation",
-    )
+async def build_notes_message(statement: dict[str, Any], *, summary: str = "") -> str:
+    """Generate the Chinese sample-explanation node from the original Notes.
+
+    Only problems that ship an original Notes section get an explanation;
+    anything the Notes express through a figure is described in words by the
+    model rather than re-rendered in the card.
+    """
+    normalized_notes = normalize_sample_block(statement.get("notes"))
+    if not normalized_notes:
+        return ""
+    samples = statement.get("samples")
+    sample_items = samples if isinstance(samples, list) else []
+    # Notes cached by the removed inline-figure pipeline still carry
+    # [[FIG_n]] markers; the explanation must stand alone in plain text.
+    notes_text = re.sub(r"\[\[FIG_\d+\]\]", "", normalized_notes)
+    notes_text = re.sub(r"\n{3,}", "\n\n", notes_text).strip()
+    for attempt in range(1, NOTES_ATTEMPTS + 1):
+        try:
+            explanation, _model_tag = await generate_sample_explanation(
+                statement_text=str(statement.get("description", "") or ""),
+                input_text=str(statement.get("input", "") or ""),
+                limits_text=(
+                    f"Time: {statement.get('time_limit', '?')}, "
+                    f"Memory: {statement.get('memory_limit', '?')}"
+                ),
+                samples=sample_items,
+                notes=notes_text,
+                summary=summary,
+                images=statement_images(statement),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "sample explanation attempt %s/%s failed: %s",
+                attempt, NOTES_ATTEMPTS, exc, exc_info=True,
+            )
+            continue
+        final_notes = strip_leaked_thinking((explanation or "").strip())
+        if final_notes:
+            return f"样例解释：\n{final_notes}"
+    logger.warning("sample explanation unavailable after retries; skipping notes node")
+    return ""
 
 
 async def _stop_process(process: asyncio.subprocess.Process) -> None:
@@ -350,10 +361,6 @@ def _rating_value(value: object) -> int | None:
         return None
 
 
-async def _no_passage() -> tuple[str | None, str]:
-    return None, ""
-
-
 async def prepare_problem(group_openid: str) -> PreparedProblem:
     """Run the blocking group-card preparation pipeline ahead of time."""
     db = get_database()
@@ -401,27 +408,9 @@ async def prepare_problem(group_openid: str) -> PreparedProblem:
     await posts.mark_used(db, group_openid, pid)
 
     sample_messages = build_sample_messages(statement, include_explicit_empty=True)
-    notes_message = await build_notes_message(statement)
-    figures = statement_figures(statement)
-    figure_srcs = [figure["src"] for figure in figures]
-    figure_captions = [figure["caption"] for figure in figures]
-    source_passage = statement_figure_passage(statement)
-    if figure_srcs:
-        # Warm the on-disk figure cache during background preparation so the
-        # publication render embeds data URIs without waiting on the network.
-        await figure_data_uris(figure_srcs)
-    summary_result, passage_result = await asyncio.gather(
-        prepare_problem_summary(statement, generate=summarize_problem, attempts=2),
-        translate_figure_passage(source_passage) if source_passage else _no_passage(),
+    summary_result = await prepare_problem_summary(
+        statement, generate=summarize_problem, attempts=2,
     )
-    figure_passage = source_passage
-    if passage_result[0]:
-        figure_passage = passage_result[0]
-    else:
-        logger.warning(
-            "[group_%s] Figure passage translation unavailable; using source text",
-            group_openid,
-        )
     if (
         summary_result.status is SummaryPreparationStatus.READY
         and summary_result.prepared is not None
@@ -435,6 +424,7 @@ async def prepare_problem(group_openid: str) -> PreparedProblem:
             "[group_%s] Summary unavailable after retries: %s",
             group_openid, summary_result.reason,
         )
+    notes_message = await build_notes_message(statement, summary=summary)
 
     return PreparedProblem(
         state=dict(picked_state),
@@ -447,7 +437,4 @@ async def prepare_problem(group_openid: str) -> PreparedProblem:
         min_rating=min_rating,
         max_rating=max_rating,
         prepared_at=int(time.time()),
-        figure_srcs=tuple(figure_srcs),
-        figure_captions=tuple(figure_captions),
-        figure_passage=figure_passage,
     )

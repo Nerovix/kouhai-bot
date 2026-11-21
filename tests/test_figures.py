@@ -1,11 +1,14 @@
-"""Figure resolution and gallery HTML (render/figures.py + statement srcs)."""
+"""Figure resolution and marker helpers (render/figures.py).
+
+Statement/Notes figures are no longer rendered into problem cards; the helpers
+that remain feed editorial cards and marker sanitization.
+"""
 
 from __future__ import annotations
 
 import pytest
 
 from kouhai_bot.config import BotConfig
-from kouhai_bot.problem_content import statement_figure_srcs
 from kouhai_bot.render import figures
 
 
@@ -23,21 +26,19 @@ def test_ext_ignores_query_and_fragment_and_defaults_to_png():
     assert figures._ext("https://x/a/weird.svg") == ".png"
 
 
-def test_statement_figure_srcs_keeps_only_diagrams():
-    statement = {
-        "images": [
-            {"src": "https://x/f1.png", "kind": "formula"},
-            {"src": "https://x/g1.png", "kind": "graphic"},
-            {"src": "  ", "kind": "graphic"},
-            {"src": "https://x/g2.png", "kind": "graphic"},
-            "not a dict",
-        ]
-    }
-    assert statement_figure_srcs(statement) == [
-        "https://x/g1.png",
-        "https://x/g2.png",
+def test_strip_figure_markers_labels_legacy_markers():
+    assert figures.strip_figure_markers("见 [[FIG_1]]，然后 [[FIG_2]]") == "见 （图 1），然后 （图 2）"
+    assert figures.strip_figure_markers("无标记") == "无标记"
+    assert figures.strip_figure_markers("") == ""
+
+
+def test_split_figure_markers_keeps_source_numbers():
+    assert figures.split_figure_markers("前置 [[FIG_3]] 后置") == [
+        ("text", "前置 "),
+        ("figure", "3"),
+        ("text", " 后置"),
     ]
-    assert statement_figure_srcs({}) == []
+    assert figures.split_figure_markers("") == []
 
 
 async def test_resolve_keeps_source_numbers_when_one_figure_fails(cfg, monkeypatch):
@@ -90,16 +91,3 @@ def test_resolve_empty_input_returns_empty():
     import asyncio
 
     assert asyncio.run(run()) == []
-
-
-def test_figures_html_captions_use_source_numbers():
-    html = figures.figures_html(
-        [(1, "data:image/png;base64,AAA"), (4, "data:image/png;base64,BBB")]
-    )
-    assert html == (
-        '<div class="figcap">图 1</div>'
-        '<img src="data:image/png;base64,AAA" alt="图 1">'
-        '<div class="figcap">图 4</div>'
-        '<img src="data:image/png;base64,BBB" alt="图 4">'
-    )
-    assert figures.figures_html([]) == ""

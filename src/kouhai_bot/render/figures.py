@@ -117,15 +117,6 @@ async def figure_data_uris(
     ]
 
 
-def figures_html(figures: list[tuple[int, str]]) -> str:
-    """Bubble HTML for one figure gallery: a caption per figure above its image."""
-    parts: list[str] = []
-    for number, uri in figures:
-        label = f"图 {number}"
-        parts.append(f'<div class="figcap">{label}</div><img src="{uri}" alt="{label}">')
-    return "".join(parts)
-
-
 def split_figure_markers(text: str) -> list[tuple[str, str]]:
     """Split marked text into ``("text", chunk)`` / ``("figure", "3")`` items."""
     items: list[tuple[str, str]] = []
@@ -154,11 +145,6 @@ def _display_caption(caption: str, number: int) -> str:
     if match:
         return f"图 {match.group(1)}"
     return caption.strip()
-
-
-def figure_label(caption: str, number: int) -> str:
-    """Human label for a figure: ``Figure 3`` → ``图 3``, else the caption."""
-    return _display_caption(caption, number) or f"图 {number}"
 
 
 def figure_rows_html(

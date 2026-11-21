@@ -1,4 +1,4 @@
-"""Statement figure captions and the inline figure passage."""
+"""Statement figure caption mapping (image metadata for the explanation LLM)."""
 
 from kouhai_bot.problems import fetcher
 
@@ -22,48 +22,9 @@ def test_figure_captions_map_sources_to_labels():
     }
 
 
-def test_figure_passage_keeps_referencing_prose_and_markers():
-    passage = fetcher.extract_figure_passage(PROBLEM_HTML)
-    assert passage == (
-        "Consider the grid shown in Figure 1 and remember it.\n\n"
-        "[[FIG_1]] [[FIG_2]]\n\n"
-        "Figure 2 shows the state after the move."
-    )
-
-
-def test_figure_passage_empty_without_graphics():
+def test_figure_captions_empty_without_graphics():
     html = (
         '<div class="problem-statement"><p>No diagrams here.</p></div>'
         '<div class="input-specification"></div>'
     )
-    assert fetcher.extract_figure_passage(html) == ""
-
-
-NOTE_HTML = (
-    '<div class="problem-statement">'
-    '<div class="section-title">Input</div><p>n</p>'
-    '<div class="section-title">Note</div>'
-    '<div class="note">'
-    '<p>The tree in the first test: '
-    '<img class="tex-graphics" src="/predownloaded/n1.png"> One optimal permutation.</p>'
-    '<p>The tree in the third test: '
-    '<img class="tex-graphics" src="/predownloaded/n2.png"></p>'
-    '</div></div>'
-)
-
-
-def test_figure_notes_keep_markers_at_note_positions():
-    notes = fetcher.extract_figure_notes(NOTE_HTML)
-    assert notes == (
-        "The tree in the first test: [[FIG_1]] One optimal permutation.\n\n"
-        "The tree in the third test: [[FIG_2]]"
-    )
-
-
-def test_figure_notes_empty_without_note_graphics():
-    html = (
-        '<div class="problem-statement"><p>Figure 1 here.</p>'
-        '<img class="tex-graphics" src="/predownloaded/d1.png">'
-        '<div class="section-title">Note</div><p>Plain note.</p></div>'
-    )
-    assert fetcher.extract_figure_notes(html) == ""
+    assert fetcher.figure_captions(html) == {}

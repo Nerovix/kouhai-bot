@@ -120,31 +120,26 @@ Transport: official/ (tokens/rest/gateway/sender/budget/media/keyboard)
   `thirdqq.qlogo.cn` JPEG) to base64 data URI (parallel, LRU+TTL, 60s negative cache);
   failure → letter-color circle. Bot avatar built-in `render/assets/bot_avatar.jpg` (READY
   `username` authoritative, no avatar field). Builders `handlers/cards.py`.
-- **Figures (题面/题解配图)**: statement diagrams (`statement["images"]` with
-  `kind=graphic`; formulas excluded) and editorial figures are rendered inside the card
-  long image. `render/figures.py` downloads each remote figure once into
-  `{data_dir}/render_cache/statement_images/<sha1>.<ext>` and embeds it as a `data:` URI
-  (offline-deterministic render, same trick as the snake image); failures are dropped and
-  numbering follows the source position (`图 N`) so a missing figure never renumbers the
-  rest. **Figures are inline, never a detached gallery** (owner rejected the trailing
-  `题目配图`/`题解配图` gallery: images must sit next to the sentence that refers to
-  them). The statement description's figure paragraph is extracted verbatim
-  (`problems/fetcher.py:extract_figure_passage`) with `[[FIG_n]]` placeholders, so
-  `problem_preparation` carries `figure_passage` + `figure_captions` alongside
-  `figure_srcs`; `shared.translate_figure_passage` translates it while preserving every
-  marker (deterministic count/order check, per-segment retry when the LLM drops one, source
-  text fallback). `cards._figure_passage_nodes` splits the passage on markers and emits
-  one text bubble per prose run plus the figures referenced by that run (2-per-row grid,
-  `图 N` captions) — text that names those figures contains them. Sample
-  explanations often embed diagrams too: `fetcher.extract_figure_notes` keeps
-  `[[FIG_n]]` positions in the `notes` text, `translate_sample_notes` preserves/repairs
-  the markers, and the notes node renders through the same interleaving. `/pb` rebuilds
-  the same payload from the persisted `card_json`, or derives it from the cached
-  statement for legacy posts. Editorial: `tools/scrape_cf_tutorial.py` keeps blog `<img>` as
-  `[[CFIMG_n]]` markers through markdownish conversion; `localize_figure_markers` rewrites
-  the extractor span's markers to deduped 1-based `[[FIG_n]]` and returns `Section.images`
-  (translation keeps the markers; delivery interleaves text + figure nodes the same way).
-  A gallery is only a fallback when an editorial has images but no markers.
+- **Figures (题面/题解配图)**: problem cards never render statement or Notes figures
+  (owner rejected the "summary → long figure paragraph → explanation" shape). Statement
+  images (`statement["images"]`, formula + graphic, with captions and `[[IMAGE_n]]`
+  markers) are multimodal INPUT only: the summary request and the sample-explanation
+  request attach every statement image, and the model must express anything the
+  original Notes show in a figure as plain words — never "见图 N", never `[[FIG_n]]`.
+  The card is summary → samples → generated notes node → snake. A notes node exists
+  only when the original problem ships Notes (`problem_preparation.build_notes_message`;
+  no Notes ⇒ no generation, no node). Generation is one `shared.generate_sample_explanation`
+  request carrying full statement text, images, all samples, original Notes, and the
+  finished summary; it aims for roughly the original Notes length (hard ceiling ≈1.5×
+  source chars, one shortening retry), preserves enumerated values, emits plain text
+  with the summary's Unicode sub/superscript whitelist, and retries twice before the
+  node is skipped. Legacy cached Notes may still carry `[[FIG_n]]`; they are stripped
+  before generation and labeled `（图 N）` at card render as a last-resort sanitiser.
+  Editorial figures are unchanged: `tools/scrape_cf_tutorial.py` keeps blog `<img>` as
+  `[[CFIMG_n]]`, `localize_figure_markers` rewrites them to deduped 1-based `[[FIG_n]]`,
+  and delivery interleaves text + figure nodes (`render/figures.py:figure_rows_html`,
+  data-URI downloads cached under `{data_dir}/render_cache/statement_images/`). A
+  gallery is only a fallback when an editorial has images but no markers.
 - **Multi-group (D7/D15)**: dispatch serves any group sending an event (no `current_group`
   filter; membership is the gate). Worker keeps `group_openid → GroupServices` lazily **and
   seeds known groups from `group_posts` at startup** (prefetch/editorial resume). C2C/private

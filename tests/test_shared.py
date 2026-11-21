@@ -24,6 +24,7 @@ from kouhai_bot.handlers.shared import (
     _summary_symbol_scope_issues,
     call_chat_completion,
     format_points,
+    generate_sample_explanation,
     get_judge_prompt,
     call_chat_completion_result,
     check_contests_for_group,
@@ -40,7 +41,6 @@ from kouhai_bot.handlers.shared import (
     snake_replace,
     summarize_problem,
     translate_editorial_to_zh,
-    translate_sample_notes,
 )
 from kouhai_bot.llm import (
     ChatCompletionResult,
@@ -631,7 +631,7 @@ def test_summarize_problem_with_images_uses_multimodal_task():
     assert content[-1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
 
 
-def test_translate_sample_notes_with_images_uses_multimodal_task():
+def test_generate_sample_explanation_with_images_uses_multimodal_task():
     provider = LlmProviderConfig(
         name="mmx",
         api_key="sk-test",
@@ -649,9 +649,14 @@ def test_translate_sample_notes_with_images_uses_multimodal_task():
     with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
             patch("kouhai_bot.handlers.shared._download_image_data_url_async", AsyncMock(return_value="data:image/png;base64,abc")), \
             patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call):
-        text, tag = asyncio.run(translate_sample_notes(
-            "The diagram is [[IMAGE_1: graphic]].",
-            [{"src": "https://codeforces.com/p.png", "kind": "graphic", "marker": "IMAGE_1"}],
+        text, tag = asyncio.run(generate_sample_explanation(
+            statement_text="The diagram is [[IMAGE_1: graphic]].",
+            input_text="input spec",
+            limits_text="Time: 2s",
+            samples=[{"input": "1 2", "output": "3"}],
+            notes="See the diagram.",
+            summary="题意简述",
+            images=[{"src": "https://codeforces.com/p.png", "kind": "graphic", "marker": "IMAGE_1"}],
         ))
 
     assert text == "样例图解释"
@@ -659,8 +664,71 @@ def test_translate_sample_notes_with_images_uses_multimodal_task():
     assert calls[0]["task"] == "multimodal_summary"
     content = calls[0]["messages"][1]["content"]
     assert isinstance(content, list)
-    assert "IMAGE_1" in content[1]["text"]
+    assert "IMAGE_1" in content[0]["text"]
+    assert "Unicode 角标白名单" in content[0]["text"]
+    assert "原题样例解释" in content[0]["text"]
     assert content[-1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
+
+
+def test_generate_sample_explanation_without_notes_skips_llm():
+    async def fake_call(messages, **kwargs):
+        raise AssertionError("must not call the LLM without original Notes")
+
+    with patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call):
+        result = asyncio.run(generate_sample_explanation(
+            statement_text="stmt", input_text="in", limits_text="limits",
+            samples=[], notes="   ", summary="",
+        ))
+    assert result == (None, "")
+
+
+def test_generate_sample_explanation_retries_when_too_long():
+    provider = LlmProviderConfig(
+        name="gen", api_key="sk-test", base_url="http://localhost:8080/v1", model="gen-model",
+    )
+    cfg = _openai_cfg(llm_general_providers=[provider], summary_timeout_sec=123)
+    calls = []
+    long_text = "长" * 2000
+    short_text = "简短解释。"
+
+    async def fake_call(messages, **kwargs):
+        calls.append(messages)
+        text = long_text if len(calls) == 1 else short_text
+        return ChatCompletionResult(text=text, model_tag="『G』")
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call):
+        text, tag = asyncio.run(generate_sample_explanation(
+            statement_text="stmt", input_text="in", limits_text="limits",
+            samples=[], notes="A short note.", summary="",
+        ))
+
+    assert len(calls) == 2
+    assert "太长了" in calls[1][-1]["content"]
+    assert (text, tag) == (short_text, "『G』")
+
+
+def test_generate_sample_explanation_keeps_overlong_text_if_retry_empty():
+    provider = LlmProviderConfig(
+        name="gen", api_key="sk-test", base_url="http://localhost:8080/v1", model="gen-model",
+    )
+    cfg = _openai_cfg(llm_general_providers=[provider], summary_timeout_sec=123)
+    long_text = "长" * 2000
+    calls = []
+
+    async def fake_call(messages, **kwargs):
+        calls.append(messages)
+        return ChatCompletionResult(text=long_text if len(calls) == 1 else "", model_tag="『G』")
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call):
+        text, tag = asyncio.run(generate_sample_explanation(
+            statement_text="stmt", input_text="in", limits_text="limits",
+            samples=[], notes="A short note.", summary="",
+        ))
+
+    assert len(calls) == 2
+    assert (text, tag) == (long_text, "『G』")
 
 
 def test_translate_editorial_with_images_uses_multimodal_task():
@@ -812,7 +880,10 @@ def test_task_entrypoints_are_blackbox_except_model_class_and_tag():
             task="review",
         ))
         summary, summary_tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
-        notes, notes_tag = asyncio.run(translate_sample_notes("1 goes to 2"))
+        notes, notes_tag = asyncio.run(generate_sample_explanation(
+            statement_text="stmt", input_text="input", limits_text="limits",
+            samples=[], notes="1 goes to 2", summary="",
+        ))
         editorial, editorial_tag, matched = asyncio.run(translate_editorial_to_zh(
             "official editorial",
             pid="1A",

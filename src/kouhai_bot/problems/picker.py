@@ -342,8 +342,6 @@ def fetch_statement(problem: dict) -> object:
                 else:
                     # Text-only problem, mark as processed and use as-is.
                     cached["_images_collected"] = True
-                    cached["_figure_passage_collected"] = True
-                    cached["_note_figures_collected"] = True
                     cached["_vl_processed"] = True
                     cached.setdefault("images", [])
                     with open(cache_file, "w") as f:
@@ -356,33 +354,10 @@ def fetch_statement(problem: dict) -> object:
                         json.dump(cached, f, ensure_ascii=False)
                 return cached
         else:
-            graphics = [
-                image
-                for image in (cached.get("images") or [])
-                if isinstance(image, dict) and image.get("kind") == "graphic"
-            ]
-            if graphics and (
-                not cached.get("_figure_passage_collected")
-                or not cached.get("_note_figures_collected")
-            ):
-                # Statements cached before inline figure placement existed
-                # cannot put figures next to the prose that explains them
-                # (description passage or sample-explanation figures).
-                print(f"[{pid}] stale cache (no inline figure data), re-fetching",
-                      file=sys.stderr)
-                os.remove(cache_file)
-                # Fall through to re-process below
-            else:
-                if not cached.get("_figure_passage_collected"):
-                    cached["_figure_passage_collected"] = True
-                    cached_changed = True
-                if not cached.get("_note_figures_collected"):
-                    cached["_note_figures_collected"] = True
-                    cached_changed = True
-                if cached_changed:
-                    with open(cache_file, "w") as f:
-                        json.dump(cached, f, ensure_ascii=False)
-                return cached
+            if cached_changed:
+                with open(cache_file, "w") as f:
+                    json.dump(cached, f, ensure_ascii=False)
+            return cached
 
     # Fetch once, then share the same rendered document between statement/image
     # extraction and title/limits/sample parsing.
@@ -445,7 +420,6 @@ def fetch_statement(problem: dict) -> object:
         result["description"] = desc
         result["images"] = images if isinstance(images, list) else []
         result["has_images"] = bool(result["images"])
-        result["figure_passage"] = str(cf_result.get("figure_passage") or "")
 
         # Extract Input spec from raw HTML
         inp_m = re.search(
@@ -480,18 +454,13 @@ def fetch_statement(problem: dict) -> object:
                 re.DOTALL,
             )
             if note_m:
-                # Keep figure positions when the Note embeds diagrams, so the
-                # card can render them inside the sample explanation. The legacy
-                # tag-stripping path below remains for figure-free notes.
-                note = cf_statement.extract_figure_notes(ps_html)
-                if not note:
-                    # MathJax-rendered pages carry each formula three times
-                    # (visible <nobr>, assistive MathML, TeX <script>); normalize
-                    # before tag-stripping so digits are not tripled.
-                    note = cf_statement.normalize_mathjax(note_m.group(1))
-                    note = re.sub(r"<[^>]+>", "", note)
-                    note = re.sub(r"\s+", " ", note).strip()
-                    note = re.sub(r"\$\$\$|\$\$|\$", "", note)
+                # MathJax-rendered pages carry each formula three times
+                # (visible <nobr>, assistive MathML, TeX <script>); normalize
+                # before tag-stripping so digits are not tripled.
+                note = cf_statement.normalize_mathjax(note_m.group(1))
+                note = re.sub(r"<[^>]+>", "", note)
+                note = re.sub(r"\s+", " ", note).strip()
+                note = re.sub(r"\$\$\$|\$\$|\$", "", note)
                 result["notes"] = note
 
         # Sanity: reject if description contains raw image URLs
@@ -509,8 +478,6 @@ def fetch_statement(problem: dict) -> object:
     # Cache and return
     result["_vl_processed"] = True
     result["_images_collected"] = True
-    result["_figure_passage_collected"] = True
-    result["_note_figures_collected"] = True
     with open(cache_file, "w") as f:
         json.dump(result, f, ensure_ascii=False)
 

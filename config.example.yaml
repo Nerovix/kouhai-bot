@@ -15,7 +15,7 @@ official:
   sandbox: false                 # 沙箱环境官方已基本废弃（管理员可直接体验测试），一般保持 false
   # api_base: "https://api.bot.qq.com"      # 默认 REST 域名（2026-08-10 起官方统一为此域名）
   # token_base: "https://api.bot.qq.com"    # 默认 access_token 域名
-  # intents: 50331648            # 默认 群+C2C(1<<25) | 互动(1<<26) | 群成员(1<<24)
+  # intents: 117440512           # 默认 群+C2C(1<<25) | 互动(1<<26) | 群成员(1<<24)
                                  # 热迁移按昵称即时匹配老用户，需要群开启「获取群内全部消息」(GROUP_MESSAGE_CREATE)
 
 # ── LLM 配置 ──
@@ -30,7 +30,7 @@ llm:
   review_timeout_sec: 600        # 复盘超时
   summary_timeout_sec: 120       # 摘要 / 题解翻译超时
 
-  # ── smart_model：判题 (/submit) 和复盘 (/review) ──
+  # ── smart_model：判题 (/sbm) 和复盘 (/rv) ──
   # 需要强推理能力，建议使用顶级模型。不要降低 reasoning_effort。
   smart_model:
     - name: "openai"
@@ -51,9 +51,9 @@ llm:
     #   stream: true
 
   # ── general_model：判题复盘之外的一切 ──
-  # 题面摘要、样例解释、题解爬取翻译、/clarify（含带图题面）、JSON 修复等。
+  # 题面摘要、样例解释、题解爬取翻译、/clrf（含带图题面）、JSON 修复等。
   # 可以用更便宜的模型，但**必须支持图片输入 (vision)**：
-  # 带图题面（公式图、示意图）的摘要和澄清也走这个队列。
+  # 带图题面（公式图、示意图）的摘要、样例解释和澄清也走这个队列。
   general_model:
     - name: "openai"
       api_key: "sk-..."
@@ -86,8 +86,8 @@ llm:
 problem:
   min_rating: 2600               # 全局最低难度
   max_rating: 2800               # 全局最高难度
-  newproblem_cooldown: 300       # /newproblem 冷却时间（秒）
-  # submit_ac_backdoor: ""       # 非空时，包含该字符串的 /submit 直接判对（调试用）
+  newproblem_cooldown: 300       # /np 冷却时间（秒）
+  # submit_ac_backdoor: ""       # 非空时，包含该字符串的 /sbm 直接判对（调试用）
 
 # ── 数据目录 ──
 # SQLite 数据库 (kouhai.db)、题面缓存镜像、题解、日志、pidfile 都在此目录下。

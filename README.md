@@ -26,11 +26,6 @@ clone 仓库并用 `uv` 管理依赖：
 git clone https://github.com/Nerovix/kouhai-bot.git
 cd kouhai-bot
 uv sync
-```
-
-长图卡片渲染需要 Playwright Chromium：
-
-```bash
 uv run playwright install chromium
 ```
 

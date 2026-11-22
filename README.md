@@ -144,7 +144,7 @@ uv run python -m pytest tests/ -v
 
 ## 开销
 
-纯 chatbot，token 开销很少。测试中每天不超过 1-2M tokens；用 DeepSeek V4 Pro 约每日 2-3r。
+纯 chatbot，token 开销很少。
 
 ## Bot 的诞生
 

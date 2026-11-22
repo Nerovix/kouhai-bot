@@ -21,7 +21,7 @@ import pytest
 
 from kouhai_bot.config import BotConfig
 from kouhai_bot.db import set_database
-from kouhai_bot.db.repos import feedback, posts, problems, submissions, users
+from kouhai_bot.db.repos import posts, problems, submissions, users
 from kouhai_bot.editorial_content import OfficialEditorial, bundle_for_editorial
 from kouhai_bot.handlers import process_event, registry
 from kouhai_bot.handlers.cmd import clear as clear_cmd
@@ -316,10 +316,6 @@ async def test_submit_correct_first_blood_scores_cheers_and_reveals(env, monkeyp
     assert records[0]["model_tag"] == TAG
     assert records[0]["request_id"]
 
-    # last-interaction cache updated for /feedback
-    cached = await feedback.get_last_interaction(env.db, G, U)
-    assert cached["result"] == "correct"
-
     # editorial follow-up scheduled exactly once, outside finalize
     assert env.followups == [(G, PID)]
 
@@ -400,7 +396,6 @@ async def test_submit_offtopic_removes_pending_record(env, monkeypatch):
     assert texts == [f"{at_tag()} 👀", f"{at_tag()} 🙅"]  # tiny @-emoji acks, no verdict text
     records = await submissions.get_user_problem_submissions(env.db, G, U, PID)
     assert records == []  # pending archive removed by request_id
-    assert await feedback.get_last_interaction(env.db, G, U) is None
 
 
 async def test_clarify_offtopic_removes_pending_record(env, monkeypatch):
@@ -426,9 +421,6 @@ async def test_submit_judge_failure_saves_service_unavailable(env, monkeypatch):
     assert texts[1] == f"{at_tag()} 模型服务出故障了，联系一下管理员帮帮忙吧～"
     records = await submissions.get_user_problem_submissions(env.db, G, U, PID)
     assert records[0]["result"] == "timeout"
-    # failure notices are markable by /feedback
-    cached = await feedback.get_last_interaction(env.db, G, U)
-    assert cached["result"] == "timeout"
 
 
 async def test_submit_missing_statement(env, monkeypatch):
@@ -640,8 +632,6 @@ async def test_clarify_replies_with_markdown_at(env, monkeypatch):
     assert records[0]["type"] == "clarify"
     assert records[0]["result"] == "clarify"
     assert records[0]["reply"] == "n ≤ 1e5 哦～"
-    cached = await feedback.get_last_interaction(env.db, G, U)
-    assert cached["result"] == "clarify"
 
 
 async def test_clarify_uses_verified_summary(env, monkeypatch):
@@ -794,8 +784,6 @@ async def test_clear_removes_current_problem_history_and_acks(env, monkeypatch):
     await clear_cmd.handle(make_ctx("/clear"))
     assert sent_texts(env.rest) == [f"{at_tag()} 👌"]
     assert await submissions.get_user_problem_submissions(env.db, G, U, PID) == []
-    # the last-interaction cache survives /clear (feedback still works)
-    assert (await feedback.get_last_interaction(env.db, G, U))["result"] == "incorrect"
 
 
 async def test_clear_only_touches_current_problem_and_caller(env, monkeypatch):
@@ -1161,7 +1149,6 @@ async def test_help_generated_from_registry(env):
     assert "/sbm 你的做法 — 提交你的做法，AI 判题" in help_text
     assert "short for submit" in help_text
     assert "/clrf" in help_text
-    assert "/fb" in help_text
     assert "/np" in help_text
     assert "/range [最小-最大]" in help_text
     assert "/np — 来一道新题" in help_text

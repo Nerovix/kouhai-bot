@@ -1,6 +1,6 @@
 """Tests for the official-native command registry and auto-discovery.
 
-The finalized command set is 13 commands with 6 short aliases. Each test runs
+The finalized command set is 12 commands with 5 short aliases. Each test runs
 against an isolated registry dict so discovery/registration never leaks into
 other tests (and vice versa).
 """
@@ -18,7 +18,7 @@ from kouhai_bot.handlers.registry import (
 
 EXPECTED_COMMANDS = {
     "submit", "clarify", "review", "newproblem", "problem", "tag",
-    "scoreboard", "status", "sync", "clear", "feedback", "help", "range",
+    "scoreboard", "status", "sync", "clear", "help", "range",
 }
 
 EXPECTED_ALIASES = {
@@ -27,7 +27,6 @@ EXPECTED_ALIASES = {
     "rv": "review",
     "np": "newproblem",
     "pb": "problem",
-    "fb": "feedback",
 }
 
 # Cooldowns as declared in each cmd module's register().
@@ -42,7 +41,6 @@ EXPECTED_COOLDOWNS = {
     "status": 0,
     "sync": 3,
     "clear": 3,
-    "feedback": 3,
     "help": 0,
     "range": 10,
 }
@@ -58,14 +56,14 @@ def test_discover_registers_exact_command_set():
     cmds = all_commands()
     names = {c.name for c in cmds}
     assert names == EXPECTED_COMMANDS
-    assert len(cmds) == 13
+    assert len(cmds) == 12
 
 
 def test_discover_is_idempotent():
     discover_commands()
     discover_commands()
     cmds = all_commands()
-    assert len(cmds) == 13
+    assert len(cmds) == 12
     assert {c.name for c in cmds} == EXPECTED_COMMANDS
 
 
@@ -96,7 +94,7 @@ def test_aliases_resolve_to_canonical_definitions():
         assert cmd.trigger == alias
         # Alias-only interface: the canonical full name is NOT a usable trigger.
         assert get(canonical) is None, f"/{canonical} should not be a trigger"
-    # Exactly the six approved aliases exist beyond the alias-less command names.
+    # Exactly the five approved aliases exist beyond the alias-less command names.
     alias_keys = set(registry._registry) - EXPECTED_COMMANDS
     assert alias_keys == set(EXPECTED_ALIASES)
 
@@ -116,7 +114,8 @@ def test_removed_commands_and_old_aliases_absent():
     for name in (
         "setproblem", "sp",       # private judge removed
         "testcd",                 # starred/CD removed
-        "bad",                    # renamed to /feedback
+        "feedback", "fb",         # feedback removed
+        "bad",                    # legacy feedback name
         "sb", "提交", "新题", "排名",  # legacy aliases never supported
     ):
         assert get(name) is None, f"/{name} should not be registered"

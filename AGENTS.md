@@ -56,7 +56,7 @@ Transport: official/ (tokens/rest/gateway/sender/budget/media/keyboard)
   `BEGIN IMMEDIATE`. One shared connection guarded by a connection-wide `asyncio.Lock` —
   every `execute/fetch_*/transaction` serialized. Repos `db/repos/*.py`; `Database`
   `db/database.py` (`get_database()`/`set_database()`). Tables: meta/users/groups/problems/
-  editorials/group_posts/submissions/group_solves/bad_reports/last_interaction/reply_budget/
+  editorials/group_posts/submissions/group_solves/reply_budget/
   prefetch_slot/group_used/message_refs/legacy_migration_map/group_order_floor.
 - **Transport (D4)**: `official/OfficialSender` (send_group_text/markdown/at/media/
   image_bytes/image_url, react, recall). No OneBot segments. Content mapping:
@@ -67,7 +67,7 @@ Transport: official/ (tokens/rest/gateway/sender/budget/media/keyboard)
     Playwright screenshot of a mobile-QQ forward-card HTML replica) as base64 media
     (`msg_type=7`). `msg_type=8` 图文卡片 exists but unused. **Problem card** (`/np`+`/pb`)
     is the exception: ONE markdown message, fixed-height thumbnail + buttons same bubble.
-  - confirmations (👀 ack / 👌 clear+feedback+sync / 🙅 offtopic / 🧐 second-judge) → tiny
+  - confirmations (👀 ack / 👌 clear+sync / 🙅 offtopic / 🧐 second-judge) → tiny
     emoji that **@s the triggering user** (`sender.react(..., user_openid=…)`; no user →
     plain emoji). 🧐 has no other text. Button-callback `/clear`
     (`PendingRequest.from_callback`) sends no 👌 (QQ shows "操作成功" toast); typed keeps 👌.
@@ -153,8 +153,8 @@ Transport: official/ (tokens/rest/gateway/sender/budget/media/keyboard)
   `registry.discover_commands()` scans via `pkgutil.iter_modules`. Handlers take one `Ctx`.
   **Alias-only**: an aliased command registers ONLY its short alias as a usable trigger; the
   full name is internal identity (dispatch rewrites alias→canonical before parsing) and is
-  NOT accepted. Six aliases: `/sbm`→submit, `/clrf`→clarify, `/rv`→review, `/np`→newproblem,
-  `/pb`→problem, `/fb`→feedback. Alias-less (tag/scoreboard/status/sync/clear/range/help)
+  NOT accepted. Five aliases: `/sbm`→submit, `/clrf`→clarify, `/rv`→review, `/np`→newproblem,
+  `/pb`→problem. Alias-less (tag/scoreboard/status/sync/clear/range/help)
   register their own name. `CommandDef.trigger` = alias[0] if aliased else name. New commands
   `aliases=[]` unless approved. User-facing hints use the public trigger, never full name.
 - **Ctx (D8)**: `handlers/context.py` `Ctx(group_openid, user_openid, message_id, raw_text,
@@ -320,7 +320,6 @@ name in parentheses is internal, not usable); alias-less use own name. Table = c
 | `/status` | stubs.py | Lists ALL in-flight requests plaintext `🔴 …@昵称 的 submit、…` (admission order + active np); idle → 🟢 |
 | `/sync` | sync.py | Cross-group pull user×current-pid; exact dedup; tagged synced; correct→score |
 | `/clear` | clear.py | Clear caller's current-problem history; 👌 (skip button callback); watermark; args→usage hint |
-| `/feedback` (`/fb`) | feedback.py | Mark latest DELIVERED reply (last_interaction cache only); verbatim snapshot→bad_reports; 👌 |
 | `/help` | help.py | Auto from registry; themed sections (📚/✍️/🔧) one bubble each, Markdown bullets + bold trigger + muted "short for X"; image card |
 | `/range` | range.py | Per-group rating range (smart parsing) |
 
@@ -379,12 +378,6 @@ command, user_openid}), `has_active_problem_request`, `get_newproblem_status`.
   group hidden). Imported correct + G unsolved → `record_solve(source="synced")`; G solved →
   "只同步记录，不再加分". Idempotent; empty source abort; active same-user/problem reject.
   History image card; 👌.
-- **`/feedback`**: scope-local, crosses problem switches, survives `/clear`;
-  `last_interaction` cache (DB) ONLY source. Markable = `REPLIED_RESULTS`
-  (correct/incorrect/clarify/review/timeout/service_unavailable/no_statement);
-  pending/superseded unmarkable. Verbatim snapshot (tags kept) → `bad_reports`. 👌; repeats
-  append. Corrupt bad_reports → raise (never reset); corrupt last_interaction → warn+None.
-  Classification `shared.record_kind`.
 - **`/newproblem`**: post lock; busy → reminder not queued. Cooldown starts after delivery
   (fallback `posted_at`). Claims READY slot (or awaits cold build); previous-problem reveal;
   image card (summary + inline figure passage + samples + optional notes + snake); commits
@@ -445,14 +438,13 @@ return**), sleep 2s, markdown `<qqbot-at-everyone/>` + lines. @all needs admin +
    (read-back path). Long-image primary; don't chunk for unproven limit. One content type per
    request (0/2/7 exclusive).
 5. **Offtopic = model output** (`reaction="123"`), not local substring blacklists.
-6. **Save-before-deliver** (clarify/review/submit) for /feedback consistency.
+6. **Save-before-deliver** (clarify/review/submit) so a delivered reply is always persisted.
 7. **Editorial first AC only, two messages**: congrats markdown @winner; editorial separate
    background image. Never bundle; never await translation in finalize. Review English
    (+code); card Chinese without code.
 8. **High-rating caution**: card rating >2800 → short separate warning (hard, bot may be
    wrong, check official editorial).
-9. **DB single connection → connection-wide lock**; bad_reports corrupt → raise (never
-   reset); last_interaction corrupt → warn+default.
+9. **DB single connection → connection-wide lock**.
 10. **Every message text matters** — wording deliberate, preserve intent. Nickname fallback
     `openid[:8]`, never "群友".
 
@@ -467,7 +459,7 @@ uv run python -m pytest tests/ -v
 cooldowns/message-dedup. Handler tests inject fake runtime
 (`set_runtime(Runtime(db, OfficialSender(FakeRest(), ReplyBudget(db)), browser=None))`) +
 monkeypatch LLM. Dispatch events default to @bot mention. Covers db repos, transport,
-render, dispatch/registry, coordinator/commands, sync, feedback, cards, model tags, config,
+render, dispatch/registry, coordinator/commands, sync, cards, model tags, config,
 main lifecycle, worker, prefetch/preparation, editorial followup/tutorials, scheduler,
 shared, keyboard, legacy_migration.
 

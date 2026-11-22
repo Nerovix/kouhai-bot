@@ -738,22 +738,6 @@ def remember_problem_rating(group_id: int, pid: str, rating) -> None:
     save_problem_ratings(group_id, ratings)
 
 
-# ── /feedback reports ────────────────────────────────────────────────
-
-# Results whose live message was delivered to the user: real LLM answers (an
-# incorrect verdict with an empty reply fell back to the reason live) AND
-# failure notices (timeout / service_unavailable / no_statement all
-# delivered a message before the record was saved).
-# Only pending and superseded never delivered anything. Shared by /feedback
-# targeting and the last-interaction cache hook in submit.py.
-REPLIED_RESULTS = {
-    "correct", "incorrect", "clarify", "review",
-    "timeout", "service_unavailable", "no_statement",
-}
-
-BAD_REPORTS_FORMAT_VERSION = 1
-
-
 def atomic_write_json(path: Path | str, payload: dict) -> None:
     """Atomically replace `path` with `payload`.
 
@@ -798,115 +782,6 @@ def atomic_write_json(path: Path | str, payload: dict) -> None:
             except FileNotFoundError:
                 pass
         raise
-
-
-def _bad_reports_file(group_id: int) -> Path:
-    cfg = get_config()
-    return Path(cfg.data_dir) / "groups" / str(group_id) / "bad_reports.json"
-
-
-def _empty_bad_reports() -> dict:
-    return {"version": BAD_REPORTS_FORMAT_VERSION, "reports": []}
-
-
-def load_bad_reports_at(path: Path) -> dict:
-    """Load a bad-reports store; corrupt files raise instead of resetting.
-
-    A silent reset would make the next append destroy the whole report
-    history, so failures must surface to the caller.
-    """
-    if not path.exists():
-        return _empty_bad_reports()
-    try:
-        with path.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        logger.warning("failed to load bad reports at %s: %s", path, e)
-        raise ValueError(f"unreadable bad reports file: {path}") from e
-    if not isinstance(data, dict):
-        logger.warning("bad reports at %s have unexpected shape", path)
-        raise ValueError(f"malformed bad reports file: {path}")
-    reports = data.get("reports")
-    if reports is None:
-        # dict without the key (e.g. operator-created {}): tolerated, the
-        # next append rewrites the file in the proper shape.
-        data["reports"] = []
-    elif not isinstance(reports, list):
-        logger.warning("bad reports at %s have non-list reports", path)
-        raise ValueError(f"malformed bad reports file: {path}")
-    return data
-
-
-def append_bad_report_at(path: Path, report: dict) -> int:
-    """Append one report (assigning the next in-file id) and write atomically."""
-    data = load_bad_reports_at(path)
-    reports = data.setdefault("reports", [])
-    highest = 0
-    for item in reports:
-        if not isinstance(item, dict):
-            continue
-        try:
-            candidate = int(item.get("id", 0))
-        except (TypeError, ValueError):
-            continue
-        highest = max(highest, candidate)
-    entry = dict(report)
-    entry["id"] = highest + 1
-    reports.append(entry)
-    atomic_write_json(path, data)
-    return entry["id"]
-
-
-def load_bad_reports(group_id: int) -> dict:
-    return load_bad_reports_at(_bad_reports_file(group_id))
-
-
-def append_bad_report(group_id: int, report: dict) -> int:
-    return append_bad_report_at(_bad_reports_file(group_id), report)
-
-
-# ── last-interaction cache (/feedback targeting across problems and /clear) ────
-
-
-def _last_interaction_file(group_id: int) -> Path:
-    cfg = get_config()
-    return Path(cfg.data_dir) / "groups" / str(group_id) / "last_interaction.json"
-
-
-def load_group_last_interaction(group_id: int, user_id: int) -> dict | None:
-    """Latest delivered interaction record of one user in the group scope.
-
-    Unlike bad_reports this is a cache: a corrupt/missing file logs a warning
-    and returns None, and targeting never falls back to scanning stored history.
-    """
-    path = _last_interaction_file(group_id)
-    if not path.exists():
-        return None
-    try:
-        with path.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        logger.warning("failed to load last interaction at %s: %s", path, e)
-        return None
-    entry = data.get(str(user_id)) if isinstance(data, dict) else None
-    return entry if isinstance(entry, dict) and isinstance(entry.get("record"), dict) else None
-
-
-def remember_group_last_interaction(group_id: int, user_id: int, record: dict) -> None:
-    """Record one user's latest delivered interaction (called under the group
-    coordinator lock from _save_context_record — a single writer per group)."""
-    path = _last_interaction_file(group_id)
-    data: dict = {}
-    if path.exists():
-        try:
-            with path.open(encoding="utf-8") as f:
-                loaded = json.load(f)
-            if isinstance(loaded, dict):
-                data = loaded
-        except Exception as e:
-            logger.warning("failed to load last interaction at %s; resetting: %s", path, e)
-    data[str(user_id)] = {"record": dict(record)}
-    atomic_write_json(path, data)
 
 
 def _problem_id_from_problem(problem: dict) -> str:
@@ -1057,7 +932,7 @@ def record_kind(record: dict) -> str:
     Explicit "type" wins; legacy records without it fall back to "result"
     (clarify/review verbatim, correct/incorrect → submit). "" when the record
     is none of the three interaction kinds. Single source of truth for
-    /feedback targeting and _build_review_history — keep them from drifting.
+    _build_review_history and history rendering — keep them from drifting.
     """
     explicit = record.get("type", "")
     if explicit in {"submit", "clarify", "review"}:

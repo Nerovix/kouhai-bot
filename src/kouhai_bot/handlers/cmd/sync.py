@@ -22,8 +22,7 @@ from ..context import Ctx
 from .. import state
 from ..cards import send_history_card
 from ..shared import append_model_tag, format_points
-from ...db.repos import feedback, posts, submissions
-from ...db.repos.submissions import REPLIED_RESULTS
+from ...db.repos import posts, submissions
 from ...editorial_followup import schedule_post_solve_editorial_followup
 from .submit import has_active_problem_request, run_group_state_update
 
@@ -126,11 +125,6 @@ async def handle(ctx: Ctx) -> None:
                     cheer = append_model_tag(
                         f"{head}\n\n{reveal}", str(correct.get("model_tag", "") or ""),
                     )
-
-        replied = [r for r in imported if r.get("result") in REPLIED_RESULTS]
-        if replied:
-            latest = max(replied, key=lambda r: str(r.get("timestamp", "")))
-            await feedback.set_last_interaction(db, ctx.group_openid, ctx.user_openid, latest)
 
         return imported, cheer, scored
 

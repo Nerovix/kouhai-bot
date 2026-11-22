@@ -19,7 +19,7 @@ from ...render.html import escape
 _SECTIONS: list[tuple[str, list[str]]] = [
     ("📚 刷题", ["newproblem", "problem", "tag", "range", "scoreboard"]),
     ("✍️ 判题 · 讨论", ["submit", "clarify", "review", "clear"]),
-    ("🔧 其他", ["feedback", "sync", "status", "help"]),
+    ("🔧 其他", ["sync", "status", "help"]),
 ]
 
 

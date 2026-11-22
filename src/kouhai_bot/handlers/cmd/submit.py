@@ -38,8 +38,7 @@ from ..shared import (
     strip_model_tags,
 )
 from ...config import get_config
-from ...db.repos import feedback, posts, submissions
-from ...db.repos.submissions import REPLIED_RESULTS
+from ...db.repos import posts, submissions
 from ...editorial_followup import schedule_post_solve_editorial_followup
 from ...official.keyboard import (
     clarify_action_keyboard,
@@ -452,10 +451,6 @@ class GroupCoordinator:
             if self.clear_watermarks.get(key, 0) >= req.seq:
                 return False
             await submissions.save_submission(get_runtime().db, record)
-            if record.get("result") in REPLIED_RESULTS:
-                await feedback.set_last_interaction(
-                    get_runtime().db, self.group_openid, req.user_openid, record
-                )
             return True
 
     async def _remove_context_record(self, req: PendingRequest) -> None:

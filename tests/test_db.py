@@ -7,7 +7,7 @@ import json
 import pytest
 
 from kouhai_bot.db import Database
-from kouhai_bot.db.repos import feedback, posts, problems, runtime, submissions, users
+from kouhai_bot.db.repos import posts, problems, runtime, submissions, users
 
 
 async def test_schema_version(db):
@@ -168,32 +168,6 @@ async def test_cross_group_pull_and_materialize(db):
     assert view[0]["synced"] is True
     assert view[0]["source_group_openid"] == "GA"
     assert view[0]["request_id"] is None
-
-
-async def test_bad_reports_append_and_corrupt_raises(db):
-    rid = await feedback.append_bad_report(
-        db, group_openid="G1", user_openid="U1", note="错了",
-        cmd_message_id="m1", target_pid="A", target_record={"reply": "r"},
-    )
-    assert rid == 1
-    reports = await feedback.load_bad_reports(db, "G1")
-    assert len(reports) == 1
-    assert reports[0]["target"]["record"]["reply"] == "r"
-    # corrupt the stored snapshot → load must raise, not reset
-    await db.execute(
-        "UPDATE bad_reports SET target_record_json='{bad' WHERE id=?", (rid,)
-    )
-    with pytest.raises(json.JSONDecodeError):
-        await feedback.load_bad_reports(db, "G1")
-
-
-async def test_last_interaction_cache_corrupt_is_empty(db):
-    await feedback.set_last_interaction(db, "G1", "U1", {"reply": "hi"})
-    assert (await feedback.get_last_interaction(db, "G1", "U1"))["reply"] == "hi"
-    await db.execute(
-        "UPDATE last_interaction SET record_json='{bad' WHERE user_openid='U1'"
-    )
-    assert await feedback.get_last_interaction(db, "G1", "U1") is None
 
 
 async def test_reply_budget_incr(db):

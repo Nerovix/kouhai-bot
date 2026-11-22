@@ -137,32 +137,6 @@ CREATE INDEX IF NOT EXISTS idx_group_solves_group_order
 CREATE INDEX IF NOT EXISTS idx_group_solves_group_user
     ON group_solves (group_openid, user_openid);
 
--- /feedback reports (append-only; corrupt store must raise, not reset).
-CREATE TABLE IF NOT EXISTS bad_reports (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    scope         TEXT NOT NULL DEFAULT 'group',
-    group_openid  TEXT NOT NULL,
-    user_openid   TEXT NOT NULL,
-    reported_at   TEXT NOT NULL,
-    note          TEXT NOT NULL DEFAULT '',
-    cmd_message_id TEXT NOT NULL DEFAULT '',
-    target_pid    TEXT NOT NULL DEFAULT '',
-    target_record_json TEXT NOT NULL DEFAULT '{}',
-    created_at    TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_bad_reports_group
-    ON bad_reports (group_openid, id);
-
--- Per-user last delivered interaction (CACHE: corrupt reads as empty).
-CREATE TABLE IF NOT EXISTS last_interaction (
-    scope         TEXT NOT NULL DEFAULT 'group',
-    group_openid  TEXT NOT NULL,
-    user_openid   TEXT NOT NULL,
-    record_json   TEXT NOT NULL DEFAULT '{}',
-    updated_at    TEXT NOT NULL,
-    PRIMARY KEY (scope, group_openid, user_openid)
-);
-
 -- Active-message daily quota per group (passive window is in-memory).
 CREATE TABLE IF NOT EXISTS reply_budget (
     group_openid  TEXT NOT NULL,

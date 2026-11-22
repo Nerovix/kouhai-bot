@@ -3,8 +3,7 @@
 Single-process bot → one shared connection, WAL mode. Explicit
 ``BEGIN IMMEDIATE`` transactions cover the read-modify-write sections that
 the legacy code protected with the per-group coordinator lock plus
-``atomic_write_json`` (scoreboard, bad_reports append, last_interaction,
-prefetch slot claim).
+``atomic_write_json`` (scoreboard, prefetch slot claim).
 """
 
 from __future__ import annotations
